@@ -1,0 +1,8 @@
+node_modules/
+packages/*/dist/
+packages/cli/release/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.claude/settings.local.json
+docs/open-project/

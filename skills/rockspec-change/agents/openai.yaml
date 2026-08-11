@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec 变更"
+  short_description: "路由并编排完整的 RockSpec 受治理研发变更流程"
+  default_prompt: "使用 $rockspec-change 路由并交付这个完整的仓库变更。"

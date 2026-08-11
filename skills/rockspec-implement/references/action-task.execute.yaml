@@ -1,0 +1,53 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "task.execute"
+kind: "engine_action"
+profiles: ["lite", "standard", "strict"]
+summary: "通过测试实施选定范围，并产出 Task 级 Commit 和证据。"
+executor:
+  mode:
+    lite: "inline"
+    standard: "subagent"
+    strict: "subagent"
+  role_prompt: "references/role-task-implementer.md"
+  fresh_per_task: true
+  may_delegate: false
+  model_policy:
+    applies_to_profiles: ["standard", "strict"]
+    strategy: "auto"
+    default: "balanced"
+    minimum:
+      standard: "fast"
+      strict: "balanced"
+    fast_when_all:
+      - "Task 只影响一个模块和一至两个文件。"
+      - "Task 的接口、验收标准、测试步骤和验证命令完整。"
+      - "Task 不涉及高风险领域或复杂调试。"
+    deep_when_any:
+      - "Task 涉及安全、迁移、并发、数据一致性、公共 API 或不可逆操作。"
+      - "Task 需要复杂调试、跨多个模块协调或广泛理解代码库。"
+    record_selection: true
+reads:
+  artifacts: ["Engine 冻结的 runtime/tasks/<task-id>/brief.md", "已批准的相关 Specs、Design 和 Prototype 引用"]
+  repository: ["Task Base Commit 上的必要代码", "已完成依赖的接口"]
+writes:
+  artifacts: ["runtime/tasks/<task-id>/implementer-report.md", "evidence/logs/check-*.log", "Task 验证证据"]
+  repository: ["仅当前 Task allowed_paths 允许的产品文件"]
+preconditions:
+  - "Lite 范围仍符合准入，或实施审批仍有效。"
+  - "Standard/Strict 模式下，Engine 已登记 execution ID 并选定一个 Ready Task。"
+completion:
+  required:
+    - "实施报告绑定 Implementer execution ID、Task Base Commit、冻结 Brief 路径和 Hash。"
+    - "测试证明公共行为，且 rockspec check run 产生绑定当前 Commit 的 executed 证据。"
+    - "产品 Diff 未超出 allowed_paths，且不含无关改动。"
+    - "Task Base..HEAD 恰好包含一个最终 Commit，且提交信息包含 [Task ID]。"
+outcomes:
+  pass: ["task.review", "change.verify"]
+  changes_required: ["task.execute"]
+  blocked: ["change.promote", "plan.create", "task.execute"]
+invariants:
+  - "Implementer 不能写入工作流状态或声明 Gate 已通过。"
+  - "Gate 通过前，Review 修复最多两轮，并 amend 同一 Task Commit。"
+  - "Review 前必须生成固定 Review Package；Subject 改变后旧 Review 失效。"

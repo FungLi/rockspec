@@ -1,0 +1,21 @@
+schema_version: 1
+change_id: "{{change_id}}"
+status: "{{READY_FAILED_BLOCKED_KEPT_RELEASED}}"
+workspace:
+  mode: "{{current_or_worktree}}"
+  provider: "{{current_host_native_git_or_existing}}"
+  branch: "{{branch_or_detached}}"
+  target_ref: "{{target_ref}}"
+  relative_path: "{{project_relative_path_or_external}}"
+  base_commit: "{{base_commit}}"
+setup:
+  command: "{{command_or_skipped}}"
+  exit_code: "{{exit_code_or_null}}"
+baseline:
+  command: "{{command_or_skipped}}"
+  exit_code: "{{exit_code_or_null}}"
+  result: "{{PASSED_FAILED_SKIPPED}}"
+cleanup:
+  disposition: "{{keep_push_local_merge_or_none}}"
+  worktree_removed: "{{true_or_false}}"
+next_skill: "{{rockspec_triage_rockspec_change_rockspec_finish_or_blocked}}"

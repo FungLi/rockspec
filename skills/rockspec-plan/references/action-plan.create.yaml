@@ -1,0 +1,38 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "plan.create"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "根据已批准的 Requirements 和 Design 创建可执行 Task DAG。"
+executor:
+  mode: "inline"
+  role: "planner"
+reads:
+  artifacts: ["已批准的 specs/**/*.md", "已批准的 design.md", "已批准的 prototype/**", "已有 plan.md、tasks.md 和 tasks/T-*.md（如有）"]
+  repository: ["当前代码边界", "测试命令", "交付约束"]
+writes:
+  artifacts: ["plan.md", "tasks.md", "tasks/T-*.md"]
+preconditions:
+  - "当前 Design 以及适用时的 Prototype Hash 审批仍有效。"
+completion:
+  required:
+    - "Plan 在拆 Task 前列出准确的文件职责图，并确认不存在隐藏的跨子系统设计工作。"
+    - "Task 图无环、有序，并覆盖每个 Requirement/Scenario。"
+    - "每个 Task 都可在新上下文中独立实施和评审。"
+    - "plan.md 使用合法 Frontmatter 显式列出 verification_only_scenario_ids；未列入的每个 Scenario 都由 Task 覆盖。"
+    - "每个 Task 都包含合法 YAML Frontmatter，以及准确文件范围、非目标、ID、验收标准、环境前置条件、TDD 步骤、验证命令及预期失败和成功结果。"
+    - "每个 Task 的 acceptance_criteria 非空；consumes 只能引用直接或传递依赖唯一 produces 的完全相同契约。"
+    - "每个 Task 的 allowed_paths 逐项列出可能创建、修改或测试的准确项目相对产品路径，并与正文文件范围一致。"
+    - "跨 Task 依赖使用 Consumes/Produces 固定接口名称、签名和类型。"
+    - "每个 UI Task 都引用已批准的 Design System 和 Prototype。"
+    - "完整计划不含占位表达，并已检查覆盖、文件职责、DAG 和跨 Task 接口一致性。"
+outcomes:
+  pass: ["readiness.review"]
+  blocked: ["design.technical", "plan.create"]
+invariants:
+  - "Plan 中的事实必须匹配当前仓库；避免复制已过期的代码上下文。"
+  - "Task 以可独立 Commit 和 Review 的交付价值划分，不强制按固定分钟数拆分。"
+  - "Plan 不得用大段预写实现替代 Task 的接口、行为和验证契约。"
+  - "allowed_paths 不得包含绝对路径、父目录跳转、反斜杠或 .rockspec/**。"
+  - "Engine 是依赖目标、DAG、R/S 引用、覆盖和接口契约一致性的权威校验者。"

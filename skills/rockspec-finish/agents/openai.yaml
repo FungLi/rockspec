@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec 收尾"
+  short_description: "验证、处置并归档已经完成开发和评审的变更"
+  default_prompt: "使用 $rockspec-finish 验证并收尾这个已完成的变更。"

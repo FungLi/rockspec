@@ -1,0 +1,26 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "change.promote"
+kind: "engine_action"
+profiles: ["lite", "standard"]
+summary: "风险或范围超出当前 Profile 时升级 Change。"
+executor:
+  mode: "inline"
+  role: "scenario-orchestrator"
+reads:
+  artifacts: ["brief.md", "evidence/verification.yaml"]
+  repository: ["当前 Diff", "新发现的依赖和行为"]
+writes:
+  artifacts: ["brief.md"]
+preconditions:
+  - "升级方向必须是 lite -> standard 或 standard -> strict。"
+completion:
+  required:
+    - "记录升级原因、新发现范围、保留工作和新增必需 Gate。"
+outcomes:
+  pass: ["requirements.clarify", "requirements.review"]
+  blocked: ["change.promote"]
+invariants:
+  - "不得丢弃已有产物或证据。"
+  - "不得降低 Profile。"

@@ -1,0 +1,254 @@
+schema_version: 1
+purpose: "记录 RockSpec 对外部设计机制的来源、清洗决策、独立实现落点和验证方式。"
+runtime_dependency: false
+release_packaging:
+  include_matrix: true
+  include_research_sources: false
+  research_source_root: "docs/open-project/"
+  note: "docs/open-project 仅是当前研究输入，不安装到用户项目，也不进入发布包。"
+
+references:
+  - id: REF-OS-001
+    source:
+      project: OpenSpec
+      repository: "https://github.com/Fission-AI/OpenSpec"
+      version: "1.8.0"
+      commit: "d57889664cab4f2f061d236ec3ff82a5578701bb"
+      paths:
+        - "schemas/spec-driven/schema.yaml"
+        - "docs/workflows.md"
+    mechanism: "Git-native Change、Spec Delta、Artifact Graph 与 Archive"
+    decision:
+      retained:
+        - "Change 级 Markdown 产物和可追踪依赖"
+        - "ADDED/MODIFIED/REMOVED/RENAMED 语义"
+        - "验证后合并基线 Spec 并归档"
+      changed:
+        - "使用 RockSpec 自有 Schema、状态机、审批 Hash 和根级 .rockspec 目录"
+      rejected:
+        - "OpenSpec CLI、目录兼容层和运行时代码依赖"
+    rockspec_targets:
+      - "packages/protocol/src/spec.ts"
+      - "packages/engine/src/engine.ts"
+      - "skills/rockspec-requirements"
+      - "skills/rockspec-finish"
+    verification:
+      - "packages/protocol/test/hash-spec.test.ts"
+      - "packages/engine/test/engine.test.ts"
+      - "packages/cli/test/cli.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-OS-002
+    source:
+      project: OpenSpec
+      repository: "https://github.com/Fission-AI/OpenSpec"
+      version: "1.8.0"
+      commit: "d57889664cab4f2f061d236ec3ff82a5578701bb"
+      paths:
+        - "skills/openspec-explore/SKILL.md"
+        - "docs/explore.md"
+    mechanism: "不实施的开放式问题探索"
+    decision:
+      retained:
+        - "探索阶段读取现状、澄清问题空间且不修改产品行为"
+      changed:
+        - "增加业务术语、来源、主张类型、冲突和停止条件"
+        - "由用户决定是否进入 Requirements"
+      rejected:
+        - "把探索自动升级为 Change"
+    rockspec_targets:
+      - "skills/rockspec-research"
+    verification:
+      - "tests/host-assets.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-SP-001
+    source:
+      project: Superpowers
+      repository: "https://github.com/obra/superpowers"
+      version: "6.2.0"
+      commit: "44c9b2d6e889982ac18c27d05a19fefe335194e1"
+      paths:
+        - "skills/brainstorming/SKILL.md"
+        - "skills/writing-plans/SKILL.md"
+    mechanism: "先澄清和比较方案，再生成实施计划"
+    decision:
+      retained:
+        - "一次只处理一个实质歧义"
+        - "仓库探索、真实备选方案、分段确认和写后自检"
+        - "准确文件职责与可执行 Task"
+      changed:
+        - "Requirements、Design、Plan 保持 Inline"
+        - "Lite 不强制完整重流程，单一路径不虚构备选方案"
+        - "Task 按可独立交付价值而非固定分钟数切分"
+      rejected:
+        - "复制原始 Skill Prompt 或把每个步骤暴露为用户 Skill"
+    rockspec_targets:
+      - "skills/rockspec-requirements"
+      - "skills/rockspec-design"
+      - "skills/rockspec-plan"
+    verification:
+      - "tests/host-assets.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-SP-002
+    source:
+      project: Superpowers
+      repository: "https://github.com/obra/superpowers"
+      version: "6.2.0"
+      commit: "44c9b2d6e889982ac18c27d05a19fefe335194e1"
+      paths:
+        - "skills/subagent-driven-development/SKILL.md"
+        - "skills/test-driven-development/SKILL.md"
+        - "skills/verification-before-completion/SKILL.md"
+    mechanism: "Fresh Implementer、TDD、Task Review 与完成前验证"
+    decision:
+      retained:
+        - "Standard/Strict 每个 Task 使用独立 Implementer 和 Reviewer"
+        - "测试先行、修复回原 Implementer、结论前运行验证"
+      changed:
+        - "Engine 冻结 Task Brief、Review Subject、Commit 和 executed Evidence"
+        - "Task Review 合并为 Spec/Design/Standards/Tests 四轴"
+        - "修复上限为两轮，Final CR 移到 Acceptance 之后"
+      rejected:
+        - "五轮默认修复和仅依赖 Prompt 的完成声明"
+    rockspec_targets:
+      - "packages/engine/src/engine.ts"
+      - "skills/rockspec-implement"
+      - "skills/rockspec-review"
+      - "skills/rockspec-finish"
+    verification:
+      - "packages/engine/test/engine.test.ts"
+      - "packages/cli/test/cli.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-SP-003
+    source:
+      project: Superpowers
+      repository: "https://github.com/obra/superpowers"
+      version: "6.2.0"
+      commit: "44c9b2d6e889982ac18c27d05a19fefe335194e1"
+      paths:
+        - "skills/using-git-worktrees/SKILL.md"
+        - "skills/finishing-a-development-branch/SKILL.md"
+    mechanism: "隔离工作区与分支收尾"
+    decision:
+      retained:
+        - "开始实施前创建隔离 Worktree 并验证干净基线"
+        - "完成时给出明确收尾选择"
+      changed:
+        - "隔离单位固定为 Change，项目资产由 Git 继承"
+        - "工作区绑定由 Engine 持久化并拒绝跨 Worktree 续作"
+      rejected:
+        - "新 Worktree 重复初始化、自动 stash/rebase 和强制 GitHub PR"
+    rockspec_targets:
+      - "skills/rockspec-worktree"
+      - "packages/engine/src/workspace.ts"
+    verification:
+      - "packages/engine/test/engine.test.ts"
+      - "packages/engine/test/workspace-detection.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-MATT-001
+    source:
+      project: Matt Skills
+      repository: "https://github.com/mattpocock/skills"
+      version: "1.2.3"
+      commit: "84fdeffd12f2ee307994d1eb6feb48173b6e0502"
+      paths:
+        - "skills/engineering/to-spec/SKILL.md"
+        - "skills/engineering/to-tickets/SKILL.md"
+        - "skills/engineering/codebase-design/SKILL.md"
+    mechanism: "用户问题 Spec、公共 Seam、Tracer-bullet 与 Blocking Edges"
+    decision:
+      retained:
+        - "Spec 保持业务纯净，技术接口进入 Design"
+        - "按可验证的垂直价值切 Task"
+        - "用依赖边和接口契约表达 Task DAG"
+      changed:
+        - "结构化 R/S/D/T ID、acceptance_criteria、consumes 和 produces"
+        - "Engine 校验完整 DAG、生产者唯一性和传递依赖"
+      rejected:
+        - "外部 Issue Tracker 作为任务事实源"
+    rockspec_targets:
+      - "packages/protocol/src/schemas.ts"
+      - "packages/engine/src/engine.ts"
+      - "skills/rockspec-design"
+      - "skills/rockspec-plan"
+    verification:
+      - "packages/protocol/test/schemas-validators.test.ts"
+      - "packages/engine/test/engine.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-MATT-002
+    source:
+      project: Matt Skills
+      repository: "https://github.com/mattpocock/skills"
+      version: "1.2.3"
+      commit: "84fdeffd12f2ee307994d1eb6feb48173b6e0502"
+      paths:
+        - "skills/engineering/code-review/SKILL.md"
+        - "skills/engineering/tdd/SKILL.md"
+        - "skills/engineering/diagnosing-bugs/SKILL.md"
+    mechanism: "双轴 Review、公共行为测试和可证伪调试"
+    decision:
+      retained:
+        - "同时检查需求符合性与工程质量"
+        - "优先测试公共行为，修复前建立失败反馈环"
+      changed:
+        - "Review 扩为四轴并用结构化 Finding 路由"
+        - "Debug 独立 Inline 运行，确认根因后才进入受治理修复"
+      rejected:
+        - "诊断阶段直接修改产品行为"
+    rockspec_targets:
+      - "skills/rockspec-review"
+      - "skills/rockspec-debug"
+    verification:
+      - "packages/engine/test/engine.test.ts"
+      - "tests/host-assets.test.ts"
+    implementation: independent
+    license: MIT
+    status: adopted
+
+  - id: REF-ZH-001
+    source:
+      project: "张乐 Harness Engineering 方案"
+      repository: "project-local"
+      version: "2026-08-11 review baseline"
+      commit: null
+      paths:
+        - "docs/rockspec/zhangle.md"
+    mechanism: "BA/SA/DEV/CR/TE 职责隔离、RR、独立 TE 和 TE 后 Final CR"
+    decision:
+      retained:
+        - "Requirements、Readiness、Task、Acceptance 和 Delivery 的职责隔离"
+        - "R/S/D/T 追踪、脚本退出码门禁和 TE 后 Final CR"
+      changed:
+        - "角色隐藏为内部 Prompt，用户入口改为可组合能力 Skill"
+        - "Design 覆盖使用确定性 Gate，首版不新增 Design Reviewer"
+      rejected:
+        - "独立 PM Agent 和角色名用户命令"
+    rockspec_targets:
+      - "packages/engine/src/engine.ts"
+      - "packages/engine/src/workflow.ts"
+      - "skills/rockspec-change"
+      - "skills/rockspec-acceptance"
+      - "skills/rockspec-review"
+    verification:
+      - "packages/engine/test/engine.test.ts"
+      - "tests/host-assets.test.ts"
+    implementation: independent
+    license: project-owned
+    status: adopted

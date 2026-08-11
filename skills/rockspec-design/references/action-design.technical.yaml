@@ -1,0 +1,34 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "design.technical"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "探索仓库并设计如何实施已批准的可观察行为。"
+executor:
+  mode: "inline"
+  role: "technical-designer"
+reads:
+  artifacts: ["已批准的 proposal.md", "已批准的 specs/**/*.md", "已有 design.md 和 prototype/**（如有）"]
+  repository: ["仓库规则", "相关模块", "相邻实现", "测试", "公共接缝"]
+writes:
+  artifacts: ["design.md"]
+preconditions:
+  - "当前 Spec Hash 的 Spec 审批仍有效。"
+completion:
+  required:
+    - "需求适合单个 Change；否则已先提出子 Change 的边界、关系和交付顺序。"
+    - "决策映射到 Requirement ID，并说明备选方案和取舍。"
+    - "design.md Frontmatter 逐项声明 D→R/S 映射，并覆盖每个已批准 Requirement 和 Scenario。"
+    - "每个重大技术选择比较 2 至 3 个真实方案并给出推荐；只有一个可行方案时记录排除依据。"
+    - "按风险覆盖接口、数据流、错误处理、兼容性、回滚、安全和测试接缝。"
+    - "UI 影响和原型要求已与 Triage 结果对账。"
+    - "写入后的 Design 已通过占位、矛盾、范围、歧义、需求覆盖和仓库证据自检。"
+outcomes:
+  pass: ["design.prototype"]
+  blocked: ["requirements.clarify", "design.technical"]
+requires_user_approval_on_pass_when: "prototype.required == false"
+invariants:
+  - "仓库事实必须是当前且有引用的；不得只凭聊天记忆设计。"
+  - "Engine 是 Design Frontmatter 合法性和 R/S 覆盖完整性的权威校验者。"
+  - "需要用户决策时每次只问一个问题；协作中的分段确认不得替代绑定 Hash 的 Design Approval。"

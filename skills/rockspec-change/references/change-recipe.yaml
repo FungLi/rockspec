@@ -1,0 +1,103 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "change"
+entry_skill: "rockspec-change"
+description: "由 Engine 管理状态、通过证据 Gate 控制的风险自适应变更交付。"
+state_owner: "engine"
+capability_skills:
+  change.triage: "rockspec-triage"
+  change.promote: "rockspec-triage"
+  requirements.clarify: "rockspec-requirements"
+  requirements.review: "rockspec-requirements"
+  design.technical: "rockspec-design"
+  design.prototype: "rockspec-prototype"
+  plan.create: "rockspec-plan"
+  readiness.review: "rockspec-plan"
+  task.execute: "rockspec-implement"
+  task.review: "rockspec-review"
+  acceptance.validate: "rockspec-acceptance"
+  delivery.review: "rockspec-review"
+  change.verify: "rockspec-finish"
+  change.archive: "rockspec-finish"
+invariants:
+  - "调用最新 Engine recommended_next.entry_skill 指定的原子 Skill。"
+  - "只有 Engine 可以写入工作流状态、事件、审批和 Hash。"
+  - "Worker Agent 不得委派；Reviewer 保持只读。"
+  - "Acceptance 必须先于 delivery.review 完成。"
+  - "每个已完成 Task 只拥有一个最终 Commit。"
+  - "一个 Active Change 只绑定一个工作区；所有 Worker 和 Reviewer 使用该工作区 cwd。"
+workspace:
+  skill: "rockspec-worktree"
+  unit: "change"
+  before_new: true
+  user_runs_new: false
+  task_parallelism: false
+profiles:
+  lite:
+    reviewers: 0
+    actions:
+      - "change.triage"
+      - "task.execute"
+      - "change.verify"
+      - "change.archive"
+    notes:
+      - "task.execute 在当前能力 Agent 中内联执行，不创建 Task Subagent。"
+      - "Lite 准入失效时立即升级为 Standard。"
+  standard:
+    reviewers: 1
+    actions:
+      - "change.triage"
+      - "requirements.clarify"
+      - "requirements.review"
+      - "design.technical"
+      - "design.prototype"
+      - "plan.create"
+      - "readiness.review"
+      - "task.execute"
+      - "task.review"
+      - "acceptance.validate"
+      - "delivery.review"
+      - "change.verify"
+      - "change.archive"
+    conditional:
+      - action: "design.prototype"
+        when: "prototype.required == true"
+      - actions: ["task.execute", "task.review"]
+        repeat: "对每个 Ready Task 重复，包括 Remediation Task"
+    approval_gates:
+      - id: "spec"
+        after: "requirements.review"
+        after_actions: ["requirements.review"]
+        operation: "rockspec approve spec"
+      - id: "design"
+        after: "需要原型时在 design.prototype 后，否则在 design.technical 后"
+        after_actions: ["design.technical", "design.prototype"]
+        operation: "rockspec approve design"
+      - id: "implementation"
+        after: "readiness.review"
+        after_actions: ["readiness.review"]
+        operation: "rockspec approve implementation"
+  strict:
+    extends: "standard"
+    reviewers: 2
+    independent_review_actions:
+      - "requirements.review"
+      - "readiness.review"
+      - "task.review"
+      - "delivery.review"
+    notes:
+      - "保留两份报告，由 Engine 聚合结论和 Finding。"
+      - "运行完整回归证据并限制 Task 并行实施。"
+recovery:
+  max_task_repair_rounds: 2
+  task_review_failure: "task.execute"
+  acceptance_implementation_failure: "创建 Remediation Task 后执行 task.execute"
+  stale_approval: "返回负责 Action 并请求重新审批"
+  missing_capability: "BLOCKED"
+standalone:
+  artifact_root: ".rockspec/workbench/<capability>/<slug>/"
+  receipt: "receipt.yaml"
+  invariants:
+    - "Standalone 结果不得声称已获得治理审批或完成完整 Change。"
+    - "原子 Skill 可以从现有外部产物开始，无需重放之前的能力。"

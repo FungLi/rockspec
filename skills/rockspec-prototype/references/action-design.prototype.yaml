@@ -1,0 +1,40 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "design.prototype"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "创建 UI/UX 协议产物，并将其影响对账进 Technical Design。"
+executor:
+  mode: "capability"
+  capability: "ui.prototype"
+  default_provider: "ui-ux-pro-max"
+  distribution: "installed"
+  may_change_state: false
+reads:
+  artifacts: ["已批准的 proposal.md", "已批准的 specs/**/*.md", "design.md"]
+  repository: ["现有设计系统", "UI 技术栈", "组件约定", "素材"]
+writes:
+  artifacts:
+    - "prototype/brief.md"
+    - "prototype/design-system.md"
+    - "prototype/prototype.md"
+    - "prototype/assets/**"
+    - "design.md"
+preconditions:
+  - "prototype.required 为 true。"
+  - "Engine Resolver 报告已配置的 Provider 可用。"
+  - "宿主在 status 和 completion 调用中通过全局 --provider 或 ROCKSPEC_AVAILABLE_PROVIDERS 声明已安装 Provider。"
+completion:
+  required:
+    - "所有 UI Requirement 都映射到可检查的页面、状态和交互。"
+    - "明确响应式和可访问性行为。"
+    - "技术影响已对账进 design.md。"
+outcomes:
+  pass: []
+  changes_required: ["requirements.clarify", "design.technical"]
+  blocked: ["design.prototype"]
+requires_user_approval_on_pass: "design"
+invariants:
+  - "Provider 输出不能迁移状态或批准 Design。"
+  - "不得复制或再分发 Provider Skill。"

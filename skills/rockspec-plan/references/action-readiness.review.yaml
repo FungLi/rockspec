@@ -1,0 +1,41 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "readiness.review"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "独立验证 Design、Prototype、Plan、Task 和前置条件是否已可实施。"
+executor:
+  mode: "subagent"
+  role_prompt: "references/role-readiness-reviewer.md"
+  count:
+    standard: 1
+    strict: 2
+  read_only: true
+  may_delegate: false
+  model_policy:
+    strategy: "auto"
+    default: "balanced"
+    minimum: "balanced"
+    deep_when_any:
+      - "Profile 为 Strict。"
+      - "Design 涉及架构边界、安全、迁移、并发、数据一致性或公共契约。"
+      - "Plan 包含复杂 Task DAG、多个模块或大量跨 Task 接口。"
+    record_selection: true
+reads:
+  artifacts: ["已批准的 specs/**/*.md", "design.md", "prototype/**", "plan.md", "tasks.md", "tasks/T-*.md"]
+  repository: ["仓库规则", "已声明接口", "环境和测试事实"]
+writes:
+  artifacts: ["reviews/readiness-review*.md"]
+completion:
+  required:
+    - "已评审覆盖关系、决策、DAG、Task 粒度、风险、回滚、测试和前置条件。"
+    - "Review Hash 与当前 Design、Prototype、Plan 和 Tasks 一致。"
+    - "Strict 聚合保留两份原始报告和全部 Finding。"
+outcomes:
+  pass: []
+  changes_required: ["design.technical", "plan.create"]
+  blocked: ["readiness.review"]
+requires_user_approval_on_pass: "implementation"
+invariants:
+  - "Reviewer 不得编辑被评审产物或替代用户审批。"

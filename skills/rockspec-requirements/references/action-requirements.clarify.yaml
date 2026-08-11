@@ -1,0 +1,31 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "requirements.clarify"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "将业务意图转换为 Proposal 和可测试的行为 Spec Delta。"
+executor:
+  mode: "inline"
+  role: "requirements-author"
+reads:
+  artifacts: ["brief.md", "已有 proposal.md 和 specs/**/*.md（如有）"]
+  repository: ["基线 Specs", "可观察的当前行为", "领域术语"]
+writes:
+  artifacts: ["proposal.md", "specs/<capability>/spec.md"]
+preconditions:
+  - "Change 已有边界明确的 Brief，且 Profile 为 Standard 或 Strict。"
+completion:
+  required:
+    - "明确目标、范围、非目标、假设和开放问题。"
+    - "实质影响范围、外部行为、兼容性或验收标准的歧义已解决，或明确标记为阻塞。"
+    - "次要细节采用保守假设，并记录依据和假设错误时的影响。"
+    - "每个 Requirement 至少包含一个 GIVEN/WHEN/THEN Scenario。"
+    - "ADDED/MODIFIED/REMOVED/RENAMED 及 Requirement/Scenario/MUST 使用规范英文。"
+outcomes:
+  pass: ["requirements.review"]
+  blocked: ["requirements.clarify"]
+invariants:
+  - "业务 Spec 中不得写入框架、类、文件、函数或数据库实施细节。"
+  - "每次创建或修订需求前必须从磁盘重读来源、基线 Spec 和已有需求产物，不得依赖聊天记忆。"
+  - "不得用假设绕过会实质改变结果的用户决策。"
