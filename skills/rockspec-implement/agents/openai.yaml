@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec 实施"
+  short_description: "按任务边界实施已批准计划并提供聚焦验证证据"
+  default_prompt: "使用 $rockspec-implement 执行这个变更中已批准的任务。"

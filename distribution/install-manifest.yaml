@@ -1,0 +1,32 @@
+schema_version: 1
+rockspec:
+  version: 0.1.0
+  runtime: distribution/runtime/rockspec.mjs
+  skills:
+    - rockspec-acceptance
+    - rockspec-change
+    - rockspec-debug
+    - rockspec-design
+    - rockspec-finish
+    - rockspec-implement
+    - rockspec-plan
+    - rockspec-prototype
+    - rockspec-requirements
+    - rockspec-research
+    - rockspec-review
+    - rockspec-triage
+    - rockspec-worktree
+capabilities:
+  ui.prototype:
+    provider: ui-ux-pro-max
+    default: true
+external_skills:
+  ui-ux-pro-max:
+    capability: ui.prototype
+    source:
+      type: local-discovery
+      candidates:
+        - .agents/skills/ui-ux-pro-max
+        - .claude/skills/ui-ux-pro-max
+    license: UNKNOWN
+    hosts: [codex, claude]

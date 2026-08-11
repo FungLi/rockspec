@@ -1,0 +1,50 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "task.review"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "从 Spec、Design、代码规范和测试质量四个方面评审固定 Task Diff。"
+executor:
+  mode: "subagent"
+  role_prompt: "references/role-task-change-reviewer.md"
+  count:
+    standard: 1
+    strict: 2
+  read_only: true
+  may_delegate: false
+  model_policy:
+    strategy: "auto"
+    default: "balanced"
+    minimum: "balanced"
+    deep_when_any:
+      - "Profile 为 Strict。"
+      - "被评审 Task 使用 Deep Tier，或 Diff 涉及安全、迁移、并发、数据一致性或公共 API。"
+      - "Diff 跨多个模块且需要复杂行为或回归判断。"
+    record_selection: true
+reads:
+  artifacts: ["runtime/reviews/task-<task-id>-*.diff", "Engine 冻结的 Task Brief", "相关已批准 Specs 和 Design", "Implementer Report", "executed Task 证据"]
+  repository: ["只通过 Review Package 读取固定 Task Diff", "仓库规则"]
+writes:
+  artifacts: ["reviews/tasks/<task-id>-review*.md"]
+preconditions:
+  - "Engine 已生成唯一 Review Package，并返回 base_commit、head_commit 和 diff_hash。"
+  - "Reviewer execution ID 已登记，且不同于 Task Implementer。"
+completion:
+  required:
+    - "对 Spec、Design、规范和测试分别给出明确结论。"
+    - "报告 YAML Frontmatter 原样绑定 Review Subject、Reviewer execution ID 和 round。"
+    - "每个 Finding 都在 Frontmatter 中包含稳定 ID、证据、严重度、类别、描述、责任域、route_to 和状态。"
+    - "非 PASS 至少有一个 Open Finding；PASS 不包含 Open Critical/Important Finding。"
+    - "修复轮报告携带上一轮全部 Findings，保持 ID 并更新状态；round 与 Engine Review Attempt 一致。"
+    - "Strict 聚合保留两份报告和全部 Finding。"
+outcomes:
+  pass: ["task.execute", "acceptance.validate"]
+  changes_required: ["task.execute"]
+  blocked: ["design.technical", "plan.create", "task.review"]
+invariants:
+  - "Reviewer 不得编辑代码、测试、Task 产物或工作流状态。"
+  - "Reviewer 必须不同于 Task Implementer。"
+  - "Review Package 是唯一 Diff 来源；Subject 变化后旧报告失效。"
+  - "修复轮次只复核 Open Finding、Fix Diff 和聚焦证据，除非修复引入新问题。"
+  - "初审加修复 Review 最多三次，对应 round 0、1、2。"

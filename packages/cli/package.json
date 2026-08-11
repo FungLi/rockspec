@@ -1,0 +1,28 @@
+{
+  "name": "@rockspec/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "rockspec": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --enable-source-maps dist/bin.js"
+  },
+  "dependencies": {
+    "@rockspec/engine": "workspace:*",
+    "@rockspec/installer": "workspace:*",
+    "@rockspec/protocol": "workspace:*",
+    "commander": "^14.0.0"
+  }
+}

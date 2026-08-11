@@ -1,0 +1,28 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "change.triage"
+kind: "engine_action"
+profiles: ["lite", "standard", "strict"]
+summary: "评估范围和风险、选择 Profile，并创建初始 Brief。"
+executor:
+  mode: "inline"
+  role: "scenario-orchestrator"
+reads:
+  artifacts: []
+  repository: ["适用的仓库规则", "目标区域事实", "可用验证命令"]
+writes:
+  artifacts: ["brief.md"]
+preconditions:
+  - "Engine 已创建不可变且有效的 Change ID。"
+completion:
+  required:
+    - "存在边界明确的目标、范围、非目标、风险、回滚和验证方式。"
+    - "逐项明确评估全部 Lite 准入条件。"
+    - "明确判断 UI 影响和 prototype.required。"
+outcomes:
+  pass: ["requirements.clarify", "task.execute"]
+  blocked: ["change.triage"]
+invariants:
+  - "紧急程度绝不能降低风险 Profile。"
+  - "自动 Profile 变更只能向上升级。"

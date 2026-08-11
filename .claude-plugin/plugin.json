@@ -1,0 +1,32 @@
+{
+  "name": "rockspec",
+  "version": "0.1.0",
+  "description": "Risk-adaptive, evidence-backed change delivery workflows for coding agents.",
+  "author": {
+    "name": "RockSpec Contributors"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "harness-engineering",
+    "requirements",
+    "software-design",
+    "code-review",
+    "testing",
+    "agent-workflow"
+  ],
+  "skills": [
+    "./skills/rockspec-change",
+    "./skills/rockspec-triage",
+    "./skills/rockspec-requirements",
+    "./skills/rockspec-design",
+    "./skills/rockspec-prototype",
+    "./skills/rockspec-plan",
+    "./skills/rockspec-implement",
+    "./skills/rockspec-review",
+    "./skills/rockspec-acceptance",
+    "./skills/rockspec-finish",
+    "./skills/rockspec-debug",
+    "./skills/rockspec-research",
+    "./skills/rockspec-worktree"
+  ]
+}

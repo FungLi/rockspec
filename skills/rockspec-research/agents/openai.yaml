@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec 业务研究"
+  short_description: "基于一手证据探索业务问题、领域规则、用户痛点与研发机会"
+  default_prompt: "使用 $rockspec-research 探索这个业务问题，区分事实、推断与未知并形成可追溯的研究报告。"

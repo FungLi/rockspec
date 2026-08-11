@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec Worktree"
+  short_description: "为并行变更建立、恢复并安全收尾独立的Git隔离工作区"
+  default_prompt: "使用 $rockspec-worktree 为这个变更准备或恢复安全的隔离工作区。"

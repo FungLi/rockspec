@@ -1,0 +1,30 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "change.archive"
+kind: "engine_action"
+profiles: ["lite", "standard", "strict"]
+summary: "合并已验证的 Spec Delta，并归档不可变的已完成 Change。"
+executor:
+  mode: "engine"
+  role: "state-owner"
+reads:
+  artifacts: ["已验证的 Spec Delta", "全部 Change 产物", "最终验证证据"]
+  repository: ["基线 Specs", "Finish 决策"]
+writes:
+  artifacts: [".rockspec/specs/**", ".rockspec/archive/YYYY/MM/<change-id>/**"]
+preconditions:
+  - "Finish Gate 通过，且用户已选择平台无关的收尾方式。"
+  - "Spec Delta 可以无未解决冲突地合并。"
+completion:
+  required:
+    - "基线 Specs 已包含验证通过的 Delta。"
+    - "归档历史、Hash、审批、事件、评审和证据保持完整。"
+    - "活动 Change 不再作为可执行工作出现。"
+outcomes:
+  pass: []
+  conflict: ["change.archive"]
+  blocked: ["change.archive"]
+invariants:
+  - "只有 Engine 可以移动或改写生命周期和状态记录。"
+  - "归档不得改变不可变的 Change ID。"

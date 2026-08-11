@@ -1,0 +1,36 @@
+{
+  "name": "rockspec",
+  "version": "0.1.0",
+  "description": "Risk-adaptive, evidence-backed change delivery workflows for coding agents.",
+  "author": {
+    "name": "RockSpec Contributors"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "harness-engineering",
+    "requirements",
+    "software-design",
+    "code-review",
+    "testing",
+    "agent-workflow"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "RockSpec",
+    "shortDescription": "Governed change delivery for coding agents",
+    "longDescription": "Compose focused RockSpec skills for isolated worktrees, triage, requirements, design, planning, implementation, review, acceptance, and delivery, or route an end-to-end governed change.",
+    "developerName": "RockSpec Contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use RockSpec to deliver this repository change.",
+      "Use the appropriate atomic RockSpec skill for this stage.",
+      "Create a governed UI/UX prototype for this change.",
+      "Prepare an isolated RockSpec worktree for this parallel change."
+    ]
+  }
+}

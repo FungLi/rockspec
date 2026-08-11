@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec 计划"
+  short_description: "创建并独立评审可直接实施的任务计划和依赖图"
+  default_prompt: "使用 $rockspec-plan 为这个变更创建实施就绪的任务计划。"
