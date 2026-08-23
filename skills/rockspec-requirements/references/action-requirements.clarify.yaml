@@ -8,6 +8,9 @@ summary: "将业务意图转换为 Proposal 和可测试的行为 Spec Delta。"
 executor:
   mode: "inline"
   role: "requirements-author"
+  collaboration:
+    mode: "interactive"
+    turn_boundary: "full authoring 在问题、方案或章节确认点结束回复；compact 只在 reviewed Delta 的单次合并确认点结束；reconciliation 跳过重复确认。"
 reads:
   artifacts: ["brief.md", "已有 proposal.md 和 specs/**/*.md（如有）"]
   repository: ["基线 Specs", "可观察的当前行为", "领域术语"]
@@ -17,6 +20,7 @@ preconditions:
   - "Change 已有边界明确的 Brief，且 Profile 为 Standard 或 Strict。"
 completion:
   required:
+    - "full authoring 已逐节确认；compact 已完成一次 reviewed Delta 确认且未运行章节循环；reconciliation 已绑定 auto Revision、Finding、Authority Baseline 和受影响 ID。"
     - "明确目标、范围、非目标、假设和开放问题。"
     - "实质影响范围、外部行为、兼容性或验收标准的歧义已解决，或明确标记为阻塞。"
     - "次要细节采用保守假设，并记录依据和假设错误时的影响。"
@@ -29,3 +33,5 @@ invariants:
   - "业务 Spec 中不得写入框架、类、文件、函数或数据库实施细节。"
   - "每次创建或修订需求前必须从磁盘重读来源、基线 Spec 和已有需求产物，不得依赖聊天记忆。"
   - "不得用假设绕过会实质改变结果的用户决策。"
+  - "Open Revision 只重开受影响章节，但必须重新建立全部失效的下游产物、Review 和 Approval；不得只改 Requirements 后直接关闭。"
+  - "human Gate 不等于 full 交互；compact 禁止逐章节确认，reconciliation 一旦发现 Authority Impact 改变或未知立即升级。"

@@ -27,15 +27,17 @@ reads:
   repository: ["仅基线 Specs"]
 writes:
   artifacts: ["reviews/requirements-review*.md"]
+  template: "assets/requirements-review.md"
 completion:
   required:
-    - "每个 Reviewer 输出 PASS、CHANGES_REQUIRED 或 BLOCKED，并提供有证据支撑的 Finding。"
+    - "每份 Reviewer 报告使用 schema_version/verdict/reviewer_execution_id/findings Frontmatter；非 PASS 至少包含一个 Open Finding。"
+    - "每个 Reviewer 输出 PASS、CHANGES_REQUIRED 或 BLOCKED；每个 Finding 声明 classification 和 authority_impact。"
     - "Review Hash 与当前 Proposal 和 Specs 一致。"
     - "Strict 聚合保留两份原始报告和全部 Finding。"
 outcomes:
   pass: []
   changes_required: ["requirements.clarify"]
   blocked: ["requirements.clarify"]
-requires_user_approval_on_pass: "spec"
+requires_user_approval_on_pass: "首次 Spec 或 gate_policies.spec=human；auto 改由 reconcile.spec 续期，preserve 不重复审批"
 invariants:
-  - "Reviewer 不得编辑需求产物或替代用户审批。"
+  - "Reviewer 不得编辑需求产物；普通 Review 不得替代首次用户审批，Reconciliation Review 只能续期已有 Authority Baseline。"

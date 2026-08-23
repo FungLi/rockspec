@@ -9,6 +9,7 @@ import {
   readdir,
   rename,
   rm,
+  rmdir,
   stat,
 } from "node:fs/promises";
 import path from "node:path";
@@ -38,6 +39,7 @@ export interface GitWorkspaceContext {
 export const DEFAULT_CONFIG: RockSpecConfig = {
   schema_version: 1,
   default_profile: "standard",
+  max_reconciliation_rounds: 2,
   workspace: {
     mode: "auto",
     directory: ".worktrees",
@@ -198,20 +200,39 @@ export async function withFileLock<T>(
   rocksRoot: string,
   operation: () => Promise<T>,
   timeoutMs = 2_000,
+  staleMs = 30_000,
 ): Promise<T> {
   const lockPath = path.join(rocksRoot, ".lock");
+  const ownerPath = path.join(lockPath, "owner.json");
+  const reclaimPath = path.join(lockPath, "reclaim");
   const started = Date.now();
+  const owner = {
+    pid: process.pid,
+    started_at: new Date().toISOString(),
+    token: randomUUID(),
+  };
   while (true) {
     try {
-      await mkdir(lockPath);
+      await mkdir(lockPath, { recursive: true });
+      if (await exists(reclaimPath)) throw lockContentionError();
+      const handle = await open(ownerPath, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       break;
     } catch (error) {
       const code = error instanceof Error && "code" in error ? error.code : undefined;
-      if (code !== "EEXIST") throw error;
+      if (code !== "EEXIST" && code !== "LOCK_CONTENDED") throw error;
+      await clearStaleReclaim(reclaimPath, staleMs);
+      await reclaimStaleLock(ownerPath, reclaimPath, staleMs);
       if (Date.now() - started >= timeoutMs) {
         throw new RockSpecError("LOCK_TIMEOUT", "Timed out waiting for the RockSpec state lock", {
           lock_path: lockPath,
           timeout_ms: timeoutMs,
+          stale_ms: staleMs,
         });
       }
       await sleep(25);
@@ -221,8 +242,107 @@ export async function withFileLock<T>(
   try {
     return await operation();
   } finally {
-    await rm(lockPath, { recursive: true, force: true });
+    await releaseOwnedLock(ownerPath, owner.token);
+    try {
+      await rmdir(lockPath);
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error;
+    }
   }
+}
+
+function lockContentionError(): Error & { code: string } {
+  return Object.assign(new Error("RockSpec lock recovery is in progress"), { code: "LOCK_CONTENDED" });
+}
+
+interface LockOwner {
+  pid: number | null;
+  startedAt: number;
+  token: string | null;
+}
+
+async function inspectLockOwner(ownerPath: string): Promise<LockOwner | null> {
+  let metadata;
+  try {
+    metadata = await stat(ownerPath);
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(await readFile(ownerPath, "utf8")) as Record<string, unknown>;
+    const parsedStartedAt = typeof parsed.started_at === "string" ? Date.parse(parsed.started_at) : Number.NaN;
+    return {
+      pid: typeof parsed.pid === "number" && Number.isInteger(parsed.pid) && parsed.pid > 0 ? parsed.pid : null,
+      startedAt: Number.isFinite(parsedStartedAt) ? parsedStartedAt : metadata.mtimeMs,
+      token: typeof parsed.token === "string" && parsed.token.length > 0 ? parsed.token : null,
+    };
+  } catch {
+    return { pid: null, startedAt: metadata.mtimeMs, token: null };
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    return code !== "ESRCH";
+  }
+}
+
+function isStaleOwner(owner: LockOwner, staleMs: number): boolean {
+  if (Date.now() - owner.startedAt < staleMs) return false;
+  return owner.pid === null || !processExists(owner.pid);
+}
+
+async function reclaimStaleLock(ownerPath: string, reclaimPath: string, staleMs: number): Promise<void> {
+  const observed = await inspectLockOwner(ownerPath);
+  if (!observed || !isStaleOwner(observed, staleMs)) return;
+
+  let claim;
+  const claimOwner = {
+    pid: process.pid,
+    started_at: new Date().toISOString(),
+    token: randomUUID(),
+  };
+  try {
+    claim = await open(reclaimPath, "wx", 0o600);
+    await claim.writeFile(`${JSON.stringify(claimOwner)}\n`, "utf8");
+    await claim.sync();
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code === "EEXIST" || code === "ENOENT") return;
+    throw error;
+  } finally {
+    await claim?.close();
+  }
+
+  try {
+    const current = await inspectLockOwner(ownerPath);
+    if (!current || !isStaleOwner(current, staleMs)) return;
+    if (observed.token !== current.token || observed.pid !== current.pid || observed.startedAt !== current.startedAt) return;
+    await rm(ownerPath, { force: true });
+  } finally {
+    await releaseOwnedLock(reclaimPath, claimOwner.token);
+  }
+}
+
+async function clearStaleReclaim(reclaimPath: string, staleMs: number): Promise<void> {
+  const observed = await inspectLockOwner(reclaimPath);
+  if (!observed || !isStaleOwner(observed, staleMs)) return;
+  const current = await inspectLockOwner(reclaimPath);
+  if (!current || !isStaleOwner(current, staleMs)) return;
+  if (observed.token !== current.token || observed.pid !== current.pid || observed.startedAt !== current.startedAt) return;
+  await rm(reclaimPath, { force: true });
+}
+
+async function releaseOwnedLock(ownerPath: string, token: string): Promise<void> {
+  const current = await inspectLockOwner(ownerPath);
+  if (current?.token === token) await rm(ownerPath, { force: true });
 }
 
 export function parseConfigText(text: string, source: string): RockSpecConfig {

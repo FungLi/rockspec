@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  AcceptanceDocumentSchema,
   ChangeSnapshotSchema,
   DesignDefinitionSchema,
+  FindingSchema,
   InstallLockSchema,
   InstallManifestSchema,
+  KnowledgeDeltaDocumentSchema,
+  KnowledgeEvolutionSchema,
+  KnowledgeReviewDocumentSchema,
   PlanDefinitionSchema,
   ProtocolValidationError,
+  ReconciliationReviewDocumentSchema,
   ReviewDocumentSchema,
+  RevisionSchema,
+  FeedbackBatchSchema,
+  StageReviewDocumentSchema,
   TaskDefinitionSchema,
+  TaskRecordSchema,
   hashContent,
   parseChangeSnapshot,
   parseConfig,
@@ -59,6 +69,7 @@ describe("config and change snapshot schemas", () => {
     expect(parseConfig({ capabilities: {} })).toEqual({
       schema_version: 1,
       default_profile: "standard",
+      max_reconciliation_rounds: 2,
       capabilities: {},
       workspace: {
         mode: "auto",
@@ -76,6 +87,47 @@ describe("config and change snapshot schemas", () => {
       workspace: null,
       verification: { status: "pending" },
     });
+  });
+
+  it("defaults feedback and delivery boundary fields for legacy snapshots", () => {
+    const parsed = parseChangeSnapshot(snapshot());
+    expect(parsed.feedback_batches).toEqual([]);
+    expect(parsed.delivery_head).toBeUndefined();
+  });
+
+  it("validates a user acceptance Feedback Batch", () => {
+    expect(FeedbackBatchSchema.parse({
+      schema_version: 1,
+      id: "FB-001",
+      source: "user_acceptance",
+      route: "same_change",
+      status: "submitted",
+      reason: "Acceptance found a related interaction adjustment.",
+      target: "requirements",
+      items: [{ id: "FB-ITEM-001", description: "Show the reset result in the UI." }],
+      affected_ids: ["R-001"],
+      submitted_at: now,
+    })).toMatchObject({
+      id: "FB-001",
+      route: "same_change",
+      interaction_mode: "compact",
+      submitted_by: "user",
+    });
+    for (const interactionMode of ["reconcile", "compact", "full"] as const) {
+      expect(FeedbackBatchSchema.safeParse({
+        schema_version: 1,
+        id: "FB-001",
+        source: "user_acceptance",
+        route: "same_change",
+        interaction_mode: interactionMode,
+        status: "submitted",
+        reason: "Acceptance feedback.",
+        target: "requirements",
+        items: [{ id: "FB-ITEM-001", description: "Adjust the visible result." }],
+        affected_ids: ["R-001"],
+        submitted_at: now,
+      }).success).toBe(true);
+    }
   });
 
   it("validates portable workspace bindings", () => {
@@ -213,6 +265,41 @@ describe("review, evidence, and task commit validation", () => {
     }).success).toBe(true);
     expect(TaskDefinitionSchema.safeParse({
       schema_version: 1,
+      id: "T-002",
+      title: "Replace a suspended task",
+      dependencies: [],
+      supersedes: ["T-001"],
+      requirement_ids: ["R-001"],
+      scenario_ids: ["S-001"],
+      finding_ids: ["F-001"],
+      acceptance_criteria: ["The replacement closes the recovery finding"],
+      allowed_paths: ["src/feature.ts"],
+    }).success).toBe(true);
+    expect(TaskRecordSchema.safeParse({
+      id: "T-001",
+      status: "superseded",
+      superseded_by: "T-002",
+      superseded_in_revision: "RV-001",
+      superseded_at: now,
+      attempts: [{
+        execution_id: "execution-1",
+        status: "superseded",
+        revision_id: "RV-001",
+        base_commit: commit,
+        head_commit: commit,
+        brief_path: "revisions/RV-001/before/runtime/tasks/T-001/brief.md",
+        brief_hash: hash,
+        review_attempts: 0,
+        suspended_at: now,
+      }],
+    }).success).toBe(true);
+    expect(TaskRecordSchema.safeParse({
+      id: "T-001",
+      status: "superseded",
+      superseded_by: "T-002",
+    }).success).toBe(false);
+    expect(TaskDefinitionSchema.safeParse({
+      schema_version: 1,
       id: "T-001",
       title: "Mutate workflow state",
       requirement_ids: ["R-001"],
@@ -226,6 +313,7 @@ describe("review, evidence, and task commit validation", () => {
     }).success).toBe(true);
     expect(DesignDefinitionSchema.safeParse({
       schema_version: 1,
+      inputs: { spec_hash: hash },
       decisions: [{ id: "D-001", requirement_ids: ["R-001"], scenario_ids: ["S-001"] }],
     }).success).toBe(true);
     expect(ReviewDocumentSchema.safeParse({
@@ -260,6 +348,212 @@ describe("review, evidence, and task commit validation", () => {
     expect(result.valid).toBe(false);
   });
 
+  it("requires structured Open Findings for a non-PASS Stage Review", () => {
+    expect(StageReviewDocumentSchema.safeParse({
+      schema_version: 1,
+      verdict: "CHANGES_REQUIRED",
+      reviewer_execution_id: "readiness-reviewer",
+      findings: [],
+    }).success).toBe(false);
+    expect(StageReviewDocumentSchema.safeParse({
+      schema_version: 1,
+      verdict: "CHANGES_REQUIRED",
+      reviewer_execution_id: "readiness-reviewer",
+      findings: [{
+        id: "F-001",
+        severity: "critical",
+        category: "design-compliance",
+        evidence: "design.md:20",
+        description: "A required technical decision is missing.",
+        owner_domain: "design",
+        route_to: "design.technical",
+        status: "open",
+        classification: "decision_change",
+        authority_impact: "changed",
+      }],
+    }).success).toBe(true);
+  });
+
+  it("binds Finding routes, Recovery Revisions, and Acceptance reports", () => {
+    expect(FindingSchema.safeParse({
+      id: "F-001",
+      severity: "important",
+      category: "design-compliance",
+      evidence: "design.md:1",
+      description: "The Design boundary is incomplete.",
+      owner_domain: "design",
+      route_to: "task.execute",
+      status: "open",
+    }).success).toBe(false);
+    expect(AcceptanceDocumentSchema.safeParse({
+      schema_version: 1,
+      verdict: "CHANGES_REQUIRED",
+      reviewer_execution_id: "acceptance-reviewer",
+      commit,
+      findings: [{
+        id: "F-001",
+        severity: "important",
+        category: "behavior",
+        evidence: "test:e2e",
+        description: "The implementation fails an acceptance edge case.",
+        owner_domain: "implementation",
+        route_to: "task.execute",
+        status: "open",
+      }],
+    }).success).toBe(true);
+    expect(RevisionSchema.safeParse({
+      id: "RV-001",
+      source: "acceptance.validate",
+      target: "plan",
+      mode: "implementation_recovery",
+      kind: "remediation",
+      status: "open",
+      reason: "Acceptance requires remediation.",
+      affected_ids: [],
+      before_hashes: {},
+      after_hashes: {},
+      invalidated_approvals: ["implementation"],
+      invalidated_reviews: ["acceptance"],
+      invalidated_actions: ["plan.create"],
+      started_at: now,
+    }).success).toBe(false);
+    expect(RevisionSchema.safeParse({
+      id: "RV-001",
+      source: "acceptance.validate",
+      target: "plan",
+      mode: "implementation_recovery",
+      kind: "remediation",
+      status: "open",
+      reason: "Acceptance requires remediation.",
+      affected_ids: [],
+      trigger: { review_id: "acceptance", finding_ids: ["F-001"], review_hash: hash },
+      before_hashes: {},
+      after_hashes: {},
+      invalidated_approvals: ["implementation"],
+      invalidated_reviews: ["acceptance"],
+      invalidated_actions: ["plan.create"],
+      started_at: now,
+    }).success).toBe(true);
+    expect(RevisionSchema.safeParse({
+      id: "RV-004",
+      source: "acceptance.validate",
+      target: "requirements",
+      mode: "feedback_reopen",
+      interaction_mode: "compact",
+      kind: "upstream",
+      status: "open",
+      reason: "Apply explicit acceptance feedback.",
+      affected_ids: ["R-001"],
+      classifications: ["decision_change"],
+      approval_policy: "human",
+      authority_delta: "changed",
+      before_hashes: {},
+      started_at: now,
+    }).success).toBe(true);
+    expect(RevisionSchema.safeParse({
+      id: "RV-005",
+      source: "acceptance.validate",
+      target: "requirements",
+      mode: "feedback_reopen",
+      interaction_mode: "reconcile",
+      kind: "upstream",
+      status: "open",
+      reason: "Restore an already approved behavior.",
+      affected_ids: ["R-001"],
+      classifications: ["consistency_fix"],
+      approval_policy: "auto",
+      authority_delta: "unchanged",
+      author_execution_id: "feedback-author",
+      before_hashes: {},
+      started_at: now,
+    }).success).toBe(true);
+    expect(RevisionSchema.safeParse({
+      id: "RV-003",
+      source: "task.review",
+      target: "design",
+      mode: "implementation_recovery",
+      kind: "upstream",
+      status: "open",
+      reason: "Recover an implementation-stage Design gap.",
+      affected_ids: ["D-001"],
+      trigger: { review_id: "task:T-001", finding_ids: ["F-001"], review_hash: hash },
+      amendments: [{
+        id: "AM-001",
+        source: "readiness.review",
+        target: "design",
+        reason: "Readiness exposed another Design gap.",
+        affected_ids: ["D-002"],
+        classifications: ["decision_change"],
+        approval_policy: "human",
+        authority_delta: "changed",
+        trigger: { review_id: "readiness", finding_ids: ["F-002"], review_hash: hash },
+        before_hashes: { "design.md": hash },
+        invalidated_approvals: ["design"],
+        invalidated_reviews: ["readiness"],
+        invalidated_actions: ["design.technical", "plan.create", "readiness.review"],
+        amended_at: now,
+      }],
+      before_hashes: {},
+      invalidated_approvals: ["design", "implementation"],
+      invalidated_reviews: ["readiness"],
+      invalidated_actions: ["design.technical", "plan.create", "readiness.review"],
+      started_at: now,
+    }).success).toBe(true);
+
+    const autoFinding = {
+      id: "F-002",
+      severity: "important",
+      category: "design-compliance",
+      evidence: "design.md:1",
+      description: "An approved Scenario lacks a derived Design detail.",
+      owner_domain: "design",
+      route_to: "design.technical",
+      status: "open",
+      classification: "derived_gap",
+      authority_impact: "unchanged",
+    };
+    expect(FindingSchema.safeParse(autoFinding).success).toBe(true);
+    expect(FindingSchema.safeParse({
+      ...autoFinding,
+      classification: "intent_change",
+    }).success).toBe(false);
+    expect(RevisionSchema.safeParse({
+      id: "RV-002",
+      source: "task.review",
+      target: "design",
+      mode: "implementation_recovery",
+      kind: "upstream",
+      status: "open",
+      reason: "Restore a derived Design detail.",
+      affected_ids: ["D-001"],
+      classifications: ["derived_gap"],
+      approval_policy: "auto",
+      authority_delta: "unchanged",
+      author_execution_id: "revision-author",
+      authority_baselines: { design: hash },
+      trigger: { review_id: "task:T-001", finding_ids: ["F-002"], review_hash: hash },
+      before_hashes: {},
+      after_hashes: {},
+      invalidated_approvals: ["design"],
+      invalidated_reviews: ["readiness"],
+      invalidated_actions: ["design.technical"],
+      started_at: now,
+    }).success).toBe(true);
+    expect(ReconciliationReviewDocumentSchema.safeParse({
+      schema_version: 1,
+      revision_id: "RV-002",
+      gate: "design",
+      round: 1,
+      verdict: "PASS",
+      reviewer_execution_id: "independent-reviewer",
+      classifications: ["derived_gap"],
+      authority_delta: "unchanged",
+      finding_ids: ["F-002"],
+      subject: { artifact_hashes: { "design.md": hash }, aggregate_hash: hash },
+      findings: [],
+    }).success).toBe(true);
+  });
+
   it("validates evidence freshness and result consistency", () => {
     const base = {
       id: "EV-001",
@@ -277,6 +571,50 @@ describe("review, evidence, and task commit validation", () => {
     expect(validateEvidence(base).valid).toBe(true);
     expect(validateEvidence({ ...base, finished_at: "2026-08-10T09:59:00Z" }).valid).toBe(false);
     expect(validateEvidence({ ...base, failed: 1 }).valid).toBe(false);
+  });
+
+  it("validates knowledge evolution authority, review, and no-change receipts", () => {
+    const normative = {
+      schema_version: 1,
+      change_id: "standardize-form-feedback",
+      author_execution_id: "knowledge-author",
+      outcome: "proposed",
+      updates: [{
+        target: "experience/form-feedback.md",
+        operation: "new",
+        authority: "normative",
+        summary: "Establish the shared form feedback rule.",
+        sources: ["design.md#D-001"],
+      }],
+    };
+    expect(KnowledgeDeltaDocumentSchema.safeParse(normative).success).toBe(false);
+    expect(KnowledgeDeltaDocumentSchema.safeParse({
+      ...normative,
+      approval: { approved_by: "product-owner", approved_at: now },
+    }).success).toBe(true);
+    expect(KnowledgeReviewDocumentSchema.safeParse({
+      schema_version: 1,
+      verdict: "PASS",
+      reviewer_execution_id: "knowledge-reviewer",
+      subject: {
+        source_digest: hash,
+        delta_hash: hash,
+        baseline_hashes: { "experience/form-feedback.md": null },
+        candidate_hashes: { "experience/form-feedback.md": hash },
+      },
+      findings: [],
+    }).success).toBe(true);
+    expect(KnowledgeEvolutionSchema.safeParse({
+      schema_version: 1,
+      change_id: "standardize-form-feedback",
+      status: "no_change",
+      protocol_version: 1,
+      source_digest: hash,
+      delta_path: "knowledge-delta.md",
+      delta_hash: hash,
+      updates: [],
+      recorded_at: now,
+    }).success).toBe(true);
   });
 
   it("requires one final commit whose message names the task", () => {

@@ -33,7 +33,7 @@ reads:
   repository: ["Task Base Commit 上的必要代码", "已完成依赖的接口"]
 writes:
   artifacts: ["runtime/tasks/<task-id>/implementer-report.md", "evidence/logs/check-*.log", "Task 验证证据"]
-  repository: ["仅当前 Task allowed_paths 允许的产品文件"]
+  repository: ["完成当前 Task 行为所必需的产品文件；allowed_paths 仅作为计划参考范围"]
 preconditions:
   - "Lite 范围仍符合准入，或实施审批仍有效。"
   - "Standard/Strict 模式下，Engine 已登记 execution ID 并选定一个 Ready Task。"
@@ -41,7 +41,7 @@ completion:
   required:
     - "实施报告绑定 Implementer execution ID、Task Base Commit、冻结 Brief 路径和 Hash。"
     - "测试证明公共行为，且 rockspec check run 产生绑定当前 Commit 的 executed 证据。"
-    - "产品 Diff 未超出 allowed_paths，且不含无关改动。"
+    - "产品 Diff 不含无关改动；超出 allowed_paths 的路径已说明并能追溯到当前 Task 行为。"
     - "Task Base..HEAD 恰好包含一个最终 Commit，且提交信息包含 [Task ID]。"
 outcomes:
   pass: ["task.review", "change.verify"]

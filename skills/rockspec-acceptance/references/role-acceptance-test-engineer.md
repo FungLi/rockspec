@@ -22,4 +22,4 @@
 
 ## 报告
 
-返回 `PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`，并包含 Scenario 覆盖矩阵、全部命令和结果、按实现与测试资产责任拆分的缺陷、适用时的 UI 证据、剩余缺口和准确的已测试 Commit。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。只有 Engine 可以决定 Acceptance Gate。
+返回 `PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`，并在 YAML Frontmatter 写入真实 execution ID、准确的已测试 Commit 和全部结构化 Finding。每个 Finding 声明 `classification` 和 `authority_impact`；只恢复批准行为时使用 `implementation_fix|derived_gap + unchanged`，改变决策/意图、接受风险或无法判断时使用人工分类及 `changed|unknown`。实现缺陷路由 `task.execute`，验收资产缺陷路由 `acceptance.validate`，上游缺口路由最早责任 Action；正文包含 Scenario 覆盖矩阵、命令结果、UI 证据和剩余缺口。原样记录 Model Tier、宿主模型和选择原因；只有 Engine 可以决定 Acceptance Gate 和 Recovery。

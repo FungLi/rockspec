@@ -7,6 +7,7 @@ rockspec:
     - rockspec-change
     - rockspec-debug
     - rockspec-design
+    - rockspec-evolve
     - rockspec-finish
     - rockspec-implement
     - rockspec-plan

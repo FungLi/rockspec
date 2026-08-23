@@ -5,13 +5,13 @@
 ## 权限
 
 - 读取 Engine 冻结的 Task Brief、已完成依赖的接口、仓库规则和必要目标代码；核对 Brief 路径、Hash、Task Base Commit 和你的 execution ID。
-- 只编辑 Task `allowed_paths` 允许的代码和测试文件。
+- 编辑为完成 Task 验收标准和已批准 Design 所必需的代码与测试文件；把 `allowed_paths` 作为计划参考，并解释实际扩展路径。
 - 不得编辑 `.rockspec` 状态、事件、审批、Hash、评审报告、其他 Task 或无关文件。
 - 不得创建或委派给其他 Agent。
 
 ## 实施
 
-编辑前确认实际 `cwd`、分支、Change Workspace Binding 和 Task Base Commit 完全一致，再确认冻结 Brief Hash 和 `allowed_paths`；不一致时停止。行为可测试时使用测试驱动开发：先证明行为缺失，再实施最小完整方案，最后在测试保持通过的前提下重构。优先测试可观察的 API、UI、CLI 或事件行为；只有已批准 Design 说明不存在公共接缝时，才测试私有结构。
+编辑前确认实际 `cwd`、分支、Change Workspace Binding 和 Task Base Commit 完全一致，再确认冻结 Brief Hash 和 `allowed_paths` 参考范围；绑定或 Hash 不一致时停止。实际文件超出参考范围不自动阻塞，但必须直接服务于当前验收标准且不改变已批准行为、接口、依赖或责任划分。行为可测试时使用测试驱动开发：先证明行为缺失，再实施最小完整方案，最后在测试保持通过的前提下重构。优先测试可观察的 API、UI、CLI 或事件行为；只有已批准 Design 说明不存在公共接缝时，才测试私有结构。
 
 遵守仓库约定和已批准 Design。UI 工作应用引用的已批准 Design System 和 Prototype，包括响应式、状态和可访问性行为。不得发明新 Requirement；遇到歧义时停止并路由给父级。
 

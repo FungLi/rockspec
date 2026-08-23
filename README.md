@@ -18,6 +18,7 @@ RockSpec exposes focused user capabilities rather than internal roles or state-m
 - `rockspec-review`: independently review a Task, branch, or Final CR subject.
 - `rockspec-acceptance`: run independent acceptance/TE before Final CR.
 - `rockspec-finish`: verify, finish, and archive a completed change.
+- `rockspec-evolve`: extract reviewed, reusable product, architecture, and experience knowledge before archive.
 - `rockspec-debug`: establish a reproducible feedback loop, confirm root cause, and hand off a governed fix.
 - `rockspec-research`: explore a business problem with traceable evidence before requirements are written.
 - `rockspec-worktree`: prepare, locate, resume, and safely finish a Change-level isolated Git worktree.
@@ -111,8 +112,12 @@ Use the CLI's current help for exact development arguments:
 
 ```bash
 rockspec init
-rockspec status --json
+rockspec status --view summary --json
 ```
+
+In an installed project, these `rockspec ...` examples are logical commands rather than a required global executable. Read `rockspec.runtime_path` from `.rockspec/install.lock.yaml`, verify it against the lock integrity, and invoke it from the repository root as `node <runtime_path> ...` (normally `node .rockspec/bin/rockspec.mjs ...`). Do not search the machine or package manifests for another CLI when the install lock exists.
+
+Status defaults to the compact `summary` projection. Use `--view tasks`, `--view recovery`, or `--view hashes` for targeted machine context and `--view full` only for Runtime diagnosis. Other commands that return a status snapshot accept the global `--summary` option, for example `rockspec --summary --json action complete ...`.
 
 During an attached Standard/Strict Task, the implementation loop uses Engine-owned inputs and evidence:
 
@@ -121,11 +126,51 @@ rockspec task start T-001 <change-id>
 rockspec task brief T-001 <change-id>
 rockspec check run --change <change-id> --task T-001 -- pnpm test
 rockspec review package task <change-id> --task T-001
+# Only when the Task contract itself must be revised before a product Commit:
+rockspec review package task <change-id> --task T-001 --scope-blocked
 rockspec action complete task.review <change-id> --verdict PASS
 rockspec task complete T-001 <change-id>
 ```
 
-After Acceptance, use `rockspec review package delivery <change-id>` for the Final CR subject. Review reports bind the exact base commit, head commit, and Diff hash. `rockspec check run` executes the command itself and binds the stored log to the current Commit; `rockspec evidence add` remains available for manual or external evidence but cannot satisfy Standard/Strict executed-evidence gates.
+Before the first implementation approval or an implementation reconciliation, run the combined preflight:
+
+```bash
+rockspec preflight implementation <change-id>
+```
+
+It verifies the installed Runtime/Skill hashes, approval and Readiness freshness, Task graph viability, active Recovery state, and availability of both normal product Review and zero-Diff scope-blocked Review paths.
+
+Task `allowed_paths` are the Plan's expected paths, not a product Diff whitelist. Task Review Packages report `planned_paths`, `changed_paths`, and `expanded_paths`; Reviewers accept justified expansions and raise Findings for unrelated changes or genuine Task-contract gaps. After Acceptance, use `rockspec review package delivery <change-id>` for the Final CR subject. Review reports bind the exact base commit, head commit, and Diff hash. `rockspec check run` executes the command itself and binds the stored log to the current Commit; `rockspec evidence add` remains available for manual or external evidence but cannot satisfy Standard/Strict executed-evidence gates.
+
+Cross-stage Findings declare `classification` and `authority_impact`. Changes to intent, approved decisions, accepted risk, Critical Findings, or unknown authority always return to the user. A non-critical consistency, derived, or implementation fix can automatically renew a Gate only when that Gate already has a human-approved Authority Baseline and an independent Reviewer confirms that the boundary is unchanged:
+
+```bash
+rockspec revise <change-id> \
+  --source design.technical \
+  --target design \
+  --reason "Synchronize an approved derived detail" \
+  --affected D-001 \
+  --classification consistency_fix \
+  --authority-impact unchanged \
+  --author-execution <execution-id>
+
+rockspec reconcile prepare design <change-id>
+rockspec reconcile complete design <change-id> --verdict PASS
+```
+
+If a later Requirements, Readiness, Task, Acceptance, or Delivery Review finds new issues while that Revision is still open, append them to the same audit chain instead of opening another Revision:
+
+```bash
+rockspec revise <change-id> --amend \
+  --review readiness \
+  --finding F-101 \
+  --reason "Readiness exposed another Design gap" \
+  --affected D-001
+```
+
+Requirements and Readiness Reviewer reports use structured Frontmatter. Non-PASS reports must contain at least one Open Finding; the Engine preserves every Reviewer source and Finding and rejects unstructured non-PASS reports.
+
+The first Spec, Design, and Implementation approvals are always human. Automatic reconciliation only renews approvals invalidated by the active Revision, uses a Reviewer execution different from the Revision Author, and escalates after two unsuccessful rounds.
 
 Commit the project-managed RockSpec Skills, Runtime, install lock, `.rockspec/config.yaml`, and baseline Specs before starting parallel work. A linked worktree inherits those assets from Git and must not run `rockspec init` or reinstall RockSpec.
 
@@ -142,8 +187,8 @@ RockSpec binds the capability `ui.prototype` to `ui-ux-pro-max` by default. The 
 Installer-managed Providers are discovered automatically. The repeatable global option and comma-separated environment variable remain available for temporary host-provided Skills:
 
 ```bash
-node packages/cli/dist/bin.js --provider ui-ux-pro-max status --json
-ROCKSPEC_AVAILABLE_PROVIDERS=ui-ux-pro-max node packages/cli/dist/bin.js status --json
+node packages/cli/dist/bin.js --provider ui-ux-pro-max status --view summary --json
+ROCKSPEC_AVAILABLE_PROVIDERS=ui-ux-pro-max node packages/cli/dist/bin.js status --view summary --json
 ```
 
 Use the same declaration on the action-completion/gate invocation after Provider output is written.

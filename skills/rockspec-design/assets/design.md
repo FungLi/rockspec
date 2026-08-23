@@ -1,5 +1,7 @@
 ---
 schema_version: 1
+inputs:
+  spec_hash: "{{approved_spec_hash}}"
 decisions:
   - id: D-001
     requirement_ids: [{{requirement_ids}}]

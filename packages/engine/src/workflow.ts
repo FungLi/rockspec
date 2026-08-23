@@ -5,11 +5,12 @@ import type {
   ChangeSnapshot,
   EntrySkill,
   Recommendation,
+  RecoveryDirective,
   WorkflowProfile,
 } from "./types.js";
 
 export const WORKFLOW_PRIMARY_ACTIONS_BY_PROFILE: Readonly<Record<WorkflowProfile, readonly ActionId[]>> = {
-  lite: ["change.triage", "task.execute", "change.verify", "change.archive"],
+  lite: ["change.triage", "task.execute", "change.verify", "knowledge.evolve", "change.archive"],
   standard: [
     "change.triage",
     "requirements.clarify",
@@ -23,6 +24,7 @@ export const WORKFLOW_PRIMARY_ACTIONS_BY_PROFILE: Readonly<Record<WorkflowProfil
     "acceptance.validate",
     "delivery.review",
     "change.verify",
+    "knowledge.evolve",
     "change.archive",
   ],
   strict: [
@@ -38,6 +40,7 @@ export const WORKFLOW_PRIMARY_ACTIONS_BY_PROFILE: Readonly<Record<WorkflowProfil
     "acceptance.validate",
     "delivery.review",
     "change.verify",
+    "knowledge.evolve",
     "change.archive",
   ],
 };
@@ -56,6 +59,7 @@ export const ACTION_PROFILES: Readonly<Record<ActionId, readonly WorkflowProfile
   "acceptance.validate": ["standard", "strict"],
   "delivery.review": ["standard", "strict"],
   "change.verify": ["lite", "standard", "strict"],
+  "knowledge.evolve": ["lite", "standard", "strict"],
   "change.archive": ["lite", "standard", "strict"],
 };
 
@@ -74,6 +78,8 @@ interface WorkflowAdvice {
 const ENTRY_SKILL_BY_ACTION: Readonly<Record<string, EntrySkill>> = {
   "change.triage": "rockspec-triage",
   "change.promote": "rockspec-triage",
+  revise: "rockspec-change",
+  "revise.amend": "rockspec-change",
   "requirements.clarify": "rockspec-requirements",
   "requirements.review": "rockspec-requirements",
   "approve.spec": "rockspec-requirements",
@@ -83,12 +89,16 @@ const ENTRY_SKILL_BY_ACTION: Readonly<Record<string, EntrySkill>> = {
   "plan.create": "rockspec-plan",
   "readiness.review": "rockspec-plan",
   "approve.implementation": "rockspec-plan",
+  "reconcile.spec": "rockspec-review",
+  "reconcile.design": "rockspec-review",
+  "reconcile.implementation": "rockspec-review",
   apply: "rockspec-implement",
   "task.execute": "rockspec-implement",
   "task.review": "rockspec-review",
   "acceptance.validate": "rockspec-acceptance",
   "delivery.review": "rockspec-review",
   "change.verify": "rockspec-finish",
+  "knowledge.evolve": "rockspec-evolve",
   finish: "rockspec-finish",
   "change.archive": "rockspec-finish",
   validate: "rockspec-change",
@@ -102,17 +112,206 @@ function recommendation(action: string, reason: string): Recommendation {
   };
 }
 
-export function workflowAdvice(change: ChangeSnapshot, blocked: BlockReason[]): WorkflowAdvice {
+function revisionGatePolicy(
+  revision: NonNullable<ChangeSnapshot["revisions"][number]>,
+  gate: "spec" | "design" | "implementation",
+): "preserve" | "auto" | "human" {
+  const explicit = revision.gate_policies[gate];
+  if (explicit) return explicit;
+  if (!revision.invalidated_approvals.includes(gate)) return "preserve";
+  if (revision.approval_policy === "auto") return "auto";
+  return gate === "implementation" && revision.target !== "plan" ? "auto" : "human";
+}
+
+function activeRevisionContinuation(
+  change: ChangeSnapshot,
+  target: NonNullable<RecoveryDirective["target"]>,
+): string {
+  if (change.state === "SCOPING") return "requirements.clarify";
+  if (change.state === "SPEC_REVIEW") return "requirements.review";
+  if (change.state === "SPEC_APPROVED") return "design.technical";
+  if (change.state === "DESIGNING") {
+    return change.prototype.required && change.prototype.status === "pending"
+      ? "design.prototype"
+      : "design.technical";
+  }
+  if (change.state === "DESIGN_APPROVED" || change.state === "PLANNING") return "plan.create";
+  if (change.state === "READINESS_REVIEW") return "readiness.review";
+  return target === "requirements"
+    ? "requirements.clarify"
+    : target === "plan"
+      ? "plan.create"
+      : target === "prototype"
+        ? "design.prototype"
+        : "design.technical";
+}
+
+const REVISION_TARGET_BY_ROUTE = {
+  "requirements.clarify": "requirements",
+  "design.technical": "design",
+  "design.prototype": "prototype",
+  "plan.create": "plan",
+} as const;
+
+const REVISION_TARGET_RANK = {
+  requirements: 0,
+  design: 1,
+  prototype: 2,
+  plan: 3,
+} as const;
+
+export function recoveryDirective(change: ChangeSnapshot): RecoveryDirective | null {
+  let reviewId: string | null = null;
+  let source: ActionId | null = null;
+  if (change.state === "SPEC_REVIEW") {
+    reviewId = "requirements";
+    source = "requirements.review";
+  } else if (change.state === "READINESS_REVIEW") {
+    reviewId = "readiness";
+    source = "readiness.review";
+  } else if (change.state === "IMPLEMENTING" && change.execution.active_task) {
+    reviewId = `task:${change.execution.active_task}`;
+    source = "task.review";
+  } else if (change.state === "ACCEPTANCE_VALIDATING") {
+    reviewId = "acceptance";
+    source = "acceptance.validate";
+  } else if (change.state === "FINAL_REVIEW") {
+    reviewId = "delivery";
+    source = "delivery.review";
+  }
+  if (!reviewId || !source) return null;
+
+  const review = change.reviews[reviewId];
+  if (!review || review.verdict === "PASS") return null;
+  const open = review.findings.filter((finding) => finding.status === "open");
+  if (open.length === 0) return null;
+  const activeRevision = change.revisions.some((revision) => revision.status === "open");
+  if (!activeRevision && source === "requirements.review") {
+    return {
+      kind: "action",
+      review_id: reviewId,
+      source,
+      finding_ids: [...new Set(open.map((finding) => finding.id))].sort(),
+      route_to: ["requirements.clarify"],
+    };
+  }
+  if (!activeRevision && source === "readiness.review" &&
+      open.every((finding) => finding.route_to === "plan.create")) {
+    return {
+      kind: "action",
+      review_id: reviewId,
+      source,
+      finding_ids: [...new Set(open.map((finding) => finding.id))].sort(),
+      route_to: ["plan.create"],
+    };
+  }
+
+  type RecoveryTarget = keyof typeof REVISION_TARGET_RANK;
+  const revisionFindings: Array<{
+    finding: (typeof open)[number];
+    target: RecoveryTarget;
+    revisionKind: "upstream" | "remediation";
+  }> = [];
+  for (const finding of open) {
+    const directTarget = REVISION_TARGET_BY_ROUTE[
+      finding.route_to as keyof typeof REVISION_TARGET_BY_ROUTE
+    ];
+    if (directTarget) {
+      revisionFindings.push({ finding, target: directTarget, revisionKind: "upstream" });
+      continue;
+    }
+    if (source !== "task.review" && finding.route_to === "task.execute") {
+      revisionFindings.push({ finding, target: "plan", revisionKind: "remediation" });
+    }
+  }
+  if (revisionFindings.length > 0) {
+    const earliest = revisionFindings.reduce((left, right) =>
+      REVISION_TARGET_RANK[right.target] < REVISION_TARGET_RANK[left.target] ? right : left);
+    const classifications = [...new Set(open.map((finding) => finding.classification))].sort();
+    const authorityDelta = open.some((finding) => finding.authority_impact === "changed")
+      ? "changed"
+      : open.some((finding) => finding.authority_impact === "unknown")
+        ? "unknown"
+        : "unchanged";
+    const autoClassifications = new Set(["consistency_fix", "derived_gap", "implementation_fix"]);
+    const approvalPolicy = authorityDelta === "unchanged" &&
+        open.every((finding) => finding.severity !== "critical" && autoClassifications.has(finding.classification))
+      ? "auto"
+      : "human";
+    return {
+      kind: "revision",
+      review_id: reviewId,
+      source,
+      finding_ids: [...new Set(open.map((finding) => finding.id))].sort(),
+      route_to: [...new Set(open.map((finding) => finding.route_to))].sort(),
+      target: earliest.target,
+      revision_kind: revisionFindings.some(({ revisionKind }) => revisionKind === "upstream")
+        ? "upstream"
+        : "remediation",
+      classifications,
+      authority_delta: authorityDelta,
+      approval_policy: approvalPolicy,
+    };
+  }
+
+  if (source === "delivery.review" && open.every((finding) => finding.route_to === "acceptance.validate")) {
+    return {
+      kind: "action",
+      review_id: reviewId,
+      source,
+      finding_ids: [...new Set(open.map((finding) => finding.id))].sort(),
+      route_to: ["acceptance.validate"],
+    };
+  }
+  return null;
+}
+
+export function workflowAdvice(
+  change: ChangeSnapshot,
+  blocked: BlockReason[],
+  recovery: RecoveryDirective | null = null,
+): WorkflowAdvice {
   if (change.state === "ARCHIVED") return { recommended: null, alternatives: [], allowed: [] };
+  const activeRevision = change.revisions.find((revision) => revision.status === "open");
+
+  if (recovery?.kind === "revision") {
+    const action = activeRevision ? "revise.amend" : "revise";
+    return {
+      recommended: recommendation(
+        action,
+        activeRevision
+          ? `Amend ${activeRevision.id} with ${recovery.finding_ids.join(", ")}`
+          : `Open a ${recovery.target} Recovery Revision for ${recovery.finding_ids.join(", ")}`,
+      ),
+      alternatives: [],
+      allowed: [action, "validate"],
+    };
+  }
+  if (recovery?.kind === "action") {
+    const action = recovery.route_to[0] ?? "validate";
+    return {
+      recommended: recommendation(action, `Resolve ${recovery.finding_ids.join(", ")} from ${recovery.review_id}`),
+      alternatives: [],
+      allowed: [action, "validate"],
+    };
+  }
 
   if (blocked.length > 0) {
     const stale = blocked.find((item) => item.code === "STALE_APPROVAL");
     if (stale) {
+      if (activeRevision) {
+        const action = activeRevisionContinuation(change, activeRevision.target);
+        return {
+          recommended: recommendation(action, `Continue ${activeRevision.id}; do not open a second Revision for stale content`),
+          alternatives: [],
+          allowed: [action, "validate"],
+        };
+      }
       const gate = typeof stale.paths?.[0] === "string" ? stale.paths[0] : "spec";
       return {
-        recommended: recommendation(`approve.${gate}`, `The ${gate} approval is stale and must be renewed`),
+        recommended: recommendation("revise", `The ${gate} content changed; open a controlled Revision before renewing approval`),
         alternatives: [],
-        allowed: [`approve.${gate}`, "validate"],
+        allowed: ["revise", "validate"],
       };
     }
     return {
@@ -121,6 +320,29 @@ export function workflowAdvice(change: ChangeSnapshot, blocked: BlockReason[]): 
       allowed: ["validate"],
     };
   }
+
+  const pendingReconciliation = activeRevision?.last_reconciliation &&
+      revisionGatePolicy(activeRevision, activeRevision.last_reconciliation.gate) === "auto"
+    ? activeRevision.last_reconciliation
+    : undefined;
+  if (pendingReconciliation && pendingReconciliation.verdict !== "PASS") {
+    const repairAction = pendingReconciliation.gate === "spec"
+      ? "requirements.clarify"
+      : pendingReconciliation.gate === "design"
+        ? "design.technical"
+        : "plan.create";
+    return {
+      recommended: recommendation(repairAction, `Address Reconciliation round ${pendingReconciliation.round} Findings`),
+      alternatives: [],
+      allowed: [repairAction, "validate"],
+    };
+  }
+
+  const autoReconciliationAction = (gate: "spec" | "design" | "implementation"): string | null => {
+    if (!activeRevision || revisionGatePolicy(activeRevision, gate) !== "auto") return null;
+    if (!activeRevision.invalidated_approvals.includes(gate) || !activeRevision.authority_baselines[gate]) return null;
+    return `reconcile.${gate}`;
+  };
 
   switch (change.state) {
     case "SCOPING":
@@ -141,6 +363,14 @@ export function workflowAdvice(change: ChangeSnapshot, blocked: BlockReason[]): 
       };
     case "SPEC_REVIEW":
       if (change.reviews.requirements?.verdict === "PASS") {
+        const autoAction = autoReconciliationAction("spec");
+        if (autoAction) {
+          return {
+            recommended: recommendation(autoAction, "Requirements are within the approved Intent Envelope; run independent reconciliation"),
+            alternatives: [],
+            allowed: [autoAction, "requirements.clarify", "validate"],
+          };
+        }
         return {
           recommended: recommendation("approve.spec", "Requirements review passed; user approval is required"),
           alternatives: [{ action: "requirements.clarify" }],
@@ -159,17 +389,29 @@ export function workflowAdvice(change: ChangeSnapshot, blocked: BlockReason[]): 
         allowed: ["design.technical", "validate"],
       };
     case "DESIGNING":
-      if (change.prototype.required && change.prototype.status !== "completed") {
+      if (change.prototype.required && change.prototype.status === "pending") {
         return {
           recommended: recommendation("design.prototype", "The UI change requires an approved prototype"),
           alternatives: [{ action: "design.technical" }],
           allowed: ["design.technical", "design.prototype", "validate"],
         };
       }
+      if (change.prototype.required && change.prototype.status === "completed") {
+        return {
+          recommended: recommendation("design.technical", "Reconcile the completed Prototype into Technical Design"),
+          alternatives: [{ action: "design.prototype" }],
+          allowed: ["design.technical", "design.prototype", "validate"],
+        };
+      }
       return {
-        recommended: recommendation("approve.design", "Review and approve the Design and Prototype content"),
+        recommended: recommendation(
+          autoReconciliationAction("design") ?? "approve.design",
+          autoReconciliationAction("design")
+            ? "Design remains within the approved Decision Envelope; run independent reconciliation"
+            : "Review and approve the Design and Prototype content",
+        ),
         alternatives: [{ action: "design.technical" }],
-        allowed: ["approve.design", "design.technical", "validate"],
+        allowed: [autoReconciliationAction("design") ?? "approve.design", "design.technical", "validate"],
       };
     case "DESIGN_APPROVED":
     case "PLANNING":
@@ -180,6 +422,14 @@ export function workflowAdvice(change: ChangeSnapshot, blocked: BlockReason[]): 
       };
     case "READINESS_REVIEW":
       if (change.reviews.readiness?.verdict === "PASS") {
+        const autoAction = autoReconciliationAction("implementation");
+        if (autoAction) {
+          return {
+            recommended: recommendation(autoAction, "The recovered Plan remains inside the approved execution envelope"),
+            alternatives: [{ action: "plan.create" }],
+            allowed: [autoAction, "plan.create", "readiness.review", "validate"],
+          };
+        }
         return {
           recommended: recommendation("approve.implementation", "Readiness review passed; approve implementation"),
           alternatives: [{ action: "plan.create" }],
@@ -222,6 +472,13 @@ export function workflowAdvice(change: ChangeSnapshot, blocked: BlockReason[]): 
         allowed: ["change.verify", "validate"],
       };
     case "READY_TO_FINISH":
+      if (change.knowledge_evolution.status === "pending") {
+        return {
+          recommended: recommendation("knowledge.evolve", "Reconcile reusable knowledge before archiving"),
+          alternatives: [],
+          allowed: ["knowledge.evolve", "validate"],
+        };
+      }
       if (!change.finished_at) {
         return {
           recommended: recommendation("finish", "Choose a platform-independent branch disposition"),
@@ -261,6 +518,7 @@ export function assertActionAllowed(change: ChangeSnapshot, action: ActionId): v
     "acceptance.validate": ["ACCEPTANCE_VALIDATING"],
     "delivery.review": ["FINAL_REVIEW"],
     "change.verify": ["IMPLEMENTING", "VERIFYING"],
+    "knowledge.evolve": ["READY_TO_FINISH"],
     "change.archive": ["READY_TO_FINISH"],
   };
   if (!legal[action]?.includes(change.state)) {

@@ -17,6 +17,6 @@
 
 ## 报告
 
-只返回一个结论：`PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`。每个 Finding 包含稳定 ID、严重度、类别、具体产物证据、描述、责任域、`route_to: requirements.clarify` 和状态。说明已评审 Hash 和剩余的非阻塞风险。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。
+从 `assets/requirements-review.md` 复制报告结构，只返回一个结论：`PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`。Frontmatter 必须填写真实 `reviewer_execution_id`；非 PASS 至少包含一个 `status: open` 的 Finding，不得只在正文描述问题。每个 Finding 包含稳定 `F-xxx` ID、严重度、类别、具体产物证据、描述、责任域、`route_to: requirements.clarify`、状态、`classification` 和 `authority_impact`。纯一致性或已批准内容的派生缺口可使用 `consistency_fix|derived_gap + unchanged`；任何范围、外部行为、兼容性或验收变化使用 `intent_change + changed|unknown`。说明已评审 Hash 和剩余的非阻塞风险。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。
 
 你的结论不是用户审批，也不能改变 Engine 状态。

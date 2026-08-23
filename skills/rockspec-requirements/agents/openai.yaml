@@ -1,4 +1,4 @@
 interface:
-  display_name: "RockSpec 需求"
+  display_name: "RockSpec Requirements"
   short_description: "定义并独立评审可追踪、可测试的行为需求基线"
   default_prompt: "使用 $rockspec-requirements 定义并评审这个变更的需求。"

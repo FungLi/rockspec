@@ -46,9 +46,9 @@ describe("RockSpec project installer", () => {
       now: () => new Date("2026-08-11T12:00:00.000Z"),
     });
 
-    expect(installed.plan.filter((item) => item.owner === "rockspec" && item.kind === "directory")).toHaveLength(13);
+    expect(installed.plan.filter((item) => item.owner === "rockspec" && item.kind === "directory")).toHaveLength(14);
     const lock = InstallLockSchema.parse(parse(await readFile(path.join(root, ".rockspec", "install.lock.yaml"), "utf8")));
-    expect(Object.keys(lock.skills)).toHaveLength(13);
+    expect(Object.keys(lock.skills)).toHaveLength(14);
     expect(lock.hosts).toMatchObject({
       codex: { skills_root: ".agents/skills", mode: "canonical" },
       claude: { skills_root: ".claude/skills", mode: process.platform === "win32" ? "copy" : "symlink" },
@@ -57,8 +57,12 @@ describe("RockSpec project installer", () => {
       await expect(readlink(path.join(root, ".claude", "skills", "rockspec-change")))
         .resolves.toBe("../../.agents/skills/rockspec-change");
     }
-    await expect(readFile(path.join(root, ".rockspec", "bin", "rockspec.mjs"), "utf8"))
+    const runtimePath = path.resolve(root, lock.rockspec.runtime_path);
+    expect(runtimePath.startsWith(`${root}${path.sep}`)).toBe(true);
+    await expect(readFile(runtimePath, "utf8"))
       .resolves.toContain("#!/usr/bin/env node");
+    await expect(execFileAsync(process.execPath, [runtimePath, "--help"], { cwd: root }))
+      .resolves.toMatchObject({ stdout: expect.stringContaining("Usage: rockspec") });
     await expect(doctorProject(root)).resolves.toMatchObject({ valid: true, findings: [] });
 
     const repeated = await installProject({
@@ -84,7 +88,7 @@ describe("RockSpec project installer", () => {
       withoutCapabilities: ["ui.prototype"],
     });
     expect(reduced.plan.filter((item) => item.action === "remove" && item.owner === "adapter"))
-      .toHaveLength(13);
+      .toHaveLength(14);
     await expect(readlink(path.join(root, ".claude", "skills", "rockspec-change")))
       .rejects.toMatchObject({ code: "ENOENT" });
     const reducedLock = InstallLockSchema.parse(parse(await readFile(path.join(root, ".rockspec", "install.lock.yaml"), "utf8")));

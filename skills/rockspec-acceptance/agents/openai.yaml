@@ -1,4 +1,4 @@
 interface:
-  display_name: "RockSpec 验收"
+  display_name: "RockSpec Acceptance"
   short_description: "在 Final CR 前独立验证可观察行为并形成可复现证据"
   default_prompt: "使用 $rockspec-acceptance 根据验收标准独立验证当前实现。"

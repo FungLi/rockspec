@@ -9,8 +9,12 @@ import {
 } from "@rockspec/installer";
 import {
   ACTION_IDS,
+  AUTHORITY_IMPACTS,
   CHANGE_KINDS,
+  FEEDBACK_INTERACTION_MODES,
   PROFILES,
+  REVISION_CLASSIFICATIONS,
+  REVISION_TARGETS,
   type ActionId,
   type ChangeKind,
   type WorkflowProfile,
@@ -18,7 +22,16 @@ import {
   type InstallHost,
 } from "@rockspec/protocol";
 import { Command, CommanderError, Option } from "commander";
-import { errorExitCode, failureEnvelope, formatHuman, successEnvelope } from "./output.js";
+import {
+  STATUS_VIEWS,
+  errorExitCode,
+  failureEnvelope,
+  formatHuman,
+  isFullStatusResult,
+  projectStatus,
+  successEnvelope,
+  type StatusView,
+} from "./output.js";
 import { runInstallWizard } from "./install-wizard.js";
 
 interface WritableTarget {
@@ -36,6 +49,7 @@ interface GlobalOptions {
   cwd?: string;
   json?: boolean;
   provider?: string[];
+  summary?: boolean;
 }
 
 export function createProgram(dependencies: CliDependencies = {}): Command {
@@ -56,6 +70,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--cwd <path>", "run as if started in this directory")
     .option("--provider <skill-name>", "external Skill available in this host; repeat as needed", collect, [])
     .option("--json", "emit a versioned JSON envelope", false)
+    .option("--summary", "project status-like command results to a compact summary", false)
     .showHelpAfterError();
 
   const execute = async <T>(
@@ -75,9 +90,12 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
           ...new Set([...installedProviders, ...configuredProviders, ...(options.provider ?? [])]),
         ]),
       );
+      const output = options.summary && isFullStatusResult(result)
+        ? projectStatus(result, "summary")
+        : result;
       const rendered = options.json
-        ? JSON.stringify(successEnvelope(commandName, result), null, 2)
-        : formatHuman(result);
+        ? JSON.stringify(successEnvelope(commandName, output), null, 2)
+        : formatHuman(output);
       stdout.write(`${rendered}\n`);
     } catch (error) {
       const failure = failureEnvelope(commandName, error);
@@ -214,6 +232,9 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--title <title>", "human-readable title")
     .option("--base <ref>", "target branch or ref used as the Change baseline")
     .option("--managed-worktree", "record that RockSpec prepared this linked Worktree", false)
+    .option("--based-on-change <change-id>", "parent Change whose frozen delivery snapshot this Change extends")
+    .option("--reuse-workspace", "explicitly confirm sequential reuse of the current Worktree", false)
+    .option("--confirm-boundary", "confirm that this feedback is an independent Change", false)
     .addOption(new Option("--kind <kind>", "change kind used for triage").choices([...CHANGE_KINDS]).default("feature"))
     .addOption(new Option("--profile <profile>", "explicitly promote the selected profile").choices([...PROFILES]))
     .option("--risk <risk>", "risk tag; repeat for multiple tags", collect, [])
@@ -226,6 +247,9 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       profile?: WorkflowProfile;
       risk: string[];
       uiImpact: boolean;
+      basedOnChange?: string;
+      reuseWorkspace: boolean;
+      confirmBoundary: boolean;
     }, command: Command) => {
       await execute("new", command, async (engine) => {
         const triage = triageProfile({
@@ -240,6 +264,9 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
           profile: triage.profile,
           prototypeRequired: options.uiImpact,
           workspaceManaged: options.managedWorktree,
+          ...(options.basedOnChange ? { basedOnChange: options.basedOnChange } : {}),
+          ...(options.basedOnChange ? { reuseWorkspace: options.reuseWorkspace } : {}),
+          ...(options.basedOnChange ? { confirmBoundary: options.confirmBoundary } : {}),
         });
         return { ...status, triage };
       });
@@ -249,16 +276,82 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .command("status")
     .description("show current state without modifying it")
     .argument("[change-id]")
-    .action(async (changeId: string | undefined, _options: unknown, command: Command) => {
-      await execute("status", command, (engine) => engine.getStatus({ ...(changeId ? { changeId } : {}) }));
+    .option("--change <change-id>", "compatibility alias for the positional Change ID")
+    .addOption(new Option("--view <view>", "select a compact status projection").choices([...STATUS_VIEWS]).default("summary"))
+    .option("--full", "emit the complete Change snapshot", false)
+    .action(async (
+      positionalId: string | undefined,
+      options: { change?: string; view: StatusView; full: boolean },
+      command: Command,
+    ) => {
+      const view = options.full ? "full" : options.view;
+      await execute("status", command, async (engine) => {
+        const changeId = resolveChangeId(positionalId, options.change);
+        return projectStatus(
+          await engine.getStatus({ ...(changeId ? { changeId } : {}) }),
+          view,
+        );
+      });
+    });
+
+  const feedback = program.command("feedback").description("record user acceptance feedback and route it within or beyond a Change");
+  feedback
+    .command("submit")
+    .argument("[change-id]")
+    .addOption(new Option("--route <route>", "feedback boundary").choices(["same_change", "new_change"]).default("same_change"))
+    .addOption(new Option("--interaction <mode>", "feedback interaction mode").choices([...FEEDBACK_INTERACTION_MODES]).default("compact"))
+    .requiredOption("--reason <reason>", "why the accepted product needs adjustment")
+    .requiredOption("--item <description>", "one feedback item; repeat for a batch", collect, [])
+    .addOption(new Option("--target <capability>", "earliest affected capability").choices([...REVISION_TARGETS]))
+    .option("--affected <id>", "affected R-/S-/D- ID; repeat as needed", collect, [])
+    .option("--by <identity>", "feedback author", "user")
+    .option("--related-change <change-id>", "related Change when routing to a new Change")
+    .option("--author-execution <execution-id>", "feedback author execution ID required for reconcile mode")
+    .action(async (changeId: string | undefined, options: {
+      route: "same_change" | "new_change";
+      interaction: "reconcile" | "compact" | "full";
+      reason: string;
+      item: string[];
+      target?: "requirements" | "design" | "prototype" | "plan";
+      affected: string[];
+      by: string;
+      relatedChange?: string;
+      authorExecution?: string;
+    }, command: Command) => {
+      await execute("feedback.submit", command, (engine) => engine.submitFeedback({
+        route: options.route,
+        interactionMode: options.interaction,
+        reason: options.reason,
+        items: options.item,
+        ...(options.target ? { target: options.target } : {}),
+        affectedIds: options.affected,
+        submittedBy: options.by,
+        ...(options.relatedChange ? { relatedChangeId: options.relatedChange } : {}),
+        ...(options.authorExecution ? { authorExecutionId: options.authorExecution } : {}),
+        ...(changeId ? { changeId } : {}),
+      }));
     });
 
   program
     .command("continue")
     .description("resume by reading the engine's recommended next action")
     .argument("[change-id]")
-    .action(async (changeId: string | undefined, _options: unknown, command: Command) => {
-      await execute("continue", command, (engine) => engine.getStatus({ ...(changeId ? { changeId } : {}) }));
+    .option("--change <change-id>", "compatibility alias for the positional Change ID")
+    .addOption(new Option("--view <view>", "select a compact status projection").choices([...STATUS_VIEWS]).default("summary"))
+    .option("--full", "emit the complete Change snapshot", false)
+    .action(async (
+      positionalId: string | undefined,
+      options: { change?: string; view: StatusView; full: boolean },
+      command: Command,
+    ) => {
+      const view = options.full ? "full" : options.view;
+      await execute("continue", command, async (engine) => {
+        const changeId = resolveChangeId(positionalId, options.change);
+        return projectStatus(
+          await engine.getStatus({ ...(changeId ? { changeId } : {}) }),
+          view,
+        );
+      });
     });
 
   const action = program
@@ -315,6 +408,99 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     });
 
   program
+    .command("revise")
+    .description("open a controlled Revision or amend the active Revision with new Review Findings")
+    .argument("[change-id]")
+    .option("--amend", "append new Review Findings to the active Revision")
+    .option("--source <action-id>", "action where the inconsistency was discovered")
+    .addOption(new Option("--target <capability>", "earliest capability that must change").choices([...REVISION_TARGETS]))
+    .option("--review <review-id>", "triggering Review ID for implementation recovery")
+    .option("--finding <finding-id>", "triggering Open Finding ID; repeat for all recommended Findings", collect, [])
+    .addOption(new Option("--classification <classification>", "Revision materiality classification").choices([...REVISION_CLASSIFICATIONS]))
+    .addOption(new Option("--authority-impact <impact>", "whether approved intent or decisions change").choices([...AUTHORITY_IMPACTS]))
+    .option("--author-execution <execution-id>", "Revision Author execution ID required for automatic reconciliation")
+    .requiredOption("--reason <reason>", "why the approved or derived content must change")
+    .option("--affected <id>", "affected R-/S-/D- ID; repeat as needed", collect, [])
+    .action(async (changeId: string | undefined, options: {
+      amend?: boolean;
+      source?: string;
+      target?: "requirements" | "design" | "prototype" | "plan";
+      review?: string;
+      finding: string[];
+      classification?: (typeof REVISION_CLASSIFICATIONS)[number];
+      authorityImpact?: (typeof AUTHORITY_IMPACTS)[number];
+      authorExecution?: string;
+      reason: string;
+      affected: string[];
+    }, command: Command) => {
+      await execute(options.amend ? "revise.amend" : "revise", command, (engine) => {
+        if (options.source && !ACTION_IDS.includes(options.source as ActionId)) {
+          throw Object.assign(new Error(`Unknown Revision source action: ${options.source}`), {
+            code: "INVALID_ACTION",
+            details: { action_id: options.source },
+          });
+        }
+        const input = {
+          ...(options.source ? { source: options.source as ActionId } : {}),
+          ...(options.target ? { target: options.target } : {}),
+          reason: options.reason,
+          affectedIds: options.affected,
+          ...(options.review ? { reviewId: options.review } : {}),
+          ...(options.finding.length > 0 ? { findingIds: options.finding } : {}),
+          ...(options.classification ? { classification: options.classification } : {}),
+          ...(options.authorityImpact ? { authorityDelta: options.authorityImpact } : {}),
+          ...(options.authorExecution ? { authorExecutionId: options.authorExecution } : {}),
+          ...(changeId ? { changeId } : {}),
+        };
+        return options.amend ? engine.amendRevision(input) : engine.revise(input);
+      });
+    });
+
+  const reconcile = program
+    .command("reconcile")
+    .description("prepare or complete an independent automatic Reconciliation Review");
+  reconcile
+    .command("prepare")
+    .argument("<artifact-id>", "spec, design, or implementation")
+    .argument("[change-id]")
+    .action(async (artifactId: string, changeId: string | undefined, _options: unknown, command: Command) => {
+      await execute("reconcile.prepare", command, (engine) => {
+        if (!isApprovalGate(artifactId)) {
+          throw Object.assign(new Error(`Unknown reconciliation artifact: ${artifactId}`), {
+            code: "INVALID_APPROVAL_GATE",
+            details: { artifact_id: artifactId, allowed: ["spec", "design", "implementation"] },
+          });
+        }
+        return engine.prepareReconciliation({ gate: artifactId, ...(changeId ? { changeId } : {}) });
+      });
+    });
+  reconcile
+    .command("complete")
+    .argument("<artifact-id>", "spec, design, or implementation")
+    .argument("[change-id]")
+    .addOption(new Option("--verdict <verdict>").choices(["PASS", "CHANGES_REQUIRED", "BLOCKED"]))
+    .action(async (
+      artifactId: string,
+      changeId: string | undefined,
+      options: { verdict?: "PASS" | "CHANGES_REQUIRED" | "BLOCKED" },
+      command: Command,
+    ) => {
+      await execute("reconcile.complete", command, (engine) => {
+        if (!isApprovalGate(artifactId)) {
+          throw Object.assign(new Error(`Unknown reconciliation artifact: ${artifactId}`), {
+            code: "INVALID_APPROVAL_GATE",
+            details: { artifact_id: artifactId, allowed: ["spec", "design", "implementation"] },
+          });
+        }
+        return engine.completeReconciliation({
+          gate: artifactId,
+          ...(changeId ? { changeId } : {}),
+          ...(options.verdict ? { verdict: options.verdict } : {}),
+        });
+      });
+    });
+
+  program
     .command("validate")
     .description("validate a change and its current gate")
     .argument("[change-id]")
@@ -324,6 +510,45 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
         await engine.validate({ ...(changeId ? { changeId } : {}), strict: options.strict }),
         "VALIDATION_FAILED",
       ));
+    });
+
+  program
+    .command("preflight")
+    .description("validate Runtime installation and a stage before entering it")
+    .argument("<stage>", "currently: implementation")
+    .argument("[change-id]")
+    .option("--change <change-id>", "compatibility alias for the positional Change ID")
+    .action(async (
+      stage: string,
+      positionalId: string | undefined,
+      options: { change?: string },
+      command: Command,
+    ) => {
+      await execute("preflight", command, async (engine) => {
+        const changeId = resolveChangeId(positionalId, options.change);
+        if (stage !== "implementation") {
+          throw Object.assign(new Error(`Unknown preflight stage: ${stage}`), {
+            code: "INVALID_PREFLIGHT_STAGE",
+            details: { stage, allowed: ["implementation"] },
+          });
+        }
+        const cwd = command.optsWithGlobals<GlobalOptions>().cwd ?? process.cwd();
+        const installation = await doctorProject(cwd);
+        if (!installation.valid) {
+          throw Object.assign(new Error("RockSpec installation is not consistent with install.lock.yaml"), {
+            code: "PREFLIGHT_INSTALLATION_INVALID",
+            details: installation,
+          });
+        }
+        return {
+          ...await engine.preflightImplementation({ ...(changeId ? { changeId } : {}) }),
+          installation: {
+            valid: installation.valid,
+            rockspec_version: installation.rockspec_version,
+            project_root: installation.project_root,
+          },
+        };
+      });
     });
 
   program
@@ -373,10 +598,11 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .argument("<kind>", "task or delivery")
     .argument("[change-id]")
     .option("--task <task-id>")
+    .option("--scope-blocked", "prepare a scope-blocked Task Review package with no product Diff")
     .action(async (
       kind: string,
       changeId: string | undefined,
-      options: { task?: string },
+      options: { task?: string; scopeBlocked?: boolean },
       command: Command,
     ) => {
       await execute("review.package", command, (engine) => {
@@ -390,8 +616,20 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
           kind,
           ...(changeId ? { changeId } : {}),
           ...(options.task ? { taskId: options.task } : {}),
+          ...(options.scopeBlocked ? { mode: "scope_blocked" as const } : {}),
         });
       });
+    });
+
+  const knowledge = program.command("knowledge").description("prepare and inspect reusable knowledge evolution");
+  knowledge
+    .command("package")
+    .description("bind the Knowledge Delta and candidate files for review")
+    .argument("[change-id]")
+    .action(async (changeId: string | undefined, _options: unknown, command: Command) => {
+      await execute("knowledge.package", command, (engine) => engine.prepareKnowledgePackage({
+        ...(changeId ? { changeId } : {}),
+      }));
     });
 
   const check = program.command("check").description("execute checks and record bound evidence");
@@ -531,6 +769,16 @@ function integer(value: string): number {
 
 function isApprovalGate(value: string): value is "spec" | "design" | "implementation" {
   return value === "spec" || value === "design" || value === "implementation";
+}
+
+function resolveChangeId(positionalId?: string, optionId?: string): string | undefined {
+  if (positionalId && optionId && positionalId !== optionId) {
+    throw Object.assign(new Error("Positional Change ID and --change must identify the same Change"), {
+      code: "CHANGE_ID_CONFLICT",
+      details: { positional_change_id: positionalId, option_change_id: optionId },
+    });
+  }
+  return optionId ?? positionalId;
 }
 
 function parseInstallHosts(value: string): InstallHost[] {

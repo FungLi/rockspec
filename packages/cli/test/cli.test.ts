@@ -5,6 +5,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { createProgram } from "../src/program.js";
+import { parse } from "yaml";
+import type { RockSpecEngine } from "@rockspec/engine";
 
 const execFileAsync = promisify(execFile);
 const repositories: string[] = [];
@@ -52,6 +54,30 @@ async function run(root: string, args: string[]): Promise<{
   };
 }
 
+async function runWithEngine(
+  root: string,
+  args: string[],
+  engine: Partial<Pick<RockSpecEngine, "revise" | "amendRevision" | "prepareReconciliation" | "completeReconciliation" | "submitFeedback">>,
+): Promise<{ stdout: string; stderr: string; exitCode: number; json: Record<string, unknown> | undefined }> {
+  let stdout = "";
+  let stderr = "";
+  let exitCode = 0;
+  const program = createProgram({
+    stdout: { write: (value) => { stdout += value; } },
+    stderr: { write: (value) => { stderr += value; } },
+    setExitCode: (value) => { exitCode = value; },
+    engineFactory: () => engine as RockSpecEngine,
+  });
+  await program.parseAsync(["node", "rockspec", "--cwd", root, "--json", ...args]);
+  const serialized = stdout.trim() || stderr.trim();
+  return {
+    stdout,
+    stderr,
+    exitCode,
+    json: serialized ? JSON.parse(serialized) as Record<string, unknown> : undefined,
+  };
+}
+
 async function writeArtifact(
   root: string,
   changeId: string,
@@ -59,6 +85,16 @@ async function writeArtifact(
   content: string,
 ): Promise<void> {
   await writeFile(path.join(root, ".rockspec", "changes", changeId, relativePath), content);
+}
+
+async function approvedSpecHash(root: string, changeId: string): Promise<string> {
+  const snapshot = parse(await readFile(
+    path.join(root, ".rockspec", "changes", changeId, "change.yaml"),
+    "utf8",
+  )) as { approvals?: { spec?: { aggregate_hash?: string } } };
+  const hash = snapshot.approvals?.spec?.aggregate_hash;
+  if (!hash) throw new Error(`Missing Spec approval for ${changeId}`);
+  return hash;
 }
 
 async function writeCodeReview(
@@ -77,6 +113,79 @@ async function writeCodeReview(
 }
 
 describe("rockspec CLI", () => {
+  it("collects the first and repeated feedback items without an undefined accumulator", async () => {
+    const root = await createRepository();
+    let received: Parameters<RockSpecEngine["submitFeedback"]>[0] | undefined;
+    const result = await runWithEngine(root, [
+      "feedback", "submit", "feedback-parser",
+      "--reason", "Acceptance feedback",
+      "--item", "First adjustment",
+      "--item", "Second adjustment",
+      "--interaction", "compact",
+      "--target", "requirements",
+      "--affected", "R-001",
+    ], {
+      submitFeedback: async (input) => {
+        received = input;
+        return { current_state: "SCOPING" } as Awaited<ReturnType<RockSpecEngine["submitFeedback"]>>;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(received).toEqual({
+      changeId: "feedback-parser",
+      route: "same_change",
+      interactionMode: "compact",
+      reason: "Acceptance feedback",
+      items: ["First adjustment", "Second adjustment"],
+      target: "requirements",
+      affectedIds: ["R-001"],
+      submittedBy: "user",
+    });
+  });
+
+  it("returns compact status by default and accepts the --change compatibility alias", async () => {
+    const root = await createRepository();
+    expect((await run(root, ["init"])).exitCode).toBe(0);
+    expect((await run(root, ["new", "compact-status", "--kind", "copy"])).exitCode).toBe(0);
+
+    const summary = await run(root, ["status", "--change", "compact-status"]);
+    expect(summary.json).toMatchObject({
+      ok: true,
+      command: "status",
+      data: {
+        view: "summary",
+        change_id: "compact-status",
+        change: { id: "compact-status", task_counts: {} },
+      },
+    });
+    expect((summary.json?.data as Record<string, unknown>).evidence).toBeUndefined();
+
+    const full = await run(root, ["status", "compact-status", "--full"]);
+    expect(full.json).toMatchObject({
+      data: { current_state: "SCOPING", change: { id: "compact-status", evidence: [] } },
+    });
+
+    const conflict = await run(root, ["status", "compact-status", "--change", "another-change"]);
+    expect(conflict.json).toMatchObject({ ok: false, error: { code: "CHANGE_ID_CONFLICT" } });
+
+    await writeArtifact(
+      root,
+      "compact-status",
+      "brief.md",
+      "# Compact status\n\n## Scope\n\nUpdate copy only.\n\n## Verification\n\nRun the focused copy check.\n",
+    );
+    expect((await run(root, [
+      "--summary", "action", "complete", "change.triage", "compact-status",
+    ])).json).toMatchObject({
+      data: {
+        view: "summary",
+        change_id: "compact-status",
+        current_state: "IMPLEMENTING",
+      },
+    });
+  });
+
   it("installs non-interactively, validates the project Runtime, and uninstalls conservatively", async () => {
     const root = await createRepository();
     const installed = await run(root, [
@@ -192,8 +301,22 @@ describe("rockspec CLI", () => {
     expect(evidence.exitCode).toBe(0);
 
     expect((await run(root, ["verify", "rename-submit-button"])).json).toMatchObject({
-      data: { current_state: "READY_TO_FINISH" },
+      data: {
+        current_state: "READY_TO_FINISH",
+        recommended_next: { action: "knowledge.evolve", entry_skill: "rockspec-evolve" },
+      },
     });
+    await writeArtifact(
+      root,
+      "rename-submit-button",
+      "knowledge-delta.md",
+      "---\nschema_version: 1\nchange_id: rename-submit-button\nauthor_execution_id: cli-knowledge-author\noutcome: no_change\nupdates: []\n---\n\n# Knowledge Delta\n\nNo reusable knowledge.\n",
+    );
+    expect((await run(root, ["knowledge", "package", "rename-submit-button"])).json).toMatchObject({
+      data: { already_evolved: false, status: "pending", candidate_hashes: {} },
+    });
+    expect((await run(root, ["action", "complete", "knowledge.evolve", "rename-submit-button"])).json)
+      .toMatchObject({ data: { change: { knowledge_evolution: { status: "no_change" } } } });
     expect((await run(root, ["finish", "rename-submit-button"])).exitCode).toBe(0);
     expect((await run(root, ["archive", "rename-submit-button"])).json).toMatchObject({
       data: { current_state: "ARCHIVED" },
@@ -226,10 +349,157 @@ describe("rockspec CLI", () => {
     });
   });
 
+  it("opens a controlled Revision through the CLI", async () => {
+    const root = await createRepository();
+    const id = "simplify-costly-behavior";
+    await run(root, ["init"]);
+    await run(root, ["new", id, "--profile", "standard"]);
+    await writeArtifact(root, id, "proposal.md", "# Proposal\n\n## Why\n\nUsers need the behavior.\n");
+    await writeArtifact(root, id, "specs/change/spec.md", "## ADDED Requirements\n\n### R-001 Requirement: Costly behavior\n\nThe system MUST provide it.\n\n#### S-001 Scenario: Success\n\n- GIVEN a user\n- WHEN they request it\n- THEN it succeeds\n");
+    await run(root, ["action", "complete", "requirements.clarify", id]);
+    await writeArtifact(root, id, "reviews/requirements-review.md", "# Review\n\nVerdict: PASS\n");
+    await run(root, ["action", "complete", "requirements.review", id, "--verdict", "PASS"]);
+    await run(root, ["approve", "spec", id]);
+
+    const revision = await run(root, [
+      "revise", id,
+      "--source", "design.technical",
+      "--target", "requirements",
+      "--reason", "The approved behavior is disproportionately expensive",
+      "--affected", "R-001",
+      "--affected", "S-001",
+    ]);
+    expect(revision.exitCode).toBe(0);
+    expect(revision.json).toMatchObject({
+      ok: true,
+      command: "revise",
+      data: {
+        current_state: "SCOPING",
+        recommended_next: { action: "requirements.clarify", entry_skill: "rockspec-requirements" },
+        change: {
+          approvals: {},
+          revisions: [{ id: "RV-001", target: "requirements", status: "open" }],
+        },
+      },
+    });
+    await expect(readFile(path.join(root, ".rockspec", "changes", id, "revisions", "RV-001", "before", "proposal.md"), "utf8"))
+      .resolves.toContain("Users need the behavior");
+  });
+
+  it("passes Review and Finding bindings to an implementation Recovery Revision", async () => {
+    const root = await createRepository();
+    let received: Parameters<RockSpecEngine["revise"]>[0] | undefined;
+    const result = await runWithEngine(root, [
+      "revise", "recover-task-design",
+      "--review", "task:T-004",
+      "--finding", "F-001",
+      "--finding", "F-003",
+      "--reason", "Task Review exposed an approved Design gap",
+      "--affected", "D-003",
+      "--classification", "derived_gap",
+      "--authority-impact", "unchanged",
+      "--author-execution", "recovery-author",
+    ], {
+      revise: async (input) => {
+        received = input;
+        return {
+          current_state: "SPEC_APPROVED",
+          recovery: null,
+        } as Awaited<ReturnType<RockSpecEngine["revise"]>>;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json).toMatchObject({
+      ok: true,
+      command: "revise",
+      data: { current_state: "SPEC_APPROVED" },
+    });
+    expect(received).toEqual({
+      changeId: "recover-task-design",
+      reviewId: "task:T-004",
+      findingIds: ["F-001", "F-003"],
+      reason: "Task Review exposed an approved Design gap",
+      affectedIds: ["D-003"],
+      classification: "derived_gap",
+      authorityDelta: "unchanged",
+      authorExecutionId: "recovery-author",
+    });
+  });
+
+  it("dispatches --amend to the active Revision amendment path", async () => {
+    const root = await createRepository();
+    let received: Parameters<RockSpecEngine["amendRevision"]>[0] | undefined;
+    const result = await runWithEngine(root, [
+      "revise", "recover-task-design",
+      "--amend",
+      "--review", "readiness",
+      "--finding", "F-101",
+      "--finding", "F-102",
+      "--reason", "Readiness exposed another Design gap",
+      "--affected", "D-003",
+    ], {
+      amendRevision: async (input) => {
+        received = input;
+        return {
+          current_state: "SPEC_APPROVED",
+          recovery: null,
+        } as Awaited<ReturnType<RockSpecEngine["amendRevision"]>>;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json).toMatchObject({
+      ok: true,
+      command: "revise.amend",
+      data: { current_state: "SPEC_APPROVED" },
+    });
+    expect(received).toEqual({
+      changeId: "recover-task-design",
+      reviewId: "readiness",
+      findingIds: ["F-101", "F-102"],
+      reason: "Readiness exposed another Design gap",
+      affectedIds: ["D-003"],
+    });
+  });
+
+  it("dispatches Reconciliation prepare and complete commands", async () => {
+    const root = await createRepository();
+    const calls: string[] = [];
+    const engine = {
+      prepareReconciliation: async (input: Parameters<RockSpecEngine["prepareReconciliation"]>[0]) => {
+        calls.push(`prepare:${input.gate}:${input.changeId}`);
+        return { revision_id: "RV-001", gate: input.gate, round: 1 } as Awaited<ReturnType<RockSpecEngine["prepareReconciliation"]>>;
+      },
+      completeReconciliation: async (input: Parameters<RockSpecEngine["completeReconciliation"]>[0]) => {
+        calls.push(`complete:${input.gate}:${input.changeId}:${input.verdict}`);
+        return { current_state: "DESIGN_APPROVED" } as Awaited<ReturnType<RockSpecEngine["completeReconciliation"]>>;
+      },
+    };
+
+    expect((await runWithEngine(root, ["reconcile", "prepare", "design", "recover-design"], engine)).exitCode).toBe(0);
+    expect((await runWithEngine(root, [
+      "reconcile", "complete", "design", "recover-design", "--verdict", "PASS",
+    ], engine)).exitCode).toBe(0);
+    expect(calls).toEqual([
+      "prepare:design:recover-design",
+      "complete:design:recover-design:PASS",
+    ]);
+  });
+
   it("wires the Standard approvals, Task, Acceptance, and post-TE Final CR commands", async () => {
     const root = await createRepository();
     const id = "add-profile-export";
-    await run(root, ["init"]);
+    expect((await run(root, [
+      "install",
+      "--project", root,
+      "--source-root", sourceRoot,
+      "--hosts", "codex",
+      "--without", "ui.prototype",
+      "--yes",
+    ])).exitCode).toBe(0);
+    await execFileAsync("git", ["add", "."], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "chore: install rockspec"], { cwd: root });
     expect((await run(root, ["new", id, "--kind", "feature"])).json).toMatchObject({
       data: {
         recommended_next: {
@@ -266,12 +536,13 @@ describe("rockspec CLI", () => {
         recommended_next: { entry_skill: "rockspec-design", action: "design.technical" },
       },
     });
+    const specHash = await approvedSpecHash(root, id);
 
     await writeArtifact(
       root,
       id,
       "design.md",
-      "---\nschema_version: 1\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nExport through the existing public service boundary.\n\n## Decisions\n\n### D-001\n\nUse a deterministic JSON response.\n",
+      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nExport through the existing public service boundary.\n\n## Decisions\n\n### D-001\n\nUse a deterministic JSON response.\n`,
     );
     await run(root, ["action", "complete", "design.technical", id]);
     expect((await run(root, ["approve", "design", id])).json).toMatchObject({
@@ -297,6 +568,17 @@ describe("rockspec CLI", () => {
     await run(root, ["action", "complete", "plan.create", id]);
     await writeArtifact(root, id, "reviews/readiness-review.md", "# Review\n\nVerdict: PASS\n");
     await run(root, ["action", "complete", "readiness.review", id, "--verdict", "PASS"]);
+    expect((await run(root, ["preflight", "implementation", "--change", id])).json).toMatchObject({
+      ok: true,
+      command: "preflight",
+      data: {
+        valid: true,
+        change_id: id,
+        task_count: 1,
+        review_modes: ["product", "scope_blocked"],
+        installation: { valid: true, project_root: root },
+      },
+    });
     expect((await run(root, ["approve", "implementation", id])).json).toMatchObject({
       data: {
         current_state: "READY",
@@ -321,6 +603,7 @@ describe("rockspec CLI", () => {
       process.execPath, "-e", "process.exit(0)",
     ]);
     const taskPackage = await run(root, ["review", "package", "task", id, "--task", "T-001"]);
+    expect(taskPackage.exitCode, taskPackage.stderr).toBe(0);
     const taskSubject = (taskPackage.json?.data as { subject: {
       base_commit: string;
       head_commit: string;
@@ -344,7 +627,12 @@ describe("rockspec CLI", () => {
     await execFileAsync("git", ["commit", "-m", "test(profile): add export acceptance coverage"], { cwd: root });
     const acceptanceCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
     await writeArtifact(root, id, "testing/test-plan.md", "# Acceptance Test Plan\n\nCover S-001 through E2E.\n");
-    await writeArtifact(root, id, "testing/test-report.md", "# Acceptance Test Report\n\nVerdict: PASS\n");
+    await writeArtifact(
+      root,
+      id,
+      "testing/test-report.md",
+      `---\nschema_version: 1\nverdict: PASS\nreviewer_execution_id: acceptance-reviewer\ncommit: ${acceptanceCommit}\nfindings: []\n---\n\n# Acceptance Test Report\n\nVerdict: PASS\n`,
+    );
     await run(root, [
       "check", "run", "--change", id, "--action", "acceptance.validate", "--",
       process.execPath, "-e", "process.exit(0)",
@@ -378,9 +666,16 @@ describe("rockspec CLI", () => {
     expect((await run(root, ["verify", id])).json).toMatchObject({
       data: {
         current_state: "READY_TO_FINISH",
-        recommended_next: { entry_skill: "rockspec-finish", action: "finish" },
+        recommended_next: { entry_skill: "rockspec-evolve", action: "knowledge.evolve" },
       },
     });
+    await writeArtifact(
+      root,
+      id,
+      "knowledge-delta.md",
+      `---\nschema_version: 1\nchange_id: ${id}\nauthor_execution_id: standard-knowledge-author\noutcome: no_change\nupdates: []\n---\n\n# Knowledge Delta\n\nNo reusable knowledge.\n`,
+    );
+    await run(root, ["action", "complete", "knowledge.evolve", id]);
     expect((await run(root, ["gate", "finish", id])).json).toMatchObject({
       ok: true,
       data: { valid: true },
