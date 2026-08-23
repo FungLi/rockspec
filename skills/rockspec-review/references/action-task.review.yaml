@@ -23,7 +23,7 @@ executor:
       - "Diff 跨多个模块且需要复杂行为或回归判断。"
     record_selection: true
 reads:
-  artifacts: ["runtime/reviews/task-<task-id>-*.diff", "Engine 冻结的 Task Brief", "相关已批准 Specs 和 Design", "Implementer Report", "executed Task 证据"]
+  artifacts: ["runtime/reviews/task-<task-id>-*.diff（含 planned/changed/expanded paths）", "Engine 冻结的 Task Brief", "相关已批准 Specs 和 Design", "Implementer Report", "executed Task 证据"]
   repository: ["只通过 Review Package 读取固定 Task Diff", "仓库规则"]
 writes:
   artifacts: ["reviews/tasks/<task-id>-review*.md"]
@@ -34,17 +34,18 @@ completion:
   required:
     - "对 Spec、Design、规范和测试分别给出明确结论。"
     - "报告 YAML Frontmatter 原样绑定 Review Subject、Reviewer execution ID 和 round。"
-    - "每个 Finding 都在 Frontmatter 中包含稳定 ID、证据、严重度、类别、描述、责任域、route_to 和状态。"
+    - "每个 Finding 都在 Frontmatter 中包含稳定 ID、证据、严重度、类别、描述、责任域、route_to、状态、classification 和 authority_impact。"
     - "非 PASS 至少有一个 Open Finding；PASS 不包含 Open Critical/Important Finding。"
     - "修复轮报告携带上一轮全部 Findings，保持 ID 并更新状态；round 与 Engine Review Attempt 一致。"
     - "Strict 聚合保留两份报告和全部 Finding。"
 outcomes:
   pass: ["task.execute", "acceptance.validate"]
-  changes_required: ["task.execute"]
-  blocked: ["design.technical", "plan.create", "task.review"]
+  changes_required: ["task.execute", "revise"]
+  blocked: ["revise", "task.review"]
 invariants:
   - "Reviewer 不得编辑代码、测试、Task 产物或工作流状态。"
   - "Reviewer 必须不同于 Task Implementer。"
   - "Review Package 是唯一 Diff 来源；Subject 变化后旧报告失效。"
   - "修复轮次只复核 Open Finding、Fix Diff 和聚焦证据，除非修复引入新问题。"
   - "初审加修复 Review 最多三次，对应 round 0、1、2。"
+  - "Engine 根据 Open Finding 的 route_to 推导 Recovery；Reviewer 不得自行改变 Change 状态。"

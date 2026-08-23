@@ -1,0 +1,4 @@
+interface:
+  display_name: "RockSpec Evolve"
+  short_description: "从已验证的 Change 提炼并对账可复用项目知识"
+  default_prompt: "使用 $rockspec-evolve 提炼这个已验证 Change 中可复用的产品、架构和体验知识。"

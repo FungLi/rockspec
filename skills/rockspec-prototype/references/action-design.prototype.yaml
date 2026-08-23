@@ -4,7 +4,7 @@ engine_authority: "packages/engine/src/workflow.ts"
 id: "design.prototype"
 kind: "engine_action"
 profiles: ["standard", "strict"]
-summary: "创建 UI/UX 协议产物，并将其影响对账进 Technical Design。"
+summary: "创建绑定当前 Spec 和 Design Draft 的 UI/UX 协议产物。"
 executor:
   mode: "capability"
   capability: "ui.prototype"
@@ -20,21 +20,23 @@ writes:
     - "prototype/design-system.md"
     - "prototype/prototype.md"
     - "prototype/assets/**"
-    - "design.md"
 preconditions:
   - "prototype.required 为 true。"
   - "Engine Resolver 报告已配置的 Provider 可用。"
   - "宿主在 status 和 completion 调用中通过全局 --provider 或 ROCKSPEC_AVAILABLE_PROVIDERS 声明已安装 Provider。"
 completion:
   required:
+    - "compact feedback 以一个完整视觉 Delta 检查点覆盖所有受影响页面和状态，不按章节重复确认。"
     - "所有 UI Requirement 都映射到可检查的页面、状态和交互。"
     - "明确响应式和可访问性行为。"
-    - "技术影响已对账进 design.md。"
+    - "需要由 Design 对账的技术影响已通过 D/R/S ID 明确记录。"
+    - "Prototype Brief 声明当前 Spec Approval Hash、Design Draft Hash 和适用 R/S/D ID。"
 outcomes:
-  pass: []
+  pass: ["design.technical"]
   changes_required: ["requirements.clarify", "design.technical"]
   blocked: ["design.prototype"]
-requires_user_approval_on_pass: "design"
+requires_user_approval_on_pass: false
 invariants:
   - "Provider 输出不能迁移状态或批准 Design。"
   - "不得复制或再分发 Provider Skill。"
+  - "design.prototype 完成只表示原型可检查；必须由 design.technical 吸收影响并标记 reconciled 后才能批准 Design。"

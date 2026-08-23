@@ -1,3 +1,13 @@
+---
+schema_version: 1
+inputs:
+  spec_hash: "{{approved_spec_hash}}"
+  design_hash: "{{design_draft_hash}}"
+requirement_ids: [{{requirement_ids}}]
+scenario_ids: [{{scenario_ids}}]
+decision_ids: [{{decision_ids}}]
+---
+
 # 原型 Brief
 
 - Change ID：`{{change_id}}`

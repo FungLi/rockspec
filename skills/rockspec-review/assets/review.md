@@ -40,9 +40,11 @@ findings:
     owner_domain: implementation
     route_to: task.execute
     status: open
+    classification: implementation_fix
+    authority_impact: unchanged
 ```
 
-正文可按 Finding ID 补充解释，但不得与 Frontmatter 冲突。
+正文可按 Finding ID 补充解释，但不得与 Frontmatter 冲突。改变既有决策、产品意图或要求接受风险时分别使用 `decision_change`、`intent_change`、`risk_acceptance`，并将 `authority_impact` 设为 `changed` 或 `unknown`。
 
 ## 剩余风险
 

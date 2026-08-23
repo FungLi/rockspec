@@ -1,11 +1,15 @@
 ---
 name: rockspec-worktree
-description: 为并行或需要隔离的 RockSpec Change 建立、定位、恢复和安全收尾 Git Worktree，并验证分支、基线和 Change 工作区绑定。用户要求并行推进多个需求、创建隔离工作区、恢复另一个 Worktree 中的 Change，或完成后处理 Worktree 时使用。
+description: 用于并行需求、隔离开发、恢复 Change 或清理工作区；建立、定位、恢复和安全收尾 Git Worktree，并验证分支、基线和工作区绑定。
 ---
 
 # RockSpec Worktree
 
 只产出一个结果：可由唯一 Change 安全使用、基线明确且能够继续执行的工作区，或一个不会破坏现场的阻塞结论。
+
+## CLI 入口
+
+受治理模式把本文的 `rockspec ...` 视为逻辑命令：先从选定 Worktree 的 Git 根目录读取 `.rockspec/install.lock.yaml` 中的 `rockspec.runtime_path`，确认入口存在且 SHA-256 与锁中的 `integrity` 一致，再执行 `node <runtime_path> ...`。安装锁存在时禁止用 `command -v rockspec`、全盘 `find` 或 package manifest 猜测入口；锁、入口或完整性异常时停止并交给 `$rockspec-debug` 修复安装。
 
 ## 边界
 
@@ -13,6 +17,8 @@ description: 为并行或需要隔离的 RockSpec Change 建立、定位、恢�
 - 项目内 Skill、Plugin Manifest、`.rockspec/config.yaml` 和基线 Specs 由 Git 自动继承，不在新 Worktree 中重新安装或执行 `rockspec init`。
 - 用户不需要手动执行 `rockspec new`。全新 Change 由调用方在目标 Worktree 中通过 Engine 底层接口创建；已有 Change 只恢复并执行 `status/continue`。
 - 不自动 Stash、Commit、复制、Rebase、删除分支或解决语义冲突。
+- 产品验收反馈默认继续当前 Change 和当前 Worktree。只有确认是独立目标、独立发布或独立回滚单元时才建议新 Change；创建新 Change 或 Worktree 前必须向用户说明边界并取得确认。
+- 复用已有 Worktree 时，父 Change 必须先拥有冻结的 `delivery_head`，随后以 `rockspec new --based-on-change <parent> --reuse-workspace` 顺序交接；不能让两个 Change 同时写入同一个产品 HEAD。
 
 ## 准备或恢复
 

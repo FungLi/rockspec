@@ -29,15 +29,16 @@ preconditions:
   - "所有 Task 和 Remediation Task Gate 当前均通过。"
 completion:
   required:
+    - "test-report.md Frontmatter 绑定当前 Commit、真实 execution ID、Verdict；每个 Finding 声明 classification 和 authority_impact。"
     - "TE 所有的产品测试资产已提交；.rockspec 外不存在未提交的产品或测试改动。"
     - "每个适用 Scenario 都映射到当前 Commit 上已执行的验收证据。"
     - "记录环境、命令、退出码、失败、跳过项和资产 Commit。"
     - "适用时由 ui.prototype 提供响应式、可访问性和交互证据。"
 outcomes:
   pass: ["delivery.review"]
-  implementation_failure: ["task.execute"]
+  implementation_failure: ["revise", "plan.create", "task.execute"]
   test_asset_failure: ["acceptance.validate"]
-  blocked: ["acceptance.validate"]
+  blocked: ["revise", "acceptance.validate"]
 invariants:
   - "Acceptance 不得修改业务实现。"
   - "设计测试计划时不得读取 Task Review 或 Delivery Review 结论。"

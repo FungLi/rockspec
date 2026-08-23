@@ -17,4 +17,4 @@
 
 ## 报告
 
-返回 `PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`；把真实 Reviewer execution ID、Package 的 `base_commit`、`head_commit`、`diff_hash`、轮次和全部 Findings 写入 YAML Frontmatter；分别报告四个评审轴。非 PASS 必须有 Open Finding；PASS 不得保留 Open Critical/Important Finding。原样记录 Execution Brief 提供的 Deep Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。实施缺陷路由到 `task.execute` 并创建新的 Remediation Task；验收资产缺陷路由到 `acceptance.validate`。不得修改最终分支或声明 Engine Gate 已完成。
+返回 `PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`；把真实 Reviewer execution ID、Package 的 `base_commit`、`head_commit`、`diff_hash`、轮次和全部 Findings 写入 YAML Frontmatter；每个 Finding 声明 `classification` 和 `authority_impact`，并分别报告四个评审轴。只恢复批准行为时使用 `implementation_fix|derived_gap + unchanged`；改变决策/意图、接受风险或无法判断时使用人工分类及 `changed|unknown`。非 PASS 必须有 Open Finding；PASS 不得保留 Open Critical/Important Finding。原样记录 Execution Brief 提供的 Deep Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。实施缺陷路由到 `task.execute` 并创建新的 Remediation Task；验收资产缺陷路由到 `acceptance.validate`。不得修改最终分支或声明 Engine Gate 已完成。

@@ -14,6 +14,12 @@
 
 {{changed_files_and_responsibilities}}
 
+## 参考范围扩展
+
+{{paths_outside_task_allowed_paths_with_behavioral_justification_or_none}}
+
+逐项说明超出 Task `allowed_paths` 参考范围的路径为何是完成既有验收标准所必需，以及为何没有改变 Task 的行为、接口、依赖或责任边界。没有扩展时填写 `None`。
+
 ## TDD 与验证证据
 
 {{red_green_refactor_observations_and_executed_evidence_ids}}

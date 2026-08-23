@@ -21,7 +21,7 @@ completion:
     - "最终 Diff 在范围内，且不含无关或未评审改动。"
     - "没有必需检查被隐藏、过期或仅由 Agent 文字声明表示。"
 outcomes:
-  pass: ["change.archive"]
+  pass: ["knowledge.evolve"]
   implementation_failure: ["task.execute"]
   test_failure: ["acceptance.validate", "change.verify"]
   blocked: ["change.verify"]

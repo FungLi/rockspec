@@ -21,12 +21,15 @@ completion:
     - "Task 图无环、有序，并覆盖每个 Requirement/Scenario。"
     - "每个 Task 都可在新上下文中独立实施和评审。"
     - "plan.md 使用合法 Frontmatter 显式列出 verification_only_scenario_ids；未列入的每个 Scenario 都由 Task 覆盖。"
-    - "每个 Task 都包含合法 YAML Frontmatter，以及准确文件范围、非目标、ID、验收标准、环境前置条件、TDD 步骤、验证命令及预期失败和成功结果。"
+    - "每个 Task 都包含合法 YAML Frontmatter，以及 dependencies、supersedes、requirement_ids、scenario_ids、finding_ids、准确文件范围、验收标准、TDD 步骤和验证结果。"
     - "每个 Task 的 acceptance_criteria 非空；consumes 只能引用直接或传递依赖唯一 produces 的完全相同契约。"
-    - "每个 Task 的 allowed_paths 逐项列出可能创建、修改或测试的准确项目相对产品路径，并与正文文件范围一致。"
+    - "每个 Task 的 allowed_paths 一次性列出计划阶段可合理预见的项目相对产品路径，并与正文预计文件范围一致。"
     - "跨 Task 依赖使用 Consumes/Produces 固定接口名称、签名和类型。"
     - "每个 UI Task 都引用已批准的 Design System 和 Prototype。"
     - "完整计划不含占位表达，并已检查覆盖、文件职责、DAG 和跨 Task 接口一致性。"
+    - "Implementation Recovery 保留全部 Completed/Suspended Task；每个 Suspended Task 要么恢复，要么由带 supersedes 和 finding_ids 的新 Task 接管，且 Replacement 不得普通依赖旧 Task；feedback reopen 同步时必须原样保留历史 supersedes 和 R/S 追踪，当前 Spec 仍有的 R/S 可贡献覆盖，被 Revision 删除的 R/S 不阻塞且不计入当前覆盖。"
+    - "结合当前 Task 状态模拟执行图，至少存在一个可启动 Task，且所有 Pending/Resumable Task 最终可达。"
+    - "reconciliation 只补齐既有 Requirements/Design 的派生计划；重新选择交付决策或接受风险时升级人工。"
 outcomes:
   pass: ["readiness.review"]
   blocked: ["design.technical", "plan.create"]
@@ -36,3 +39,4 @@ invariants:
   - "Plan 不得用大段预写实现替代 Task 的接口、行为和验证契约。"
   - "allowed_paths 不得包含绝对路径、父目录跳转、反斜杠或 .rockspec/**。"
   - "Engine 是依赖目标、DAG、R/S 引用、覆盖和接口契约一致性的权威校验者。"
+  - "已完成 Task 的定义、Commit、Review 和 Evidence 不得在 Recovery Plan 中重写。"

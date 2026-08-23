@@ -27,15 +27,19 @@ reads:
   repository: ["仓库规则", "已声明接口", "环境和测试事实"]
 writes:
   artifacts: ["reviews/readiness-review*.md"]
+  template: "assets/readiness-review.md"
 completion:
   required:
+    - "每份 Reviewer 报告使用 schema_version/verdict/reviewer_execution_id/findings Frontmatter；非 PASS 至少包含一个 Open Finding。"
     - "已评审覆盖关系、决策、DAG、Task 粒度、风险、回滚、测试和前置条件。"
+    - "每个 Finding 声明 classification 和 authority_impact。"
     - "Review Hash 与当前 Design、Prototype、Plan 和 Tasks 一致。"
     - "Strict 聚合保留两份原始报告和全部 Finding。"
+    - "PASS 后运行 preflight implementation；安装一致性、审批新鲜度、Task DAG、Recovery 和两种 Task Review 路径全部通过后才请求或续期实施审批。"
 outcomes:
   pass: []
   changes_required: ["design.technical", "plan.create"]
   blocked: ["readiness.review"]
-requires_user_approval_on_pass: "implementation"
+requires_user_approval_on_pass: "首次 Implementation 或 gate_policies.implementation=human；auto 改由 reconcile.implementation 续期，preserve 不重复审批"
 invariants:
-  - "Reviewer 不得编辑被评审产物或替代用户审批。"
+  - "Reviewer 不得编辑被评审产物；普通 Review 不得替代首次用户审批，Reconciliation Review 只能续期已有 Authority Baseline。"

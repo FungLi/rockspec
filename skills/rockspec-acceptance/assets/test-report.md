@@ -1,3 +1,11 @@
+---
+schema_version: 1
+verdict: {{PASS_CHANGES_REQUIRED_BLOCKED}}
+reviewer_execution_id: "{{actual_acceptance_execution_id}}"
+commit: "{{tested_commit_sha}}"
+findings: []
+---
+
 # 验收测试报告
 
 - 已测试 Commit：`{{commit_sha}}`
@@ -19,6 +27,8 @@
 {{coverage_summary}}
 
 ## 缺陷
+
+`PASS` 使用 `findings: []`。非 `PASS` 必须将 Open Finding 写入 Frontmatter，并包含 `classification` 和 `authority_impact`；实现缺陷使用 `owner_domain: implementation`、`route_to: task.execute`、`classification: implementation_fix`，验收资产或下游派生缺口使用适用责任域、`classification: derived_gap`。只有确认不改变用户批准边界时才使用 `authority_impact: unchanged`；否则使用 `changed|unknown`。只写在正文中的缺陷不能驱动 Recovery。
 
 ### 实现缺陷
 

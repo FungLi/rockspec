@@ -1,11 +1,15 @@
 ---
 name: rockspec-triage
-description: 评估计划中或不断演进的仓库变更，选择最低安全的 Lite、Standard 或 Strict Profile，创建有边界的 Brief，并在风险扩大时升级。启动受治理 Change、判断小改动能否进入 Lite，或因新增范围与风险需要重新分级时使用。
+description: 用于启动 Change、判断 Lite 或风险升级；评估变更范围与风险，选择最低安全的 Lite、Standard 或 Strict Profile，并创建 Brief。
 ---
 
 # RockSpec 分级
 
 只产出一个结果：有证据支撑的流程 Profile 和边界明确的 Change Brief。
+
+## CLI 入口
+
+受治理模式把本文的 `rockspec ...` 视为逻辑命令：先从选定 Worktree 的 Git 根目录读取 `.rockspec/install.lock.yaml` 中的 `rockspec.runtime_path`，确认入口存在且 SHA-256 与锁中的 `integrity` 一致，再执行 `node <runtime_path> ...`。安装锁存在时禁止用 `command -v rockspec`、全盘 `find` 或 package manifest 猜测入口；锁、入口或完整性异常时停止并交给 `$rockspec-debug` 修复安装。
 
 ## 执行
 
