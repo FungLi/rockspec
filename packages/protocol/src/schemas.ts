@@ -4,6 +4,7 @@ import {
   APPROVAL_MODES,
   AUTHORITY_IMPACTS,
   FEEDBACK_INTERACTION_MODES,
+  EXECUTION_ROLES,
   FINDING_SEVERITIES,
   PROFILES,
   REVISION_CLASSIFICATIONS,
@@ -13,9 +14,11 @@ import {
   REVISION_TARGETS,
   REVIEW_VERDICTS,
   TASK_STATUSES,
+  UAT_POLICIES,
   WORKFLOW_STATES,
 } from "./constants.js";
 import { ChangeIdSchema } from "./change-id.js";
+import { ChangeKindSchema } from "./profile.js";
 import { parseProtocol, safeParseProtocol, type ValidationResult } from "./validation.js";
 
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
@@ -45,6 +48,8 @@ export const RevisionGatePolicySchema = z.enum(["preserve", "auto", "human"]);
 export const AuthorityImpactSchema = z.enum(AUTHORITY_IMPACTS);
 export const RevisionClassificationSchema = z.enum(REVISION_CLASSIFICATIONS);
 export const FeedbackInteractionModeSchema = z.enum(FEEDBACK_INTERACTION_MODES);
+export const UatPolicySchema = z.enum(UAT_POLICIES);
+export const ExecutionRoleSchema = z.enum(EXECUTION_ROLES);
 
 const RevisionTriggerSchema = z.object({
   review_id: z.string().min(1),
@@ -101,6 +106,8 @@ export const ApprovalSchema = z
     mode: ApprovalModeSchema.default("human"),
     revision_id: z.string().regex(/^RV-\d{3,}$/).optional(),
     authority_basis_hash: Sha256Schema.optional(),
+    package_path: z.string().min(1).optional(),
+    package_hash: Sha256Schema.optional(),
   })
   .strict()
   .superRefine((approval, context) => {
@@ -327,10 +334,75 @@ export const PrototypeSchema = z
 
 export type Prototype = z.infer<typeof PrototypeSchema>;
 
+export const TriageDecisionSchema = z.object({
+  kind: ChangeKindSchema,
+  risk_tags: z.array(z.string().trim().min(1)).default([]),
+  minimum_profile: WorkflowProfileSchema,
+  reasons: z.array(z.string().trim().min(1)).min(1),
+}).strict();
+
+export type TriageDecision = z.infer<typeof TriageDecisionSchema>;
+
+export const UatStateSchema = z.object({
+  policy: UatPolicySchema,
+  status: z.enum(["pending", "confirmed", "not_required"]),
+  report_path: z.string().min(1).optional(),
+  report_hash: Sha256Schema.optional(),
+  commit: GitCommitSchema.optional(),
+  confirmed_at: TimestampSchema.optional(),
+}).strict().superRefine((uat, context) => {
+  if (uat.policy === "required" && uat.status === "not_required") {
+    context.addIssue({ code: "custom", path: ["status"], message: "Required UAT cannot be marked not_required" });
+  }
+  if (uat.status === "confirmed" && (!uat.report_path || !uat.report_hash || !uat.commit || !uat.confirmed_at)) {
+    context.addIssue({ code: "custom", path: ["status"], message: "Confirmed UAT must bind its report, Commit, and time" });
+  }
+});
+
+export type UatState = z.infer<typeof UatStateSchema>;
+
+export const ExecutionRecordSchema = z.object({
+  id: z.string().uuid(),
+  role: ExecutionRoleSchema,
+  action: z.string().regex(/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/),
+  started_at: TimestampSchema,
+  completed_at: TimestampSchema.optional(),
+  outcome: z.enum(["success", "error", "cancelled"]).optional(),
+  model_tier: z.enum(["fast", "balanced", "deep"]).optional(),
+  host_model: z.string().trim().min(1).optional(),
+  parent_execution_id: z.string().uuid().optional(),
+  context_package_path: z.string().min(1).optional(),
+  context_package_hash: Sha256Schema.optional(),
+  usage: z.object({
+    input_tokens: z.number().int().nonnegative().optional(),
+    cached_input_tokens: z.number().int().nonnegative().optional(),
+    output_tokens: z.number().int().nonnegative().optional(),
+    reasoning_tokens: z.number().int().nonnegative().optional(),
+  }).strict().optional(),
+}).strict().superRefine((execution, context) => {
+  if (execution.outcome !== undefined && execution.completed_at === undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["completed_at"],
+      message: "Execution outcome requires a completion time",
+    });
+  }
+  if (execution.completed_at && execution.completed_at < execution.started_at) {
+    context.addIssue({
+      code: "custom",
+      path: ["completed_at"],
+      message: "Execution completion cannot precede its start",
+    });
+  }
+});
+
+export type ExecutionRecord = z.infer<typeof ExecutionRecordSchema>;
+
 export const ExecutionSchema = z
   .object({
     active_task: z.string().regex(/^T-\d{3,}$/).nullable(),
     active_execution: z.string().min(1).nullable(),
+    registry: z.array(ExecutionRecordSchema).default([]),
   })
   .strict()
   .superRefine((execution, context) => {
@@ -340,6 +412,10 @@ export const ExecutionSchema = z
         path: [],
         message: "active_task and active_execution must both be set or both be null",
       });
+    }
+    const ids = execution.registry.map((record) => record.id);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({ code: "custom", path: ["registry"], message: "Execution IDs must be unique" });
     }
   });
 
@@ -365,6 +441,14 @@ export const ReviewSubjectSchema = z
 
 export type ReviewSubject = z.infer<typeof ReviewSubjectSchema>;
 
+export const ScopeAssessmentSchema = z.object({
+  path: RepositoryRelativePathSchema,
+  disposition: z.enum(["justified", "unrelated"]),
+  rationale: z.string().trim().min(1),
+}).strict();
+
+export type ScopeAssessment = z.infer<typeof ScopeAssessmentSchema>;
+
 const InterfaceContractSchema = z.string().trim().min(1).max(500);
 
 export const PlanDefinitionSchema = z
@@ -384,6 +468,58 @@ export const PlanDefinitionSchema = z
   });
 
 export type PlanDefinition = z.infer<typeof PlanDefinitionSchema>;
+
+const AssumptionSchema = z.object({
+  id: z.string().regex(/^A-\d{3,}$/),
+  description: z.string().trim().min(1),
+  basis: z.string().trim().min(1),
+  impact_if_wrong: z.string().trim().min(1),
+}).strict();
+
+const OpenQuestionSchema = z.object({
+  id: z.string().regex(/^Q-\d{3,}$/),
+  question: z.string().trim().min(1),
+  impact: z.string().trim().min(1),
+  status: z.enum(["blocking", "non_blocking", "resolved"]),
+}).strict();
+
+export const ProposalDefinitionSchema = z.object({
+  schema_version: z.literal(1),
+  non_goals: z.array(z.string().trim().min(1)).default([]),
+  assumptions: z.array(AssumptionSchema).default([]),
+  open_questions: z.array(OpenQuestionSchema).default([]),
+}).strict().superRefine((proposal, context) => {
+  for (const field of ["assumptions", "open_questions"] as const) {
+    const ids = proposal[field].map((item) => item.id);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({ code: "custom", path: [field], message: `Proposal ${field} IDs must be unique` });
+    }
+  }
+  if (proposal.open_questions.some((question) => question.status === "blocking")) {
+    context.addIssue({ code: "custom", path: ["open_questions"], message: "Blocking Proposal questions must be resolved before Spec Review" });
+  }
+});
+
+export type ProposalDefinition = z.infer<typeof ProposalDefinitionSchema>;
+
+export const ApprovalPackageSchema = z.object({
+  schema_version: z.literal(1),
+  gate: ApprovalGateSchema,
+  generated_at: TimestampSchema,
+  artifact_hashes: z.record(z.string().min(1), Sha256Schema),
+  aggregate_hash: Sha256Schema,
+  summary: z.object({
+    non_goals: z.array(z.string()),
+    assumptions: z.array(AssumptionSchema),
+    open_questions: z.array(OpenQuestionSchema),
+    requirement_ids: z.array(z.string().regex(/^R-\d{3,}$/)),
+    scenario_ids: z.array(z.string().regex(/^S-\d{3,}$/)),
+    decision_ids: z.array(z.string().regex(/^D-\d{3,}$/)),
+    task_ids: z.array(z.string().regex(/^T-\d{3,}$/)),
+  }).strict(),
+}).strict();
+
+export type ApprovalPackage = z.infer<typeof ApprovalPackageSchema>;
 
 const DesignDecisionCoverageSchema = z
   .object({
@@ -452,6 +588,7 @@ export const TaskDefinitionSchema = z
     supersedes: z.array(z.string().regex(/^T-\d{3,}$/)).default([]),
     requirement_ids: z.array(z.string().regex(/^R-\d{3,}$/)).min(1),
     scenario_ids: z.array(z.string().regex(/^S-\d{3,}$/)).min(1),
+    decision_ids: z.array(z.string().regex(/^D-\d{3,}$/)).min(1),
     finding_ids: z.array(z.string().regex(/^F-\d{3,}$/)).default([]),
     acceptance_criteria: z.array(z.string().trim().min(1)).min(1),
     consumes: z.array(InterfaceContractSchema).default([]),
@@ -481,7 +618,7 @@ export const TaskDefinitionSchema = z
         message: "A Task cannot supersede itself",
       });
     }
-    for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"] as const) {
+    for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"] as const) {
       if (new Set(task[field]).size !== task[field].length) {
         context.addIssue({
           code: "custom",
@@ -526,6 +663,7 @@ export const TaskRecordSchema = z
     supersedes: z.array(z.string().regex(/^T-\d{3,}$/)).default([]),
     requirement_ids: z.array(z.string().regex(/^R-\d{3,}$/)).default([]),
     scenario_ids: z.array(z.string().regex(/^S-\d{3,}$/)).default([]),
+    decision_ids: z.array(z.string().regex(/^D-\d{3,}$/)).default([]),
     finding_ids: z.array(z.string().regex(/^F-\d{3,}$/)).default([]),
     acceptance_criteria: z.array(z.string().min(1)).default([]),
     consumes: z.array(InterfaceContractSchema).default([]),
@@ -706,6 +844,7 @@ export const ReviewDocumentSchema = z
     ),
     subject: ReviewSubjectSchema,
     round: z.number().int().nonnegative().default(0),
+    scope_assessment: z.array(ScopeAssessmentSchema).default([]),
     findings: z.array(FindingSchema).default([]),
   })
   .strict()
@@ -723,6 +862,9 @@ export const ReviewDocumentSchema = z
         path: ["verdict"],
         message: "PASS cannot contain open critical or important findings",
       });
+    }
+    if (review.verdict === "PASS" && review.scope_assessment.some((item) => item.disposition === "unrelated")) {
+      context.addIssue({ code: "custom", path: ["scope_assessment"], message: "PASS cannot accept an unrelated expanded path" });
     }
     if (
       review.verdict !== "PASS" &&
@@ -774,6 +916,17 @@ export const StageReviewDocumentSchema = z
 
 export type StageReviewDocument = z.infer<typeof StageReviewDocumentSchema>;
 
+export const ScenarioCoverageSchema = z.object({
+  scenario_id: z.string().regex(/^S-\d{3,}$/),
+  test_ids: z.array(z.string().trim().min(1)).min(1),
+  evidence_ids: z.array(z.string().regex(/^E-\d{3,}$/)).min(1),
+}).strict();
+
+export const UiEvidenceCoverageSchema = z.object({
+  dimension: z.enum(["responsive", "accessibility", "interaction"]),
+  evidence_ids: z.array(z.string().regex(/^E-\d{3,}$/)).min(1),
+}).strict();
+
 export const AcceptanceDocumentSchema = z
   .object({
     schema_version: z.literal(1),
@@ -783,6 +936,8 @@ export const AcceptanceDocumentSchema = z
       "Acceptance must identify the actual reviewer execution",
     ),
     commit: GitCommitSchema,
+    scenario_coverage: z.array(ScenarioCoverageSchema).default([]),
+    ui_evidence: z.array(UiEvidenceCoverageSchema).default([]),
     findings: z.array(FindingSchema).default([]),
   })
   .strict()
@@ -793,9 +948,28 @@ export const AcceptanceDocumentSchema = z
     if (report.verdict !== "PASS" && !report.findings.some((finding) => finding.status === "open")) {
       context.addIssue({ code: "custom", path: ["findings"], message: "A non-PASS Acceptance must contain an Open Finding" });
     }
+    const scenarioIds = report.scenario_coverage.map((item) => item.scenario_id);
+    if (new Set(scenarioIds).size !== scenarioIds.length) {
+      context.addIssue({ code: "custom", path: ["scenario_coverage"], message: "Acceptance Scenario coverage must be unique" });
+    }
+    const dimensions = report.ui_evidence.map((item) => item.dimension);
+    if (new Set(dimensions).size !== dimensions.length) {
+      context.addIssue({ code: "custom", path: ["ui_evidence"], message: "UI evidence dimensions must be unique" });
+    }
   });
 
 export type AcceptanceDocument = z.infer<typeof AcceptanceDocumentSchema>;
+
+export const UatDocumentSchema = z.object({
+  schema_version: z.literal(1),
+  verdict: z.literal("CONFIRMED"),
+  confirmed_by: z.string().trim().min(1),
+  commit: GitCommitSchema,
+  scenario_ids: z.array(z.string().regex(/^S-\d{3,}$/)).min(1),
+  notes: z.string().trim().min(1),
+}).strict();
+
+export type UatDocument = z.infer<typeof UatDocumentSchema>;
 
 export const ReviewSchema = z
   .object({
@@ -1083,6 +1257,7 @@ export const ChangeSnapshotSchema = z
     id: ChangeIdSchema,
     title: z.string().min(1),
     profile: WorkflowProfileSchema,
+    triage: TriageDecisionSchema.optional(),
     state: ChangeStateSchema,
     base_ref: z.string().min(1).nullable(),
     base_commit: GitCommitSchema.nullable(),
@@ -1095,6 +1270,7 @@ export const ChangeSnapshotSchema = z
     revisions: z.array(RevisionSchema).default([]),
     feedback_batches: z.array(FeedbackBatchSchema).default([]),
     prototype: PrototypeSchema,
+    uat: UatStateSchema.default({ policy: "not_applicable", status: "not_required" }),
     execution: ExecutionSchema,
     tasks: z.record(z.string().regex(/^T-\d{3,}$/), TaskRecordSchema),
     evidence: z.array(EvidenceSchema).default([]),
@@ -1162,6 +1338,16 @@ export const CapabilityBindingSchema = z
   })
   .strict();
 
+export const EnvironmentPreflightCheckSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9._-]*$/),
+  kind: z.enum(["database", "browser", "credential", "custom"]),
+  command: z.string().trim().min(1),
+  args: z.array(z.string()).default([]),
+  required: z.boolean().default(true),
+}).strict();
+
+export type EnvironmentPreflightCheck = z.infer<typeof EnvironmentPreflightCheckSchema>;
+
 export const WorkspaceConfigSchema = z
   .object({
     mode: z.enum(["auto", "current", "worktree"]).default("auto"),
@@ -1188,8 +1374,9 @@ export const ConfigSchema = z
       branch_prefix: "rockspec/",
       auto_create: false,
     }),
-    max_review_rounds: z.number().int().min(1).max(10).optional(),
+    max_review_rounds: z.number().int().min(1).max(10).default(3),
     max_reconciliation_rounds: z.number().int().min(1).max(5).default(2),
+    environment_preflight: z.array(EnvironmentPreflightCheckSchema).default([]),
   })
   .strict();
 

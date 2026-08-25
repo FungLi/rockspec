@@ -11,7 +11,7 @@
 
 ## 数据来源
 
-优先从 `.rockspec/archive/**` 的 `change.yaml`、`events.ndjson`、Review Frontmatter、Task Record 和 Evidence 元数据确定性提取；暂时无法自动取得的时间等待、人工批准等待和逃逸缺陷由维护者补充，但必须标记为人工数据。
+优先从 `.rockspec/archive/**` 的 `change.yaml`、`events.ndjson`、Review Frontmatter、Task Record、Evidence 元数据，以及 `.rockspec/telemetry/commands.ndjson` 的隐私安全 Runtime 记录确定性提取；暂时无法自动取得的 Agent Token、人工批准等待和逃逸缺陷由维护者补充，但必须标记为人工数据。Telemetry 不记录 Prompt、源码、命令参数或用户反馈正文，也不作为治理证据。
 
 每个 Change 至少记录：
 
@@ -24,9 +24,14 @@
 | `repair_rounds` | Task、Acceptance、Delivery 各自触发的修复轮次 |
 | `task_count` | 普通 Task 和 Remediation Task 数量 |
 | `elapsed_time` | Change 总时长、Agent 执行时长、人工等待时长和验证时长 |
+| `human_checkpoints` | 按 Decision Package、Spec/Design/Implementation Approval、UAT 和其他人工停点分类的次数；章节式或重复确认单独记为流程异常 |
+| `runtime_friction` | CLI 调用总数、错误码分布、`INTERNAL_ERROR` 数、重复调用及命令耗时 |
+| `context_weight` | Agent 上下文包和 Runtime 响应的字节数；无法取得时明确标为缺失 |
 | `model_tier` | 每次 Subagent 调度实际选择的 fast、balanced、deep 及宿主模型 |
 | `findings` | Finding severity、category、owner_domain、route_to 和最终状态 |
 | `escaped_defects` | Archive 后确认与该 Change 相关的缺陷数及严重度 |
+
+确认成本必须与质量结果一起评估：减少章节停点不能删除完整产物、独立 Review、Hash Approval、Evidence 或 Final CR；同一 Authority 决策被换一种措辞再次询问应计为重复停点，而不是治理收益。
 
 ## Gate 收益判断
 

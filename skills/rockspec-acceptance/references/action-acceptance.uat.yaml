@@ -1,0 +1,28 @@
+schema_version: 1
+authority: "agent-guidance"
+engine_authority: "packages/engine/src/workflow.ts"
+id: "acceptance.uat"
+kind: "engine_action"
+profiles: ["standard", "strict"]
+summary: "仅在 Change 的 UAT policy 为 required 时，绑定用户对当前 Commit 和核心 Scenario 的确认。"
+executor:
+  mode: "inline"
+  may_delegate: false
+reads:
+  artifacts: ["testing/uat-report.md", "已批准的 specs/**/*.md", "testing/test-report.md"]
+writes:
+  artifacts: ["testing/uat-report.md"]
+  repository: []
+preconditions:
+  - "acceptance.validate 已 PASS。"
+  - "change.uat.policy == required 且状态为 UAT_PENDING。"
+completion:
+  required:
+    - "用户确认的是当前 HEAD。"
+    - "报告至少绑定一个当前批准 Scenario。"
+outcomes:
+  confirmed: ["delivery.review"]
+  feedback: ["feedback.submit"]
+invariants:
+  - "optional 或 not_applicable 不得制造人工停止点。"
+  - "Agent 不得代替用户填写 confirmed_by 或声称 CONFIRMED。"

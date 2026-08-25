@@ -6,6 +6,7 @@ dependencies: [{{task_dependency_ids}}]
 supersedes: [{{suspended_task_ids_replaced_or_empty}}]
 requirement_ids: [{{requirement_ids}}]
 scenario_ids: [{{scenario_ids}}]
+decision_ids: [{{decision_ids}}]
 finding_ids: [{{remediation_finding_ids_or_empty}}]
 acceptance_criteria:
   - "{{machine_checkable_acceptance_criterion}}"

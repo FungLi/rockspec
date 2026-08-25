@@ -1,3 +1,19 @@
+---
+schema_version: 1
+non_goals:
+  - "{{non_goal_or_remove_item}}"
+assumptions:
+  - id: A-001
+    description: "{{assumption}}"
+    basis: "{{basis}}"
+    impact_if_wrong: "{{impact_if_wrong}}"
+open_questions:
+  - id: Q-001
+    question: "{{question}}"
+    impact: "{{scope_behavior_compatibility_or_acceptance_impact}}"
+    status: resolved
+---
+
 # Proposal：{{title}}
 
 ## 原因与价值

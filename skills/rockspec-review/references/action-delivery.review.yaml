@@ -19,7 +19,7 @@ executor:
     minimum: "deep"
     record_selection: true
 reads:
-  artifacts: ["runtime/reviews/delivery-*.diff", "已批准的 Specs、Design 和 Prototype", "全部 Task 报告和评审", "testing/test-plan.md", "testing/test-report.md", "全部证据"]
+  artifacts: ["Delivery Role Context Package", "runtime/reviews/delivery-*.diff", "已批准的 Specs、Design 和 Prototype", "全部 Task 报告和评审", "testing/test-plan.md", "testing/test-report.md", "全部证据"]
   repository: ["只通过 Review Package 读取基线..验收后最终 Commit Diff", "仓库规则"]
 writes:
   artifacts: ["reviews/delivery-review*.md"]

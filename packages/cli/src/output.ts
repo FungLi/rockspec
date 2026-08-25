@@ -20,6 +20,10 @@ export interface CliFailure {
     code: string;
     message: string;
     details: unknown;
+    retryable: boolean;
+    state_changed: boolean;
+    recovery_command: string | null;
+    recommended_next: unknown;
   };
 }
 
@@ -29,15 +33,48 @@ export function successEnvelope<T>(command: string, data: T): CliSuccess<T> {
 
 export function failureEnvelope(command: string, error: unknown): CliFailure {
   const candidate = asErrorRecord(error);
+  const code = typeof candidate.code === "string" ? candidate.code : "INTERNAL_ERROR";
+  const details = candidate.details ?? candidate.issues ?? null;
+  const detailRecord = isRecord(details) ? details : {};
+  const changeId = typeof detailRecord.change_id === "string" ? detailRecord.change_id : undefined;
+  const recoverApplyCodes = new Set([
+    "RECOVERY_TRIGGER_MISMATCH",
+    "RECOVERY_SOURCE_MISMATCH",
+    "RECOVERY_TARGET_MISMATCH",
+    "REVISION_AMENDMENT_FINDING_REQUIRED",
+    "REVISION_AUTHOR_REQUIRED",
+  ]);
+  const changeIdForRecovery = changeId ?? "[change-id]";
+  const recommendedCommandByCode: Record<string, string> = {
+    EXECUTION_ALREADY_ACTIVE: `rockspec execution complete ${String(detailRecord.execution_id ?? "[execution-id]")} ${changeIdForRecovery} --outcome success`,
+    ENVIRONMENT_PREFLIGHT_FAILED: `rockspec preflight environment ${changeIdForRecovery}`,
+    ACCEPTANCE_PREFLIGHT_REQUIRED: `rockspec preflight acceptance ${changeIdForRecovery}`,
+    COMPLETED_TASK_IMMUTABLE: `rockspec action complete plan.create ${changeIdForRecovery}  # append a new Remediation Task; keep completed Tasks unchanged`,
+    SUSPENDED_TASK_IMMUTABLE: `rockspec action complete plan.create ${changeIdForRecovery}  # append a new Replacement Task; keep suspended Tasks unchanged`,
+    RECOVERY_PLAN_APPEND_ONLY: `rockspec action complete plan.create ${changeIdForRecovery}  # restore immutable Tasks and append a new Finding-bound Task`,
+    UNASSIGNED_PRODUCT_COMMIT: `rockspec action complete plan.create ${changeIdForRecovery}  # attach the repair to a Remediation Task`,
+    UNASSIGNED_PRODUCT_COMMIT_REVIEW_REQUIRED: `rockspec action complete delivery.review ${changeIdForRecovery} --verdict CHANGES_REQUIRED`,
+  };
+  const recoveryCommand = typeof candidate.recovery_command === "string"
+    ? candidate.recovery_command
+    : recommendedCommandByCode[code]
+      ? recommendedCommandByCode[code]
+    : recoverApplyCodes.has(code)
+      ? `rockspec recover apply${changeId ? ` ${changeId}` : " [change-id]"}`
+      : null;
   return {
     schema_version: CLI_SCHEMA_VERSION,
     ok: false,
     command,
     error: {
-      code: typeof candidate.code === "string" ? candidate.code : "INTERNAL_ERROR",
+      code,
       message:
         typeof candidate.message === "string" ? candidate.message : "An unexpected error occurred",
-      details: candidate.details ?? candidate.issues ?? null,
+      details,
+      retryable: candidate.retryable === true || code === "LOCK_TIMEOUT",
+      state_changed: candidate.state_changed === true,
+      recovery_command: recoveryCommand,
+      recommended_next: candidate.recommended_next ?? detailRecord.recommended_next ?? null,
     },
   };
 }

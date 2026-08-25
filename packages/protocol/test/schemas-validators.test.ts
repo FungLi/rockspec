@@ -3,6 +3,7 @@ import {
   AcceptanceDocumentSchema,
   ChangeSnapshotSchema,
   DesignDefinitionSchema,
+  ExecutionRecordSchema,
   FindingSchema,
   InstallLockSchema,
   InstallManifestSchema,
@@ -70,6 +71,8 @@ describe("config and change snapshot schemas", () => {
       schema_version: 1,
       default_profile: "standard",
       max_reconciliation_rounds: 2,
+      max_review_rounds: 3,
+      environment_preflight: [],
       capabilities: {},
       workspace: {
         mode: "auto",
@@ -258,6 +261,7 @@ describe("review, evidence, and task commit validation", () => {
       dependencies: [],
       requirement_ids: ["R-001"],
       scenario_ids: ["S-001"],
+      decision_ids: ["D-001"],
       acceptance_criteria: ["The behavior is observable"],
       consumes: [],
       produces: ["feature.run(input: Input): Output"],
@@ -271,6 +275,7 @@ describe("review, evidence, and task commit validation", () => {
       supersedes: ["T-001"],
       requirement_ids: ["R-001"],
       scenario_ids: ["S-001"],
+      decision_ids: ["D-001"],
       finding_ids: ["F-001"],
       acceptance_criteria: ["The replacement closes the recovery finding"],
       allowed_paths: ["src/feature.ts"],
@@ -627,6 +632,19 @@ describe("review, evidence, and task commit validation", () => {
     };
     expect(validateTaskCommit(task, "feat(profile): [T-001] save profile").valid).toBe(true);
     expect(validateTaskCommit(task, "feat(profile): save profile").valid).toBe(false);
+  });
+
+  it("binds execution completion time and outcome as one metric", () => {
+    const base = {
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      role: "requirements_reviewer",
+      action: "requirements.review",
+      started_at: now,
+    };
+    expect(ExecutionRecordSchema.safeParse(base).success).toBe(true);
+    expect(ExecutionRecordSchema.safeParse({ ...base, completed_at: later }).success).toBe(true);
+    expect(ExecutionRecordSchema.safeParse({ ...base, outcome: "success" }).success).toBe(false);
+    expect(ExecutionRecordSchema.safeParse({ ...base, completed_at: later, outcome: "success" }).success).toBe(true);
   });
 
   it("prevents a commit from belonging to multiple tasks", () => {

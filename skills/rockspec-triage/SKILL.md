@@ -14,7 +14,7 @@ description: 用于启动 Change、判断 Lite 或风险升级；评估变更范
 ## 执行
 
 1. 检查仓库规则、目标区域、可观察行为、可能依赖、回滚方式和可用验证命令。
-2. 评估用户可见范围、数据/安全/兼容性风险、UI 影响及是否需要原型。紧急程度不能降低 Profile。
+2. 评估用户可见范围、数据/安全/兼容性风险、UI 影响、是否需要原型及需求不确定性。只有仍需新的产品选择或外部事实才能前进时才路由 Research/full authoring；能够直接转换为可测试 Scenario 的反馈不因措辞简略而升级。紧急程度不能降低 Profile。
 3. 受治理 Change 应提出不可变的英文 kebab-case Change ID，并确定 kind、风险标签、向上升级、UI Impact 和目标基线；然后调用 `$rockspec-worktree` 选择或恢复工作区。
 4. 只在选定工作区内由编排器调用底层 `rockspec new`，传入检测结果和目标基线；Worktree 由 RockSpec 创建时传入 `--managed-worktree`。用户不手动执行该命令，新 Worktree 不执行 `rockspec init`。
 5. 生成 `.rockspec/changes/<change-id>/brief.md` 后提交 `change.triage`。Lite 准入后来失效时通过 `change.promote` 升级。

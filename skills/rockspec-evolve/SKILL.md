@@ -15,8 +15,8 @@ description: 用于 RockSpec Change 收尾前，从已验证的 Requirements、D
 
 1. 查询 Engine 状态。仅在 `READY_TO_FINISH` 且推荐 `knowledge.evolve` 时执行写操作；对已归档 Change 只运行 `rockspec knowledge package <change-id>` 核验凭证。
 2. 读取已验证的 Spec、Design、Prototype、实现证据、Acceptance 和 Delivery Review，并对照 `.rockspec/specs/**` 与 `.rockspec/knowledge/**`。区分一次性选择与跨 Change 可复用的产品语境、架构契约、体验模式。
-3. 从 [knowledge-delta.md](assets/knowledge-delta.md) 写入 Change 根目录的统一 `knowledge-delta.md`。候选完整文件写入 `knowledge/updates/<target>`；不得直接修改 `.rockspec/knowledge/**`。
-4. `no_change` 也必须生成 Delta。存在候选更新时，运行 `rockspec knowledge package <change-id>` 固定 Source、Delta、基线和候选 Hash，然后让独立 Reviewer 按 [role-knowledge-reviewer.md](references/role-knowledge-reviewer.md) 写入 `reviews/knowledge-review.md`。
+3. 先运行 `rockspec execution start knowledge.evolve.author --role knowledge_author`，把返回 ID 写入 [knowledge-delta.md](assets/knowledge-delta.md)，并保存到 Change 根目录。候选完整文件写入 `knowledge/updates/<target>`；Author 完成写入后立即运行 `rockspec execution complete <id> <change-id> --outcome <outcome>`。不得直接修改 `.rockspec/knowledge/**`。
+4. `no_change` 也必须生成 Delta。存在候选更新时，运行 `rockspec knowledge package <change-id>` 固定 Source、Delta、基线和候选 Hash；独立 Reviewer 先运行 `rockspec execution start knowledge.evolve.review --role knowledge_reviewer`，再按 [role-knowledge-reviewer.md](references/role-knowledge-reviewer.md) 写入 `reviews/knowledge-review.md`；Reviewer 返回并写完报告后立即运行 `rockspec execution complete <id> <change-id> --outcome <outcome>`。
 5. `normative` 更新必须先向用户展示拟改变的公共规则并取得明确确认，将确认人和时间写入 Delta。`derived` 更新由独立 Review 通过即可。
 6. 运行 `rockspec action complete knowledge.evolve <change-id>`，随后重新查询状态。Engine 写入 Change 侧凭证；归档事务才安装候选知识并写入 `.rockspec/knowledge/.evolution/<change-id>.yaml`。
 

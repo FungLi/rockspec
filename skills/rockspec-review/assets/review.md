@@ -7,6 +7,7 @@ subject:
   head_commit: "{{review_package_head_commit}}"
   diff_hash: "{{review_package_diff_hash}}"
 round: {{zero_for_initial_review_one_or_two_for_fix_review}}
+scope_assessment: []
 findings: []
 ---
 

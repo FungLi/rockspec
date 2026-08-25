@@ -21,7 +21,27 @@ describe("CLI output", () => {
       }),
     ).toMatchObject({
       ok: false,
-      error: { code: "GATE_FAILED", details: ["review missing"] },
+      error: {
+        code: "GATE_FAILED",
+        details: ["review missing"],
+        retryable: false,
+        state_changed: false,
+        recovery_command: null,
+      },
+    });
+  });
+
+  it("provides a deterministic recovery command for stale manual bindings", () => {
+    expect(failureEnvelope("revise", {
+      code: "RECOVERY_TRIGGER_MISMATCH",
+      message: "Finding bindings changed",
+      details: { change_id: "recover-design" },
+    })).toMatchObject({
+      error: {
+        retryable: false,
+        state_changed: false,
+        recovery_command: "rockspec recover apply recover-design",
+      },
     });
   });
 

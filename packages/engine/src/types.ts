@@ -5,9 +5,12 @@ import type {
   ArtifactRecord,
   ChangeSnapshot,
   ChangeState,
+  ChangeKind,
   Evidence,
+  EnvironmentPreflightCheck,
   FeedbackBatch,
   FeedbackInteractionMode,
+  ExecutionRole,
   Finding,
   KnowledgeEvolution,
   Prototype,
@@ -22,6 +25,7 @@ import type {
   TaskRecord,
   TaskStatus,
   WorkflowProfile,
+  UatPolicy,
 } from "@rockspec/protocol";
 
 export type {
@@ -39,6 +43,7 @@ export type ApprovalGate = Approval["gate"];
 export type ApprovalRecord = Approval;
 export type PrototypeRecord = Prototype;
 export type EvidenceRecord = Evidence;
+export type EnvironmentCheck = EnvironmentPreflightCheck;
 export type FeedbackBatchRecord = FeedbackBatch;
 export type ReviewRecord = Review;
 export type ReviewSubjectRecord = ReviewSubject;
@@ -117,7 +122,7 @@ export interface ImplementationPreflightResult {
   task_count: number;
   ready_task_ids: string[];
   checks: Array<{
-    id: "workspace" | "approvals" | "readiness" | "task_graph" | "recovery" | "review_modes";
+    id: "workspace" | "approvals" | "readiness" | "task_graph" | "recovery" | "review_modes" | "environment";
     status: "passed";
     detail: string;
   }>;
@@ -152,8 +157,11 @@ export interface NewChangeInput {
   id: string;
   title?: string;
   profile?: WorkflowProfile;
+  kind?: ChangeKind;
+  riskTags?: string[];
   baseRef?: string;
   prototypeRequired?: boolean;
+  uatPolicy?: UatPolicy;
   workspaceManaged?: boolean;
   basedOnChange?: string;
   reuseWorkspace?: boolean;
@@ -173,6 +181,69 @@ export interface CompleteActionInput extends ChangeInput {
 export interface ApproveInput extends ChangeInput {
   gate: ApprovalGate;
   approvedBy?: string;
+  packageHash: string;
+}
+
+export interface PrepareApprovalInput extends ChangeInput {
+  gate: ApprovalGate;
+}
+
+export interface ApprovalPackageResult {
+  schema_version: 1;
+  gate: ApprovalGate;
+  path: string;
+  hash: string;
+  artifact_hashes: Record<string, string>;
+  aggregate_hash: string;
+  summary: {
+    non_goals: string[];
+    assumptions: Array<{ id: string; description: string; basis: string; impact_if_wrong: string }>;
+    open_questions: Array<{ id: string; question: string; impact: string; status: "blocking" | "non_blocking" | "resolved" }>;
+    requirement_ids: string[];
+    scenario_ids: string[];
+    decision_ids: string[];
+    task_ids: string[];
+  };
+}
+
+export interface StartExecutionInput extends ChangeInput {
+  action: string;
+  role: ExecutionRole;
+  modelTier?: "fast" | "balanced" | "deep";
+  hostModel?: string;
+  parentExecutionId?: string;
+  contextPackagePath?: string;
+  contextPackageHash?: string;
+}
+
+export interface ExecutionStartResult extends StatusResult {
+  started_execution: {
+    id: string;
+    action: string;
+    role: ExecutionRole;
+  };
+}
+
+export interface CompleteExecutionInput extends ChangeInput {
+  executionId: string;
+  outcome?: "success" | "error" | "cancelled";
+  usage?: ExecutionUsage;
+}
+
+export interface ExecutionUsage {
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+}
+
+export interface ExecutionCompleteResult extends StatusResult {
+  completed_execution: {
+    id: string;
+    outcome: "success" | "error" | "cancelled";
+    duration_ms: number;
+    already_completed: boolean;
+  };
 }
 
 export interface PromoteInput extends ChangeInput {
@@ -190,6 +261,14 @@ export interface ReviseInput extends ChangeInput {
   authorityDelta?: AuthorityImpact;
   authorExecutionId?: string;
   feedbackBatchId?: string;
+  /** @internal Consume the current Engine recovery without caller-supplied Review bindings. */
+  consumeCurrentRecovery?: boolean;
+}
+
+export interface ApplyRecoveryInput extends ChangeInput {
+  affectedIds?: string[];
+  reason?: string;
+  authorExecutionId?: string;
 }
 
 export interface FeedbackSubmitInput extends ChangeInput {
@@ -242,10 +321,22 @@ export interface RecordEvidenceInput extends ChangeInput {
   reportPath?: string;
   outputHash?: string;
   source?: "recorded" | "executed";
+  scenarioIds?: string[];
+  findingIds?: string[];
+  artifactPaths?: string[];
+}
+
+export interface CompleteUatInput extends ChangeInput {
+  reportPath?: string;
 }
 
 export interface TaskInput extends ChangeInput {
   taskId: string;
+}
+
+export interface StartTaskInput extends TaskInput {
+  modelTier?: "fast" | "balanced" | "deep";
+  hostModel?: string;
 }
 
 export interface CompleteTaskInput extends TaskInput {
@@ -279,6 +370,7 @@ export interface ReviewPackageResult {
     expanded_paths: string[];
   };
   path: string;
+  hash: string;
   subject: ReviewSubjectRecord;
 }
 
@@ -301,6 +393,10 @@ export interface RunCheckInput extends ChangeInput {
   kind?: string;
   taskId?: string;
   actionId?: ActionId;
+  scenarioIds?: string[];
+  findingIds?: string[];
+  artifactPaths?: string[];
+  reuseCachedEvidence?: boolean;
 }
 
 export interface RunCheckResult extends StatusResult {
@@ -310,6 +406,7 @@ export interface RunCheckResult extends StatusResult {
     exit_code: number;
     output_hash: string;
     report_path: string;
+    cached: boolean;
   };
 }
 
@@ -330,4 +427,90 @@ export interface EventRecord {
   previous_state: ChangeState;
   current_state: ChangeState;
   data: Record<string, unknown>;
+}
+
+export interface RuntimeTelemetryRecord {
+  schema_version: 1;
+  invocation_id: string;
+  command: string;
+  change_id?: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  result: "success" | "error";
+  error_code?: string;
+  internal_error: boolean;
+  response_bytes: number;
+}
+
+export interface RuntimeTelemetrySummary {
+  schema_version: 1;
+  source_path: string;
+  change_id?: string;
+  record_count: number;
+  success_count: number;
+  error_count: number;
+  internal_error_count: number;
+  total_duration_ms: number;
+  first_started_at: string | null;
+  last_finished_at: string | null;
+  by_command: Record<string, {
+    count: number;
+    success_count: number;
+    error_count: number;
+    duration_ms: number;
+    response_bytes: number;
+  }>;
+  by_error_code: Record<string, number>;
+  agent_executions: {
+    total_count: number;
+    completed_count: number;
+    incomplete_count: number;
+    total_duration_ms: number;
+    by_role: Record<string, {
+      count: number;
+      completed_count: number;
+      success_count: number;
+      error_count: number;
+      cancelled_count: number;
+      unknown_count: number;
+      duration_ms: number;
+    }>;
+  };
+  human_approval_wait: {
+    count: number;
+    total_duration_ms: number;
+    by_gate: Record<string, { count: number; duration_ms: number }>;
+  };
+  token_usage: {
+    execution_count: number;
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+    reasoning_tokens: number;
+    by_role: Record<string, {
+      execution_count: number;
+      input_tokens: number;
+      cached_input_tokens: number;
+      output_tokens: number;
+      reasoning_tokens: number;
+    }>;
+  };
+}
+
+export interface AcceptancePreflightResult extends StatusResult {
+  valid: true;
+  checks: Array<{ id: "state" | "execution" | "report" | "scenarios" | "evidence"; status: "passed"; detail: string }>;
+}
+
+export interface EnvironmentPreflightResult extends StatusResult {
+  valid: boolean;
+  checks: Array<{
+    id: string;
+    kind: "database" | "browser" | "credential" | "custom";
+    required: boolean;
+    status: "passed" | "failed" | "skipped";
+    duration_ms: number;
+    detail: string;
+  }>;
 }
