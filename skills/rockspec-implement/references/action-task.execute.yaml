@@ -29,7 +29,7 @@ executor:
       - "Task 需要复杂调试、跨多个模块协调或广泛理解代码库。"
     record_selection: true
 reads:
-  artifacts: ["Engine 冻结的 runtime/tasks/<task-id>/brief.md", "已批准的相关 Specs、Design 和 Prototype 引用"]
+  artifacts: ["Engine 冻结的 runtime/tasks/<task-id>/brief.md；其中包含按 ID 投影的已批准 R/S/D、约束、依赖事实和相关 Prototype"]
   repository: ["Task Base Commit 上的必要代码", "已完成依赖的接口"]
 writes:
   artifacts: ["runtime/tasks/<task-id>/implementer-report.md", "evidence/logs/check-*.log", "Task 验证证据"]
@@ -49,5 +49,6 @@ outcomes:
   blocked: ["change.promote", "plan.create", "task.execute"]
 invariants:
   - "Implementer 不能写入工作流状态或声明 Gate 已通过。"
-  - "Gate 通过前，Review 修复最多两轮，并 amend 同一 Task Commit。"
+  - "Implementer 默认不得读取完整 Change 权威链重新解释 Task；合同或权威冲突必须显式停止并上报。"
+  - "Gate 通过前，Review 尝试数不得超过 config.max_review_rounds（默认 3，含初审），每次修复都 amend 同一 Task Commit。"
   - "Review 前必须生成固定 Review Package；Subject 改变后旧 Review 失效。"

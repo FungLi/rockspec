@@ -19,7 +19,7 @@ Attached 模式把本文的 `rockspec ...` 视为逻辑命令：先从绑定 Wor
 ## 执行
 
 1. 固定准确的最终 Commit，检查完整 Diff 的范围和无关改动。
-   `change.verify` 会记录不可漂移的 `delivery_head`。同一 Worktree 后续承载其他 Change 时，收尾使用该快照，不把当前 `HEAD` 的后续提交算入本 Change。
+   `change.verify` 会记录不可漂移的 `delivery_head`。同一 Worktree 后续承载其他 Change 时，当前 `HEAD` 可以是它的后代；Finish/Archive 必须确认冻结提交仍在当前历史中，且不把后续提交算入本 Change。历史重写丢失该提交时停止。
 2. 按风险运行新鲜的测试、构建、Lint、类型检查及项目专用检查。诚实记录所有命令、工作目录、退出码、跳过项和 Commit Hash。
 3. Attached 模式提交 `change.verify`。Engine 未进入 `READY_TO_FINISH` 时停止。
 4. Engine 推荐 `knowledge.evolve` 时调用 `$rockspec-evolve`。收尾 Skill 只负责调度，不自行提炼或直接改写知识基线。

@@ -4,7 +4,7 @@
 
 ## 权限
 
-- 读取 Engine 提供的唯一 Review Package、冻结 Task Brief、相关已批准 Specs/Design/Prototype、Implementer Report、executed Evidence 和仓库规则。Diff 只能来自该 Package。
+- 读取 Engine 提供的唯一 Review Package；其中包含冻结 Implementer 投影、Reviewer-only 交叉决策审计、Implementer Report、executed Evidence 索引、Authority Manifest 和固定 Diff。Diff 只能来自该 Package。
 - 只写入分配给你的 Task Review 报告。
 - 不得编辑代码、测试、Task 产物、实施报告、工作流状态、审批、事件或 Hash。
 - 不得创建或委派给其他 Agent。
@@ -18,7 +18,7 @@
 3. Code Standards：正确性、安全、可维护性、范围纪律、兼容性和仓库约定。
 4. Test Quality：测试证明公共行为，能在相关回归时失败，避免脆弱的私有实现耦合，并具有新鲜证据。
 
-直接检查 Package 中的完整 Diff 和证据；不得将 Implementer 摘要当作证明。确认 Subject、Diff 范围、单 Commit和提交信息有效。把 `planned_paths` 视为 Task 一次性声明的计划参考，逐项核对 `expanded_paths` 与 Implementer Report 的“参考范围扩展”；合理且最小的扩展可直接 PASS，无理由或无关扩展路由 `task.execute`，只有扩展证明 Task 语义、接口、依赖或责任划分需要改变时才路由 `plan.create`。不要例行重跑全量测试；只有具体疑点需要证明时才运行最小聚焦检查并记录原因。
+直接检查 Package 中的完整 Diff 和证据；不得将 Implementer 摘要当作证明。先核对 Implementer 投影的 R/S/D 覆盖，再检查 Reviewer-only 交叉决策是否揭示漏投影或错误 Task 映射；发现时路由 `plan.create`，不得与 Implementer 一起沿用缺失上下文。确认 Subject、Diff 范围、单 Commit和提交信息有效。把 `planned_paths` 视为 Task 一次性声明的计划参考，逐项核对 `expanded_paths` 与 Implementer Report 的“参考范围扩展”；合理且最小的扩展可直接 PASS，无理由或无关扩展路由 `task.execute`，只有扩展证明 Task 语义、接口、依赖或责任划分需要改变时才路由 `plan.create`。不要例行重跑全量测试；只有具体疑点需要证明时才运行最小聚焦检查并记录原因。
 
 修复轮次先读取上一轮 Open Finding，再比较上一轮 `subject.head_commit` 与当前 `subject.head_commit` 的 Fix Diff。只复核 Finding、Fix Diff 和聚焦证据；新改动形成独立问题时才新增 Finding。新报告必须携带上一轮全部 Findings，保持 ID 和原始描述，将已修复项标为 `resolved`、未修复项保持 `open`、明确接受风险的项标为 `accepted`，再追加新 ID。
 

@@ -1,4 +1,9 @@
-import { RockSpecEngine } from "@rockspec/engine";
+import { randomUUID } from "node:crypto";
+import {
+  RockSpecEngine,
+  appendRuntimeTelemetry,
+  summarizeRuntimeTelemetry,
+} from "@rockspec/engine";
 import {
   doctorProject,
   installProject,
@@ -11,10 +16,12 @@ import {
   ACTION_IDS,
   AUTHORITY_IMPACTS,
   CHANGE_KINDS,
+  EXECUTION_ROLES,
   FEEDBACK_INTERACTION_MODES,
   PROFILES,
   REVISION_CLASSIFICATIONS,
   REVISION_TARGETS,
+  UAT_POLICIES,
   type ActionId,
   type ChangeKind,
   type WorkflowProfile,
@@ -52,6 +59,72 @@ interface GlobalOptions {
   summary?: boolean;
 }
 
+async function recordTelemetry(
+  cwd: string | undefined,
+  record: Parameters<typeof appendRuntimeTelemetry>[1],
+): Promise<void> {
+  try {
+    await appendRuntimeTelemetry(cwd ?? process.cwd(), record);
+  } catch {
+    // Observability must never change the governed command result.
+  }
+}
+
+function telemetryChangeId(result?: unknown, details?: unknown): string | undefined {
+  for (const candidate of [result, details]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.change_id === "string") return record.change_id;
+    if (record.change && typeof record.change === "object") {
+      const change = record.change as Record<string, unknown>;
+      if (typeof change.id === "string") return change.id;
+    }
+  }
+  return undefined;
+}
+
+function telemetryChangeIdHint(commandName: string, command: Command): string | undefined {
+  const localOptions = command.opts<Record<string, unknown>>();
+  if (typeof localOptions.change === "string") return localOptions.change;
+  const processedArgs = (command as Command & { processedArgs?: unknown[] }).processedArgs ?? [];
+  const firstArgumentCommands = new Set([
+    "new",
+    "status",
+    "feedback.submit",
+    "continue",
+    "revise",
+    "revise.amend",
+    "recover.apply",
+    "validate",
+    "task.list",
+    "task.next",
+    "knowledge.package",
+    "evidence.add",
+    "uat.confirm",
+    "verify",
+    "finish",
+    "archive",
+  ]);
+  const secondArgumentCommands = new Set([
+    "action.complete",
+    "execution.start",
+    "execution.complete",
+    "approval.package",
+    "approve",
+    "promote",
+    "reconcile.prepare",
+    "reconcile.complete",
+    "preflight.implementation",
+    "task.brief",
+    "task.start",
+    "task.complete",
+    "review.package",
+    "preflight",
+  ]);
+  const index = firstArgumentCommands.has(commandName) ? 0 : secondArgumentCommands.has(commandName) ? 1 : -1;
+  return index >= 0 && typeof processedArgs[index] === "string" ? processedArgs[index] : undefined;
+}
+
 export function createProgram(dependencies: CliDependencies = {}): Command {
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
@@ -79,6 +152,10 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     operation: (engine: RockSpecEngine) => Promise<T>,
   ): Promise<void> => {
     const options = command.optsWithGlobals<GlobalOptions>();
+    const invocationId = randomUUID();
+    const startedAt = new Date();
+    const started = Date.now();
+    const changeIdHint = telemetryChangeIdHint(commandName, command);
     try {
       const configuredProviders = process.env.ROCKSPEC_AVAILABLE_PROVIDERS
         ?.split(",")
@@ -96,9 +173,37 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       const rendered = options.json
         ? JSON.stringify(successEnvelope(commandName, output), null, 2)
         : formatHuman(output);
+      const changeId = telemetryChangeId(result) ?? changeIdHint;
+      await recordTelemetry(options.cwd, {
+        schema_version: 1,
+        invocation_id: invocationId,
+        command: commandName,
+        ...(changeId ? { change_id: changeId } : {}),
+        started_at: startedAt.toISOString(),
+        finished_at: new Date().toISOString(),
+        duration_ms: Date.now() - started,
+        result: "success",
+        internal_error: false,
+        response_bytes: Buffer.byteLength(rendered),
+      });
       stdout.write(`${rendered}\n`);
     } catch (error) {
       const failure = failureEnvelope(commandName, error);
+      const renderedFailure = JSON.stringify(failure);
+      const changeId = telemetryChangeId(undefined, failure.error.details) ?? changeIdHint;
+      await recordTelemetry(options.cwd, {
+        schema_version: 1,
+        invocation_id: invocationId,
+        command: commandName,
+        ...(changeId ? { change_id: changeId } : {}),
+        started_at: startedAt.toISOString(),
+        finished_at: new Date().toISOString(),
+        duration_ms: Date.now() - started,
+        result: "error",
+        error_code: failure.error.code,
+        internal_error: failure.error.code === "INTERNAL_ERROR",
+        response_bytes: Buffer.byteLength(renderedFailure),
+      });
       if (options.json) {
         stderr.write(`${JSON.stringify(failure, null, 2)}\n`);
       } else {
@@ -106,10 +211,24 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
         if (failure.error.details !== null) {
           stderr.write(`${JSON.stringify(failure.error.details, null, 2)}\n`);
         }
+        if (failure.error.recovery_command) {
+          stderr.write(`Recovery: ${failure.error.recovery_command}\n`);
+        }
       }
       setExitCode(errorExitCode(error));
     }
   };
+
+  const telemetry = program.command("telemetry").description("inspect privacy-safe Runtime command telemetry");
+  telemetry
+    .command("report")
+    .argument("[change-id]")
+    .action(async (changeId: string | undefined, _options: unknown, command: Command) => {
+      await execute("telemetry.report", command, () => summarizeRuntimeTelemetry(
+        command.optsWithGlobals<GlobalOptions>().cwd ?? process.cwd(),
+        changeId,
+      ));
+    });
 
   program.action(async (_options: unknown, command: Command) => {
     const cwd = command.optsWithGlobals<GlobalOptions>().cwd;
@@ -239,6 +358,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .addOption(new Option("--profile <profile>", "explicitly promote the selected profile").choices([...PROFILES]))
     .option("--risk <risk>", "risk tag; repeat for multiple tags", collect, [])
     .option("--ui-impact", "require a UI/UX prototype", false)
+    .addOption(new Option("--uat <policy>", "user acceptance policy").choices([...UAT_POLICIES]))
     .action(async (changeId: string, options: {
       title?: string;
       base?: string;
@@ -247,6 +367,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       profile?: WorkflowProfile;
       risk: string[];
       uiImpact: boolean;
+      uat?: "required" | "optional" | "not_applicable";
       basedOnChange?: string;
       reuseWorkspace: boolean;
       confirmBoundary: boolean;
@@ -262,7 +383,10 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
           ...(options.title ? { title: options.title } : {}),
           ...(options.base ? { baseRef: options.base } : {}),
           profile: triage.profile,
+          kind: options.kind,
+          riskTags: options.risk,
           prototypeRequired: options.uiImpact,
+          ...(options.uat ? { uatPolicy: options.uat } : {}),
           workspaceManaged: options.managedWorktree,
           ...(options.basedOnChange ? { basedOnChange: options.basedOnChange } : {}),
           ...(options.basedOnChange ? { reuseWorkspace: options.reuseWorkspace } : {}),
@@ -375,13 +499,97 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       });
     });
 
+  const execution = program.command("execution").description("register governed agent executions");
+  execution
+    .command("start")
+    .argument("<action>")
+    .argument("[change-id]")
+    .requiredOption("--role <role>")
+    .addOption(new Option("--model-tier <tier>").choices(["fast", "balanced", "deep"]))
+    .option("--host-model <model>")
+    .option("--parent <execution-id>")
+    .option("--context-package <path>", "role-specific compact context package path")
+    .option("--context-hash <sha256>", "SHA-256 of the context package")
+    .action(async (actionId: string, changeId: string | undefined, options: {
+      role: string;
+      modelTier?: "fast" | "balanced" | "deep";
+      hostModel?: string;
+      parent?: string;
+      contextPackage?: string;
+      contextHash?: string;
+    }, command: Command) => {
+      await execute("execution.start", command, (engine) => {
+        if (!EXECUTION_ROLES.includes(options.role as (typeof EXECUTION_ROLES)[number])) {
+          throw Object.assign(new Error(`Unknown execution role: ${options.role}`), {
+            code: "INVALID_EXECUTION_ROLE",
+            details: { role: options.role, allowed: EXECUTION_ROLES },
+          });
+        }
+        return engine.startExecution({
+          action: actionId,
+          role: options.role as (typeof EXECUTION_ROLES)[number],
+          ...(changeId ? { changeId } : {}),
+          ...(options.modelTier ? { modelTier: options.modelTier } : {}),
+          ...(options.hostModel ? { hostModel: options.hostModel } : {}),
+          ...(options.parent ? { parentExecutionId: options.parent } : {}),
+          ...(options.contextPackage ? { contextPackagePath: options.contextPackage } : {}),
+          ...(options.contextHash ? { contextPackageHash: options.contextHash } : {}),
+        });
+      });
+    });
+  execution
+    .command("complete")
+    .argument("<execution-id>")
+    .argument("[change-id]")
+    .addOption(new Option("--outcome <outcome>").choices(["success", "error", "cancelled"]).default("success"))
+    .option("--input-tokens <number>", "fresh input token count", integer)
+    .option("--cached-input-tokens <number>", "cached input token count", integer)
+    .option("--output-tokens <number>", "output token count", integer)
+    .option("--reasoning-tokens <number>", "reasoning token count", integer)
+    .action(async (
+      executionId: string,
+      changeId: string | undefined,
+      options: { outcome: "success" | "error" | "cancelled"; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number },
+      command: Command,
+    ) => {
+      await execute("execution.complete", command, (engine) => engine.completeExecution({
+        executionId,
+        outcome: options.outcome,
+        usage: {
+          ...(options.inputTokens !== undefined ? { input_tokens: options.inputTokens } : {}),
+          ...(options.cachedInputTokens !== undefined ? { cached_input_tokens: options.cachedInputTokens } : {}),
+          ...(options.outputTokens !== undefined ? { output_tokens: options.outputTokens } : {}),
+          ...(options.reasoningTokens !== undefined ? { reasoning_tokens: options.reasoningTokens } : {}),
+        },
+        ...(changeId ? { changeId } : {}),
+      }));
+    });
+
+  const approval = program.command("approval").description("prepare hash-bound user approval inputs");
+  approval
+    .command("package")
+    .argument("<gate>", "spec, design, or implementation")
+    .argument("[change-id]")
+    .action(async (gate: string, changeId: string | undefined, _options: unknown, command: Command) => {
+      await execute("approval.package", command, (engine) => {
+        if (!isApprovalGate(gate)) {
+          throw Object.assign(new Error(`Unknown approval gate: ${gate}`), {
+            code: "INVALID_APPROVAL_GATE",
+            details: { gate, allowed: ["spec", "design", "implementation"] },
+          });
+        }
+        return engine.prepareApproval({ gate, ...(changeId ? { changeId } : {}) });
+      });
+    });
+
   program
     .command("approve")
     .description("record a hash-bound user approval")
     .argument("<artifact-id>", "spec, design, or implementation")
     .argument("[change-id]")
     .option("--by <identity>", "approver identity", "user")
-    .action(async (artifactId: string, changeId: string | undefined, options: { by: string }, command: Command) => {
+    .requiredOption("--package <sha256>", "hash returned by approval package")
+    .action(async (artifactId: string, changeId: string | undefined, options: { by: string; package: string }, command: Command) => {
       await execute("approve", command, (engine) => {
         if (!isApprovalGate(artifactId)) {
           throw Object.assign(new Error(`Unknown approval artifact: ${artifactId}`), {
@@ -389,7 +597,12 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
             details: { artifact_id: artifactId, allowed: ["spec", "design", "implementation"] },
           });
         }
-        return engine.approve({ gate: artifactId, approvedBy: options.by, ...(changeId ? { changeId } : {}) });
+        return engine.approve({
+          gate: artifactId,
+          approvedBy: options.by,
+          packageHash: options.package,
+          ...(changeId ? { changeId } : {}),
+        });
       });
     });
 
@@ -456,6 +669,26 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       });
     });
 
+  const recover = program.command("recover").description("consume the Engine's current Finding-bound recovery");
+  recover
+    .command("apply")
+    .argument("[change-id]")
+    .option("--affected <id>", "affected R-/S-/D- ID; repeat as needed", collect, [])
+    .option("--reason <reason>", "optional audit reason; defaults to current Finding descriptions")
+    .option("--author-execution <execution-id>", "Revision Author execution ID required for automatic reconciliation")
+    .action(async (changeId: string | undefined, options: {
+      affected: string[];
+      reason?: string;
+      authorExecution?: string;
+    }, command: Command) => {
+      await execute("recover.apply", command, (engine) => engine.applyRecovery({
+        ...(changeId ? { changeId } : {}),
+        affectedIds: options.affected,
+        ...(options.reason ? { reason: options.reason } : {}),
+        ...(options.authorExecution ? { authorExecutionId: options.authorExecution } : {}),
+      }));
+    });
+
   const reconcile = program
     .command("reconcile")
     .description("prepare or complete an independent automatic Reconciliation Review");
@@ -515,7 +748,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
   program
     .command("preflight")
     .description("validate Runtime installation and a stage before entering it")
-    .argument("<stage>", "currently: implementation")
+    .argument("<stage>", "implementation, acceptance, or environment")
     .argument("[change-id]")
     .option("--change <change-id>", "compatibility alias for the positional Change ID")
     .action(async (
@@ -526,27 +759,32 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     ) => {
       await execute("preflight", command, async (engine) => {
         const changeId = resolveChangeId(positionalId, options.change);
-        if (stage !== "implementation") {
+        if (!["implementation", "acceptance", "environment"].includes(stage)) {
           throw Object.assign(new Error(`Unknown preflight stage: ${stage}`), {
             code: "INVALID_PREFLIGHT_STAGE",
-            details: { stage, allowed: ["implementation"] },
+            details: { stage, allowed: ["implementation", "acceptance", "environment"] },
           });
         }
         const cwd = command.optsWithGlobals<GlobalOptions>().cwd ?? process.cwd();
         const installation = await doctorProject(cwd);
-        if (!installation.valid) {
+        if (stage === "implementation" && !installation.valid) {
           throw Object.assign(new Error("RockSpec installation is not consistent with install.lock.yaml"), {
             code: "PREFLIGHT_INSTALLATION_INVALID",
             details: installation,
           });
         }
+        const result = stage === "implementation"
+          ? await engine.preflightImplementation({ ...(changeId ? { changeId } : {}) })
+          : stage === "acceptance"
+            ? await engine.preflightAcceptance({ ...(changeId ? { changeId } : {}) })
+            : await engine.preflightEnvironment({ ...(changeId ? { changeId } : {}) });
         return {
-          ...await engine.preflightImplementation({ ...(changeId ? { changeId } : {}) }),
-          installation: {
+          ...result,
+          ...(stage === "implementation" ? { installation: {
             valid: installation.valid,
             rockspec_version: installation.rockspec_version,
             project_root: installation.project_root,
-          },
+          } } : {}),
         };
       });
     });
@@ -581,9 +819,19 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
   task.command("brief").argument("<task-id>").argument("[change-id]").action(async (taskId: string, changeId: string | undefined, _options: unknown, command: Command) => {
     await execute("task.brief", command, (engine) => engine.getTaskBrief({ taskId, ...(changeId ? { changeId } : {}) }));
   });
-  task.command("start").argument("<task-id>").argument("[change-id]").action(async (taskId: string, changeId: string | undefined, _options: unknown, command: Command) => {
-    await execute("task.start", command, (engine) => engine.startTask({ taskId, ...(changeId ? { changeId } : {}) }));
-  });
+  task.command("start")
+    .argument("<task-id>")
+    .argument("[change-id]")
+    .addOption(new Option("--model-tier <tier>", "selected model tier").choices(["fast", "balanced", "deep"]))
+    .option("--host-model <model>")
+    .action(async (taskId: string, changeId: string | undefined, options: { modelTier?: "fast" | "balanced" | "deep"; hostModel?: string }, command: Command) => {
+      await execute("task.start", command, (engine) => engine.startTask({
+        taskId,
+        ...(changeId ? { changeId } : {}),
+        ...(options.modelTier ? { modelTier: options.modelTier } : {}),
+        ...(options.hostModel ? { hostModel: options.hostModel } : {}),
+      }));
+    });
   task.command("complete").argument("<task-id>").argument("[change-id]").option("--commit <sha>").action(async (taskId: string, changeId: string | undefined, options: { commit?: string }, command: Command) => {
     await execute("task.complete", command, (engine) => engine.completeTask({
       taskId,
@@ -641,10 +889,14 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--kind <kind>", "evidence kind", "verification")
     .option("--task <task-id>")
     .option("--action <action-id>")
+    .option("--scenario <scenario-id>", "Scenario covered by this check; repeat as needed", collect, [])
+    .option("--finding <finding-id>", "Finding addressed by this check; repeat as needed", collect, [])
+    .option("--artifact <path>", "evidence artifact produced by this check; repeat as needed", collect, [])
+    .option("--no-cache", "force execution even when matching evidence exists")
     .action(async (
       executable: string,
       args: string[],
-      options: { change?: string; kind: string; task?: string; action?: string },
+      options: { change?: string; kind: string; task?: string; action?: string; scenario: string[]; finding: string[]; artifact: string[]; cache: boolean },
       command: Command,
     ) => {
       await execute("check.run", command, async (engine) => {
@@ -661,11 +913,19 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
           ...(options.change ? { changeId: options.change } : {}),
           ...(options.task ? { taskId: options.task } : {}),
           ...(options.action ? { actionId: options.action as ActionId } : {}),
+          scenarioIds: options.scenario,
+          findingIds: options.finding,
+          artifactPaths: options.artifact,
+          reuseCachedEvidence: options.cache,
         });
         if (result.check.exit_code !== 0) {
           throw Object.assign(new Error(`Check failed with exit code ${result.check.exit_code}`), {
             code: "CHECK_FAILED",
-            details: result.check,
+            details: {
+              ...result.check,
+              change_id: result.change.id,
+            },
+            state_changed: true,
           });
         }
         return result;
@@ -686,6 +946,9 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--task <task-id>")
     .option("--action <action-id>")
     .option("--report <path>")
+    .option("--scenario <scenario-id>", "Scenario covered by this evidence; repeat as needed", collect, [])
+    .option("--finding <finding-id>", "Finding addressed by this evidence; repeat as needed", collect, [])
+    .option("--artifact <path>", "evidence artifact; repeat as needed", collect, [])
     .action(async (changeId: string | undefined, options: {
       command: string;
       exitCode: number;
@@ -697,6 +960,9 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       task?: string;
       action?: string;
       report?: string;
+      scenario: string[];
+      finding: string[];
+      artifact: string[];
     }, command: Command) => {
       await execute("evidence.add", command, (engine) => {
         if (options.action && !ACTION_IDS.includes(options.action as ActionId)) {
@@ -717,8 +983,23 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
           ...(options.task ? { taskId: options.task } : {}),
           ...(options.action ? { actionId: options.action as ActionId } : {}),
           ...(options.report ? { reportPath: options.report } : {}),
+          scenarioIds: options.scenario,
+          findingIds: options.finding,
+          artifactPaths: options.artifact,
         });
       });
+    });
+
+  const uat = program.command("uat").description("record conditional user acceptance confirmation");
+  uat
+    .command("confirm")
+    .argument("[change-id]")
+    .option("--report <path>", "UAT report relative to the Change directory", "testing/uat-report.md")
+    .action(async (changeId: string | undefined, options: { report: string }, command: Command) => {
+      await execute("uat.confirm", command, (engine) => engine.completeUat({
+        reportPath: options.report,
+        ...(changeId ? { changeId } : {}),
+      }));
     });
 
   program.command("verify").argument("[change-id]").action(async (changeId: string | undefined, _options: unknown, command: Command) => {

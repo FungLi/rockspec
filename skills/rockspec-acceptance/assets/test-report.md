@@ -3,6 +3,11 @@ schema_version: 1
 verdict: {{PASS_CHANGES_REQUIRED_BLOCKED}}
 reviewer_execution_id: "{{actual_acceptance_execution_id}}"
 commit: "{{tested_commit_sha}}"
+scenario_coverage:
+  - scenario_id: S-001
+    test_ids: [AT-001]
+    evidence_ids: [E-001]
+ui_evidence: []
 findings: []
 ---
 

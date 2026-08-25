@@ -10789,6 +10789,9 @@ var require_commander = __commonJS({
   }
 });
 
+// packages/cli/src/program.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+
 // packages/engine/dist/engine.js
 var import_yaml2 = __toESM(require_dist(), 1);
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -25324,6 +25327,7 @@ var WORKFLOW_STATES = [
   "READY",
   "IMPLEMENTING",
   "ACCEPTANCE_VALIDATING",
+  "UAT_PENDING",
   "FINAL_REVIEW",
   "VERIFYING",
   "READY_TO_FINISH",
@@ -25344,6 +25348,7 @@ var ACTION_IDS = [
   "task.execute",
   "task.review",
   "acceptance.validate",
+  "acceptance.uat",
   "delivery.review",
   "change.verify",
   "knowledge.evolve",
@@ -25353,6 +25358,22 @@ var REVISION_TARGETS = ["requirements", "design", "prototype", "plan"];
 var REVISION_STATUSES = ["open", "reconciled"];
 var REVISION_MODES = ["pre_implementation", "implementation_recovery", "feedback_reopen"];
 var FEEDBACK_INTERACTION_MODES = ["reconcile", "compact", "full"];
+var UAT_POLICIES = ["required", "optional", "not_applicable"];
+var EXECUTION_ROLES = [
+  "requirements_author",
+  "requirements_reviewer",
+  "design_author",
+  "planner",
+  "readiness_reviewer",
+  "task_implementer",
+  "task_reviewer",
+  "acceptance_engineer",
+  "delivery_reviewer",
+  "revision_author",
+  "reconciliation_reviewer",
+  "knowledge_author",
+  "knowledge_reviewer"
+];
 var REVISION_KINDS = ["upstream", "remediation"];
 var REVIEW_VERDICTS = ["PASS", "CHANGES_REQUIRED", "BLOCKED"];
 var RESERVED_CHANGE_IDS = [
@@ -25585,6 +25606,8 @@ var RevisionGatePolicySchema = external_exports.enum(["preserve", "auto", "human
 var AuthorityImpactSchema = external_exports.enum(AUTHORITY_IMPACTS);
 var RevisionClassificationSchema = external_exports.enum(REVISION_CLASSIFICATIONS);
 var FeedbackInteractionModeSchema = external_exports.enum(FEEDBACK_INTERACTION_MODES);
+var UatPolicySchema = external_exports.enum(UAT_POLICIES);
+var ExecutionRoleSchema = external_exports.enum(EXECUTION_ROLES);
 var RevisionTriggerSchema = external_exports.object({
   review_id: external_exports.string().min(1),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).min(1),
@@ -25628,7 +25651,9 @@ var ApprovalSchema = external_exports.object({
   approved_at: TimestampSchema,
   mode: ApprovalModeSchema.default("human"),
   revision_id: external_exports.string().regex(/^RV-\d{3,}$/).optional(),
-  authority_basis_hash: Sha256Schema.optional()
+  authority_basis_hash: Sha256Schema.optional(),
+  package_path: external_exports.string().min(1).optional(),
+  package_hash: Sha256Schema.optional()
 }).strict().superRefine((approval, context) => {
   if (approval.mode === "auto" && (!approval.revision_id || !approval.authority_basis_hash)) {
     context.addIssue({
@@ -25821,9 +25846,65 @@ var PrototypeSchema = external_exports.object({
     });
   }
 });
+var TriageDecisionSchema = external_exports.object({
+  kind: ChangeKindSchema,
+  risk_tags: external_exports.array(external_exports.string().trim().min(1)).default([]),
+  minimum_profile: WorkflowProfileSchema,
+  reasons: external_exports.array(external_exports.string().trim().min(1)).min(1)
+}).strict();
+var UatStateSchema = external_exports.object({
+  policy: UatPolicySchema,
+  status: external_exports.enum(["pending", "confirmed", "not_required"]),
+  report_path: external_exports.string().min(1).optional(),
+  report_hash: Sha256Schema.optional(),
+  commit: GitCommitSchema.optional(),
+  confirmed_at: TimestampSchema.optional()
+}).strict().superRefine((uat, context) => {
+  if (uat.policy === "required" && uat.status === "not_required") {
+    context.addIssue({ code: "custom", path: ["status"], message: "Required UAT cannot be marked not_required" });
+  }
+  if (uat.status === "confirmed" && (!uat.report_path || !uat.report_hash || !uat.commit || !uat.confirmed_at)) {
+    context.addIssue({ code: "custom", path: ["status"], message: "Confirmed UAT must bind its report, Commit, and time" });
+  }
+});
+var ExecutionRecordSchema = external_exports.object({
+  id: external_exports.string().uuid(),
+  role: ExecutionRoleSchema,
+  action: external_exports.string().regex(/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/),
+  started_at: TimestampSchema,
+  completed_at: TimestampSchema.optional(),
+  outcome: external_exports.enum(["success", "error", "cancelled"]).optional(),
+  model_tier: external_exports.enum(["fast", "balanced", "deep"]).optional(),
+  host_model: external_exports.string().trim().min(1).optional(),
+  parent_execution_id: external_exports.string().uuid().optional(),
+  context_package_path: external_exports.string().min(1).optional(),
+  context_package_hash: Sha256Schema.optional(),
+  usage: external_exports.object({
+    input_tokens: external_exports.number().int().nonnegative().optional(),
+    cached_input_tokens: external_exports.number().int().nonnegative().optional(),
+    output_tokens: external_exports.number().int().nonnegative().optional(),
+    reasoning_tokens: external_exports.number().int().nonnegative().optional()
+  }).strict().optional()
+}).strict().superRefine((execution, context) => {
+  if (execution.outcome !== void 0 && execution.completed_at === void 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["completed_at"],
+      message: "Execution outcome requires a completion time"
+    });
+  }
+  if (execution.completed_at && execution.completed_at < execution.started_at) {
+    context.addIssue({
+      code: "custom",
+      path: ["completed_at"],
+      message: "Execution completion cannot precede its start"
+    });
+  }
+});
 var ExecutionSchema = external_exports.object({
   active_task: external_exports.string().regex(/^T-\d{3,}$/).nullable(),
-  active_execution: external_exports.string().min(1).nullable()
+  active_execution: external_exports.string().min(1).nullable(),
+  registry: external_exports.array(ExecutionRecordSchema).default([])
 }).strict().superRefine((execution, context) => {
   if (execution.active_task === null !== (execution.active_execution === null)) {
     context.addIssue({
@@ -25832,12 +25913,21 @@ var ExecutionSchema = external_exports.object({
       message: "active_task and active_execution must both be set or both be null"
     });
   }
+  const ids = execution.registry.map((record2) => record2.id);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: "custom", path: ["registry"], message: "Execution IDs must be unique" });
+  }
 });
 var RepositoryRelativePathSchema = external_exports.string().min(1).refine((value) => !pathLikeAbsolute(value) && !value.includes("\\") && !value.split("/").includes("..") && value !== ".rockspec" && !value.startsWith(".rockspec/"), "Expected a normalized repository-relative product path outside .rockspec");
 var ReviewSubjectSchema = external_exports.object({
   base_commit: GitCommitSchema,
   head_commit: GitCommitSchema,
   diff_hash: Sha256Schema
+}).strict();
+var ScopeAssessmentSchema = external_exports.object({
+  path: RepositoryRelativePathSchema,
+  disposition: external_exports.enum(["justified", "unrelated"]),
+  rationale: external_exports.string().trim().min(1)
 }).strict();
 var InterfaceContractSchema = external_exports.string().trim().min(1).max(500);
 var PlanDefinitionSchema = external_exports.object({
@@ -25852,6 +25942,50 @@ var PlanDefinitionSchema = external_exports.object({
     });
   }
 });
+var AssumptionSchema = external_exports.object({
+  id: external_exports.string().regex(/^A-\d{3,}$/),
+  description: external_exports.string().trim().min(1),
+  basis: external_exports.string().trim().min(1),
+  impact_if_wrong: external_exports.string().trim().min(1)
+}).strict();
+var OpenQuestionSchema = external_exports.object({
+  id: external_exports.string().regex(/^Q-\d{3,}$/),
+  question: external_exports.string().trim().min(1),
+  impact: external_exports.string().trim().min(1),
+  status: external_exports.enum(["blocking", "non_blocking", "resolved"])
+}).strict();
+var ProposalDefinitionSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  non_goals: external_exports.array(external_exports.string().trim().min(1)).default([]),
+  assumptions: external_exports.array(AssumptionSchema).default([]),
+  open_questions: external_exports.array(OpenQuestionSchema).default([])
+}).strict().superRefine((proposal, context) => {
+  for (const field of ["assumptions", "open_questions"]) {
+    const ids = proposal[field].map((item) => item.id);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({ code: "custom", path: [field], message: `Proposal ${field} IDs must be unique` });
+    }
+  }
+  if (proposal.open_questions.some((question) => question.status === "blocking")) {
+    context.addIssue({ code: "custom", path: ["open_questions"], message: "Blocking Proposal questions must be resolved before Spec Review" });
+  }
+});
+var ApprovalPackageSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  gate: ApprovalGateSchema,
+  generated_at: TimestampSchema,
+  artifact_hashes: external_exports.record(external_exports.string().min(1), Sha256Schema),
+  aggregate_hash: Sha256Schema,
+  summary: external_exports.object({
+    non_goals: external_exports.array(external_exports.string()),
+    assumptions: external_exports.array(AssumptionSchema),
+    open_questions: external_exports.array(OpenQuestionSchema),
+    requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)),
+    scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)),
+    decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)),
+    task_ids: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/))
+  }).strict()
+}).strict();
 var DesignDecisionCoverageSchema = external_exports.object({
   id: external_exports.string().regex(/^D-\d{3,}$/),
   requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)).min(1),
@@ -25902,6 +26036,7 @@ var TaskDefinitionSchema = external_exports.object({
   supersedes: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/)).default([]),
   requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)).min(1),
   scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).min(1),
+  decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)).min(1),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).default([]),
   acceptance_criteria: external_exports.array(external_exports.string().trim().min(1)).min(1),
   consumes: external_exports.array(InterfaceContractSchema).default([]),
@@ -25929,7 +26064,7 @@ var TaskDefinitionSchema = external_exports.object({
       message: "A Task cannot supersede itself"
     });
   }
-  for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"]) {
+  for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"]) {
     if (new Set(task[field]).size !== task[field].length) {
       context.addIssue({
         code: "custom",
@@ -25965,6 +26100,7 @@ var TaskRecordSchema = external_exports.object({
   supersedes: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/)).default([]),
   requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)).default([]),
   scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).default([]),
+  decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)).default([]),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).default([]),
   acceptance_criteria: external_exports.array(external_exports.string().min(1)).default([]),
   consumes: external_exports.array(InterfaceContractSchema).default([]),
@@ -26110,6 +26246,7 @@ var ReviewDocumentSchema = external_exports.object({
   reviewer_execution_id: external_exports.string().min(1).refine((value) => !/^(?:TODO|UNKNOWN)$/i.test(value), "Review must identify the actual reviewer execution"),
   subject: ReviewSubjectSchema,
   round: external_exports.number().int().nonnegative().default(0),
+  scope_assessment: external_exports.array(ScopeAssessmentSchema).default([]),
   findings: external_exports.array(FindingSchema).default([])
 }).strict().superRefine((review, context) => {
   if (review.verdict === "PASS" && review.findings.some((finding) => finding.status === "open" && (finding.severity === "critical" || finding.severity === "important"))) {
@@ -26118,6 +26255,9 @@ var ReviewDocumentSchema = external_exports.object({
       path: ["verdict"],
       message: "PASS cannot contain open critical or important findings"
     });
+  }
+  if (review.verdict === "PASS" && review.scope_assessment.some((item) => item.disposition === "unrelated")) {
+    context.addIssue({ code: "custom", path: ["scope_assessment"], message: "PASS cannot accept an unrelated expanded path" });
   }
   if (review.verdict !== "PASS" && !review.findings.some((finding) => finding.status === "open")) {
     context.addIssue({
@@ -26148,11 +26288,22 @@ var StageReviewDocumentSchema = external_exports.object({
     });
   }
 });
+var ScenarioCoverageSchema = external_exports.object({
+  scenario_id: external_exports.string().regex(/^S-\d{3,}$/),
+  test_ids: external_exports.array(external_exports.string().trim().min(1)).min(1),
+  evidence_ids: external_exports.array(external_exports.string().regex(/^E-\d{3,}$/)).min(1)
+}).strict();
+var UiEvidenceCoverageSchema = external_exports.object({
+  dimension: external_exports.enum(["responsive", "accessibility", "interaction"]),
+  evidence_ids: external_exports.array(external_exports.string().regex(/^E-\d{3,}$/)).min(1)
+}).strict();
 var AcceptanceDocumentSchema = external_exports.object({
   schema_version: external_exports.literal(1),
   verdict: ReviewVerdictSchema,
   reviewer_execution_id: external_exports.string().min(1).refine((value) => !/^(?:TODO|UNKNOWN)$/i.test(value), "Acceptance must identify the actual reviewer execution"),
   commit: GitCommitSchema,
+  scenario_coverage: external_exports.array(ScenarioCoverageSchema).default([]),
+  ui_evidence: external_exports.array(UiEvidenceCoverageSchema).default([]),
   findings: external_exports.array(FindingSchema).default([])
 }).strict().superRefine((report, context) => {
   if (report.verdict === "PASS" && report.findings.some((finding) => finding.status === "open")) {
@@ -26161,7 +26312,23 @@ var AcceptanceDocumentSchema = external_exports.object({
   if (report.verdict !== "PASS" && !report.findings.some((finding) => finding.status === "open")) {
     context.addIssue({ code: "custom", path: ["findings"], message: "A non-PASS Acceptance must contain an Open Finding" });
   }
+  const scenarioIds = report.scenario_coverage.map((item) => item.scenario_id);
+  if (new Set(scenarioIds).size !== scenarioIds.length) {
+    context.addIssue({ code: "custom", path: ["scenario_coverage"], message: "Acceptance Scenario coverage must be unique" });
+  }
+  const dimensions = report.ui_evidence.map((item) => item.dimension);
+  if (new Set(dimensions).size !== dimensions.length) {
+    context.addIssue({ code: "custom", path: ["ui_evidence"], message: "UI evidence dimensions must be unique" });
+  }
 });
+var UatDocumentSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  verdict: external_exports.literal("CONFIRMED"),
+  confirmed_by: external_exports.string().trim().min(1),
+  commit: GitCommitSchema,
+  scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).min(1),
+  notes: external_exports.string().trim().min(1)
+}).strict();
 var ReviewSchema = external_exports.object({
   id: external_exports.string().min(1).optional(),
   kind: external_exports.enum(["requirements", "readiness", "task", "acceptance", "delivery"]).optional(),
@@ -26372,6 +26539,7 @@ var ChangeSnapshotSchema = external_exports.object({
   id: ChangeIdSchema,
   title: external_exports.string().min(1),
   profile: WorkflowProfileSchema,
+  triage: TriageDecisionSchema.optional(),
   state: ChangeStateSchema,
   base_ref: external_exports.string().min(1).nullable(),
   base_commit: GitCommitSchema.nullable(),
@@ -26384,6 +26552,7 @@ var ChangeSnapshotSchema = external_exports.object({
   revisions: external_exports.array(RevisionSchema).default([]),
   feedback_batches: external_exports.array(FeedbackBatchSchema).default([]),
   prototype: PrototypeSchema,
+  uat: UatStateSchema.default({ policy: "not_applicable", status: "not_required" }),
   execution: ExecutionSchema,
   tasks: external_exports.record(external_exports.string().regex(/^T-\d{3,}$/), TaskRecordSchema),
   evidence: external_exports.array(EvidenceSchema).default([]),
@@ -26440,6 +26609,13 @@ var CapabilityBindingSchema = external_exports.object({
   provider: external_exports.string().min(1),
   distribution: external_exports.enum(["bundled", "installed", "host"]).default("installed")
 }).strict();
+var EnvironmentPreflightCheckSchema = external_exports.object({
+  id: external_exports.string().regex(/^[a-z][a-z0-9._-]*$/),
+  kind: external_exports.enum(["database", "browser", "credential", "custom"]),
+  command: external_exports.string().trim().min(1),
+  args: external_exports.array(external_exports.string()).default([]),
+  required: external_exports.boolean().default(true)
+}).strict();
 var WorkspaceConfigSchema = external_exports.object({
   mode: external_exports.enum(["auto", "current", "worktree"]).default("auto"),
   directory: external_exports.string().min(1).refine((value) => !value.startsWith("/") && !value.includes("\\") && !value.split("/").includes(".."), "Workspace directory must be a normalized project-relative path").default(".worktrees"),
@@ -26456,8 +26632,9 @@ var ConfigSchema = external_exports.object({
     branch_prefix: "rockspec/",
     auto_create: false
   }),
-  max_review_rounds: external_exports.number().int().min(1).max(10).optional(),
-  max_reconciliation_rounds: external_exports.number().int().min(1).max(5).default(2)
+  max_review_rounds: external_exports.number().int().min(1).max(10).default(3),
+  max_reconciliation_rounds: external_exports.number().int().min(1).max(5).default(2),
+  environment_preflight: external_exports.array(EnvironmentPreflightCheckSchema).default([])
 }).strict();
 function parseChangeSnapshot(input) {
   return parseProtocol(ChangeSnapshotSchema, input, "change snapshot");
@@ -26682,7 +26859,7 @@ var RockSpecError = class extends Error {
 };
 
 // packages/engine/dist/hashing.js
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { readFile as readFile2 } from "node:fs/promises";
 import path2 from "node:path";
 
@@ -26692,12 +26869,14 @@ import { execFile } from "node:child_process";
 import { access, appendFile, mkdir, open, readFile, realpath, readdir, rename, rm, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 var execFileAsync = promisify(execFile);
 var DEFAULT_CONFIG = {
   schema_version: 1,
   default_profile: "standard",
+  max_review_rounds: 3,
   max_reconciliation_rounds: 2,
+  environment_preflight: [],
   workspace: {
     mode: "auto",
     directory: ".worktrees",
@@ -27022,12 +27201,72 @@ async function readConfig(rocksRoot) {
   }
   return parseConfigText(await readFile(source, "utf8"), source);
 }
+function digest(content) {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+function snapshotText(change) {
+  return (0, import_yaml.stringify)(parseChangeSnapshot(change), { lineWidth: 0 });
+}
+async function recoverStateTransaction(changeDir) {
+  const journalPath = path.join(changeDir, "runtime", "state-transaction.yaml");
+  if (!await exists(journalPath))
+    return;
+  const raw = (0, import_yaml.parse)(await readFile(journalPath, "utf8"));
+  if (raw.schema_version !== 1 || !raw.after_hash || !raw.after_snapshot || !raw.event) {
+    throw new RockSpecError("STATE_TRANSACTION_INVALID", "Pending state transaction journal is invalid", { path: journalPath });
+  }
+  const after = parseChangeSnapshot(raw.after_snapshot);
+  const afterContent = (0, import_yaml.stringify)(after, { lineWidth: 0 });
+  if (digest(afterContent) !== raw.after_hash) {
+    throw new RockSpecError("STATE_TRANSACTION_INVALID", "Pending state transaction snapshot hash is invalid", { path: journalPath });
+  }
+  const statePath = path.join(changeDir, "change.yaml");
+  const currentContent = await exists(statePath) ? await readFile(statePath, "utf8") : null;
+  const currentHash = currentContent === null ? null : digest(currentContent);
+  if (currentHash !== raw.before_hash && currentHash !== raw.after_hash) {
+    throw new RockSpecError("STATE_TRANSACTION_DIVERGED", "Change state diverged while a transaction was pending", {
+      current_hash: currentHash,
+      before_hash: raw.before_hash ?? null,
+      after_hash: raw.after_hash
+    });
+  }
+  if (currentHash !== raw.after_hash)
+    await atomicWrite(statePath, afterContent);
+  const eventsPath = path.join(changeDir, "events.ndjson");
+  const events = await exists(eventsPath) ? (await readFile(eventsPath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+  const sameSequence = events.find((event) => event.sequence === raw.event.sequence);
+  if (sameSequence && JSON.stringify(sameSequence) !== JSON.stringify(raw.event)) {
+    throw new RockSpecError("STATE_TRANSACTION_DIVERGED", "Event sequence conflicts with a pending state transaction", {
+      sequence: raw.event.sequence
+    });
+  }
+  if (!sameSequence)
+    await appendEvent(changeDir, raw.event);
+  await rm(journalPath, { force: true });
+}
 async function readChange(changeDir) {
+  await recoverStateTransaction(changeDir);
   const source = path.join(changeDir, "change.yaml");
   if (!await exists(source)) {
     throw new RockSpecError("CHANGE_NOT_FOUND", "The change snapshot does not exist", { source });
   }
   return parseChangeText(await readFile(source, "utf8"), source);
+}
+async function commitChangeMutation(changeDir, _before, after, event) {
+  const statePath = path.join(changeDir, "change.yaml");
+  const beforeContent = await exists(statePath) ? await readFile(statePath, "utf8") : null;
+  const afterContent = snapshotText(after);
+  const journalPath = path.join(changeDir, "runtime", "state-transaction.yaml");
+  await atomicWrite(journalPath, (0, import_yaml.stringify)({
+    schema_version: 1,
+    before_hash: beforeContent === null ? null : digest(beforeContent),
+    after_hash: digest(afterContent),
+    after_snapshot: parseChangeSnapshot(after),
+    event
+  }, { lineWidth: 0 }));
+  await atomicWrite(statePath, afterContent);
+  await appendEvent(changeDir, event);
+  await rm(journalPath, { force: true });
 }
 async function writeChange(changeDir, change) {
   let parsed;
@@ -27055,6 +27294,179 @@ async function eventCount(changeDir) {
       return 0;
     throw error51;
   }
+}
+async function appendRuntimeTelemetry(cwd, record2) {
+  const { rocksRoot } = await resolveRepository(cwd);
+  if (!await exists(rocksRoot))
+    return;
+  const telemetryRoot = path.join(rocksRoot, "telemetry");
+  await mkdir(telemetryRoot, { recursive: true });
+  await appendFile(path.join(telemetryRoot, "commands.ndjson"), `${JSON.stringify(record2)}
+`, "utf8");
+}
+async function summarizeRuntimeTelemetry(cwd, changeId) {
+  const { root, rocksRoot } = await resolveRepository(cwd);
+  const telemetryPath = path.join(rocksRoot, "telemetry", "commands.ndjson");
+  const sourcePath = path.relative(root, telemetryPath);
+  let records = [];
+  if (await exists(telemetryPath)) {
+    const lines = (await readFile(telemetryPath, "utf8")).split("\n").filter(Boolean);
+    records = lines.flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return parsed.schema_version === 1 && typeof parsed.command === "string" && typeof parsed.duration_ms === "number" && (parsed.result === "success" || parsed.result === "error") ? [parsed] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+  if (changeId)
+    records = records.filter((record2) => record2.change_id === changeId);
+  const byCommand = {};
+  const byErrorCode = {};
+  for (const record2 of records) {
+    const aggregate = byCommand[record2.command] ?? {
+      count: 0,
+      success_count: 0,
+      error_count: 0,
+      duration_ms: 0,
+      response_bytes: 0
+    };
+    aggregate.count += 1;
+    aggregate.duration_ms += record2.duration_ms;
+    aggregate.response_bytes += record2.response_bytes;
+    if (record2.result === "success")
+      aggregate.success_count += 1;
+    else
+      aggregate.error_count += 1;
+    byCommand[record2.command] = aggregate;
+    if (record2.error_code)
+      byErrorCode[record2.error_code] = (byErrorCode[record2.error_code] ?? 0) + 1;
+  }
+  const agentExecutions = {
+    total_count: 0,
+    completed_count: 0,
+    incomplete_count: 0,
+    total_duration_ms: 0,
+    by_role: {}
+  };
+  const humanApprovalWait = {
+    count: 0,
+    total_duration_ms: 0,
+    by_gate: {}
+  };
+  const tokenUsage = {
+    execution_count: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    by_role: {}
+  };
+  if (changeId) {
+    const activePath = path.join(rocksRoot, "changes", changeId);
+    const changeDir = await exists(activePath) ? activePath : await findArchivedChange(rocksRoot, changeId);
+    if (changeDir) {
+      const change = await readChange(changeDir);
+      for (const execution of change.execution.registry) {
+        const aggregate = agentExecutions.by_role[execution.role] ?? {
+          count: 0,
+          completed_count: 0,
+          success_count: 0,
+          error_count: 0,
+          cancelled_count: 0,
+          unknown_count: 0,
+          duration_ms: 0
+        };
+        const usage = execution.usage ?? {};
+        const tokenAggregate = tokenUsage.by_role[execution.role] ?? {
+          execution_count: 0,
+          input_tokens: 0,
+          cached_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0
+        };
+        tokenAggregate.execution_count += 1;
+        tokenAggregate.input_tokens += usage.input_tokens ?? 0;
+        tokenAggregate.cached_input_tokens += usage.cached_input_tokens ?? 0;
+        tokenAggregate.output_tokens += usage.output_tokens ?? 0;
+        tokenAggregate.reasoning_tokens += usage.reasoning_tokens ?? 0;
+        tokenUsage.execution_count += 1;
+        tokenUsage.input_tokens += usage.input_tokens ?? 0;
+        tokenUsage.cached_input_tokens += usage.cached_input_tokens ?? 0;
+        tokenUsage.output_tokens += usage.output_tokens ?? 0;
+        tokenUsage.reasoning_tokens += usage.reasoning_tokens ?? 0;
+        tokenUsage.by_role[execution.role] = tokenAggregate;
+        aggregate.count += 1;
+        agentExecutions.total_count += 1;
+        if (execution.completed_at) {
+          const duration3 = Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at));
+          aggregate.completed_count += 1;
+          aggregate.duration_ms += duration3;
+          if (execution.outcome === "success")
+            aggregate.success_count += 1;
+          else if (execution.outcome === "error")
+            aggregate.error_count += 1;
+          else if (execution.outcome === "cancelled")
+            aggregate.cancelled_count += 1;
+          else
+            aggregate.unknown_count += 1;
+          agentExecutions.completed_count += 1;
+          agentExecutions.total_duration_ms += duration3;
+        }
+        agentExecutions.by_role[execution.role] = aggregate;
+      }
+      agentExecutions.incomplete_count = agentExecutions.total_count - agentExecutions.completed_count;
+      agentExecutions.by_role = Object.fromEntries(Object.entries(agentExecutions.by_role).sort(([left], [right]) => left.localeCompare(right)));
+      tokenUsage.by_role = Object.fromEntries(Object.entries(tokenUsage.by_role).sort(([left], [right]) => left.localeCompare(right)));
+      const eventsPath = path.join(changeDir, "events.ndjson");
+      if (await exists(eventsPath)) {
+        const pending = /* @__PURE__ */ new Map();
+        for (const line of (await readFile(eventsPath, "utf8")).split("\n").filter(Boolean)) {
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const prepared = /^approval\.(spec|design|implementation)\.package\.prepared$/.exec(event.event);
+          if (prepared?.[1])
+            pending.set(prepared[1], Date.parse(event.occurred_at));
+          const recorded = /^approval\.(spec|design|implementation)\.recorded$/.exec(event.event);
+          if (!recorded?.[1])
+            continue;
+          const startedAt = pending.get(recorded[1]);
+          if (startedAt === void 0)
+            continue;
+          const duration3 = Math.max(0, Date.parse(event.occurred_at) - startedAt);
+          const aggregate = humanApprovalWait.by_gate[recorded[1]] ?? { count: 0, duration_ms: 0 };
+          aggregate.count += 1;
+          aggregate.duration_ms += duration3;
+          humanApprovalWait.by_gate[recorded[1]] = aggregate;
+          humanApprovalWait.count += 1;
+          humanApprovalWait.total_duration_ms += duration3;
+          pending.delete(recorded[1]);
+        }
+      }
+    }
+  }
+  return {
+    schema_version: 1,
+    source_path: sourcePath,
+    ...changeId ? { change_id: changeId } : {},
+    record_count: records.length,
+    success_count: records.filter((record2) => record2.result === "success").length,
+    error_count: records.filter((record2) => record2.result === "error").length,
+    internal_error_count: records.filter((record2) => record2.internal_error).length,
+    total_duration_ms: records.reduce((total, record2) => total + record2.duration_ms, 0),
+    first_started_at: records[0]?.started_at ?? null,
+    last_finished_at: records.at(-1)?.finished_at ?? null,
+    by_command: Object.fromEntries(Object.entries(byCommand).sort(([left], [right]) => left.localeCompare(right))),
+    by_error_code: Object.fromEntries(Object.entries(byErrorCode).sort(([left], [right]) => left.localeCompare(right))),
+    agent_executions: agentExecutions,
+    human_approval_wait: humanApprovalWait,
+    token_usage: tokenUsage
+  };
 }
 async function activeChangeIds(rocksRoot) {
   const directory = path.join(rocksRoot, "changes");
@@ -27114,7 +27526,7 @@ async function walkFiles(directory) {
 
 // packages/engine/dist/hashing.js
 function sha256(content) {
-  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+  return `sha256:${createHash2("sha256").update(content).digest("hex")}`;
 }
 async function hashPaths(changeDir, relativePaths) {
   const paths = /* @__PURE__ */ new Set();
@@ -27176,6 +27588,7 @@ var ACTION_PROFILES = {
   "task.execute": ["lite", "standard", "strict"],
   "task.review": ["standard", "strict"],
   "acceptance.validate": ["standard", "strict"],
+  "acceptance.uat": ["standard", "strict"],
   "delivery.review": ["standard", "strict"],
   "change.verify": ["lite", "standard", "strict"],
   "knowledge.evolve": ["lite", "standard", "strict"],
@@ -27202,6 +27615,7 @@ var ENTRY_SKILL_BY_ACTION = {
   "task.execute": "rockspec-implement",
   "task.review": "rockspec-review",
   "acceptance.validate": "rockspec-acceptance",
+  "acceptance.uat": "rockspec-acceptance",
   "delivery.review": "rockspec-review",
   "change.verify": "rockspec-finish",
   "knowledge.evolve": "rockspec-evolve",
@@ -27316,7 +27730,7 @@ function recoveryDirective(change) {
     const classifications = [...new Set(open2.map((finding) => finding.classification))].sort();
     const authorityDelta = open2.some((finding) => finding.authority_impact === "changed") ? "changed" : open2.some((finding) => finding.authority_impact === "unknown") ? "unknown" : "unchanged";
     const autoClassifications = /* @__PURE__ */ new Set(["consistency_fix", "derived_gap", "implementation_fix"]);
-    const approvalPolicy = authorityDelta === "unchanged" && open2.every((finding) => finding.severity !== "critical" && autoClassifications.has(finding.classification)) ? "auto" : "human";
+    const approvalPolicy = authorityDelta === "unchanged" && open2.every((finding) => autoClassifications.has(finding.classification)) ? "auto" : "human";
     return {
       kind: "revision",
       review_id: reviewId,
@@ -27511,6 +27925,12 @@ function workflowAdvice(change, blocked, recovery = null) {
         alternatives: [],
         allowed: ["acceptance.validate", "validate"]
       };
+    case "UAT_PENDING":
+      return {
+        recommended: recommendation("acceptance.uat", "Confirm the accepted Scenarios through the configured user acceptance policy"),
+        alternatives: [],
+        allowed: ["acceptance.uat", "validate"]
+      };
     case "FINAL_REVIEW":
       return {
         recommended: recommendation("delivery.review", "Review the final code and all TE assets"),
@@ -27567,6 +27987,7 @@ function assertActionAllowed(change, action) {
     "task.execute": ["READY", "IMPLEMENTING"],
     "task.review": ["IMPLEMENTING"],
     "acceptance.validate": ["ACCEPTANCE_VALIDATING"],
+    "acceptance.uat": ["UAT_PENDING"],
     "delivery.review": ["FINAL_REVIEW"],
     "change.verify": ["IMPLEMENTING", "VERIFYING"],
     "knowledge.evolve": ["READY_TO_FINISH"],
@@ -27616,7 +28037,13 @@ var RockSpecEngine = class {
   async newChange(input) {
     validateChangeId(input.id);
     const context = await this.context();
-    const profile = input.profile ?? context.config.default_profile;
+    const kind = input.kind ?? "feature";
+    const triage = triageProfile({
+      kind,
+      requestedProfile: input.profile ?? context.config.default_profile,
+      riskTags: input.riskTags ?? []
+    });
+    const profile = triage.profile;
     const changeDir = path3.join(context.rocksRoot, "changes", input.id);
     const now = this.timestamp();
     let snapshot;
@@ -27691,6 +28118,12 @@ var RockSpecEngine = class {
         id: input.id,
         title: input.title ?? titleFromId(input.id),
         profile,
+        triage: {
+          kind,
+          risk_tags: [...new Set(input.riskTags ?? [])].sort(),
+          minimum_profile: triage.minimumProfile,
+          reasons: triage.reasons
+        },
         state: "SCOPING",
         base_ref: baseRef,
         base_commit: baseCommit,
@@ -27712,7 +28145,11 @@ var RockSpecEngine = class {
           provider: binding.provider,
           status: input.prototypeRequired ? "pending" : "not_required"
         },
-        execution: { active_task: null, active_execution: null },
+        uat: {
+          policy: input.uatPolicy ?? (input.prototypeRequired ? "required" : "optional"),
+          status: input.uatPolicy === "required" || !input.uatPolicy && input.prototypeRequired ? "pending" : "not_required"
+        },
+        execution: { active_task: null, active_execution: null, registry: [] },
         tasks: {},
         evidence: [],
         reviews: {},
@@ -27727,8 +28164,7 @@ var RockSpecEngine = class {
         await mkdir2(changeDir, { recursive: false });
         await this.ensureTemplates(changeDir, createdSnapshot);
         await this.refreshArtifacts(changeDir, createdSnapshot);
-        await writeChange(changeDir, createdSnapshot);
-        await appendEvent(changeDir, {
+        await commitChangeMutation(changeDir, null, createdSnapshot, {
           schema_version: 1,
           sequence: 1,
           event: "change.created",
@@ -27738,7 +28174,10 @@ var RockSpecEngine = class {
           current_state: "SCOPING",
           data: {
             profile,
+            kind,
+            risk_tags: input.riskTags ?? [],
             prototype_required: createdSnapshot.prototype.required,
+            uat_policy: createdSnapshot.uat.policy,
             workspace: createdSnapshot.workspace
           }
         });
@@ -27764,6 +28203,14 @@ var RockSpecEngine = class {
       throw new RockSpecError("IMPLEMENTATION_PREFLIGHT_STATE", `Implementation preflight is not legal while the Change is ${change.state}`, { state: change.state, expected_states: ["READINESS_REVIEW", "READY", "IMPLEMENTING"] });
     }
     await this.assertWorkspaceBinding(context, change);
+    const environment = await this.runEnvironmentPreflight(context, change.id);
+    if (!environment.valid) {
+      throw new RockSpecError("ENVIRONMENT_PREFLIGHT_FAILED", "Required environment preflight checks did not pass", {
+        change_id: change.id,
+        checks: environment.checks,
+        recommended_next: { action: "preflight.environment", entry_skill: "rockspec-change" }
+      });
+    }
     if (change.state === "READINESS_REVIEW") {
       await this.assertApprovalPrerequisites(changeDir, change, "implementation");
     } else {
@@ -27794,13 +28241,148 @@ var RockSpecEngine = class {
         { id: "readiness", status: "passed", detail: "Readiness Review is PASS and covers the current Plan" },
         { id: "task_graph", status: "passed", detail: "Task dependencies and supersession form a runnable graph" },
         { id: "recovery", status: "passed", detail: "No unresolved Finding recovery blocks implementation" },
-        { id: "review_modes", status: "passed", detail: "Product and zero-Diff scope-blocked Task Review paths are available" }
+        { id: "review_modes", status: "passed", detail: "Product and zero-Diff scope-blocked Task Review paths are available" },
+        ...environment.checks.length > 0 ? [{ id: "environment", status: "passed", detail: "Configured database, browser, credential, and custom probes passed" }] : []
       ],
       review_modes: ["product", "scope_blocked"]
     };
   }
+  async preflightAcceptance(input = {}) {
+    const context = await this.context();
+    const located = await this.locateChange(context, input.changeId);
+    const { change, changeDir } = located;
+    if (!["ACCEPTANCE_VALIDATING", "FINAL_REVIEW"].includes(change.state)) {
+      throw new RockSpecError("ACCEPTANCE_PREFLIGHT_STATE", `Acceptance preflight is not legal while the Change is ${change.state}`, {
+        state: change.state
+      });
+    }
+    await this.assertWorkspaceBinding(context, change);
+    await this.assertNoUncommittedProductChanges(context.root);
+    const currentCommit = await git(context.root, ["rev-parse", "HEAD"]);
+    const acceptanceExecution = [...change.execution.registry].reverse().find((execution) => execution.role === "acceptance_engineer" && execution.action === "acceptance.validate");
+    if (!acceptanceExecution) {
+      throw new RockSpecError("ACCEPTANCE_PREFLIGHT_EXECUTION_MISSING", "Register an Acceptance execution before preparing the report", {
+        recommended_next: { action: "execution.start", role: "acceptance_engineer", command: `rockspec execution start acceptance.validate ${change.id} --role acceptance_engineer --model-tier balanced` }
+      });
+    }
+    await requireArtifacts(changeDir, ["testing/test-plan.md", "testing/test-report.md"]);
+    const review = await this.loadAcceptanceReview(changeDir, change, currentCommit, Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution)));
+    return {
+      ...await this.statusFor(context, changeDir, change),
+      valid: true,
+      checks: [
+        { id: "state", status: "passed", detail: `Change is ${change.state}` },
+        { id: "execution", status: "passed", detail: `Acceptance execution ${acceptanceExecution.id} is registered` },
+        { id: "report", status: "passed", detail: `Acceptance report binds commit ${currentCommit}` },
+        { id: "scenarios", status: "passed", detail: `Acceptance verdict ${review.verdict} has valid Scenario coverage` },
+        { id: "evidence", status: "passed", detail: "All referenced executed evidence and artifacts are present and fresh" }
+      ]
+    };
+  }
+  async preflightEnvironment(input = {}) {
+    const context = await this.context();
+    const located = await this.locateChange(context, input.changeId);
+    const checks = await this.runEnvironmentPreflight(context, located.change.id);
+    return { ...await this.statusFor(context, located.changeDir, located.change), ...checks };
+  }
   async continue(input = {}) {
     return this.getStatus(input);
+  }
+  async startExecution(input) {
+    assertExecutionRoleAction(input.role, input.action);
+    let started;
+    const result = await this.mutate(input.changeId, "execution.started", async (change) => {
+      const active = input.role === "acceptance_engineer" ? change.execution.registry.find((record2) => record2.role === input.role && record2.action === input.action && !record2.completed_at) : void 0;
+      if (active) {
+        throw new RockSpecError("EXECUTION_ALREADY_ACTIVE", `An active ${input.role} execution already exists for ${input.action}`, {
+          change_id: change.id,
+          execution_id: active.id,
+          role: active.role,
+          action: active.action,
+          recommended_next: {
+            action: "execution.complete",
+            command: `rockspec execution complete ${active.id} ${change.id} --outcome success`
+          }
+        });
+      }
+      if (input.parentExecutionId && !change.execution.registry.some((record2) => record2.id === input.parentExecutionId)) {
+        throw new RockSpecError("EXECUTION_PARENT_NOT_FOUND", "Parent execution is not registered in this Change", {
+          parent_execution_id: input.parentExecutionId
+        });
+      }
+      const id = randomUUID2();
+      change.execution.registry.push({
+        id,
+        role: input.role,
+        action: input.action,
+        started_at: this.timestamp(),
+        ...input.modelTier ? { model_tier: input.modelTier } : {},
+        ...input.hostModel ? { host_model: input.hostModel } : {},
+        ...input.parentExecutionId ? { parent_execution_id: input.parentExecutionId } : {},
+        ...input.contextPackagePath ? { context_package_path: input.contextPackagePath } : {},
+        ...input.contextPackageHash ? { context_package_hash: input.contextPackageHash } : {}
+      });
+      started = { id, role: input.role, action: input.action };
+      return { execution_id: id, role: input.role, action: input.action };
+    });
+    if (!started)
+      throw new RockSpecError("INTERNAL_ERROR", "Execution was not registered");
+    return { ...await this.statusFor(result.context, result.changeDir, result.change), started_execution: started };
+  }
+  async completeExecution(input) {
+    const usage = normalizeExecutionUsage(input.usage);
+    let completed;
+    const result = await this.mutate(input.changeId, "execution.completed", async (change) => {
+      const execution = change.execution.registry.find((record2) => record2.id === input.executionId);
+      if (!execution) {
+        throw new RockSpecError("EXECUTION_NOT_REGISTERED", "Execution is not registered in this Change", {
+          change_id: change.id,
+          execution_id: input.executionId
+        });
+      }
+      const outcome = input.outcome ?? "success";
+      if (execution.completed_at) {
+        if (execution.outcome && execution.outcome !== outcome) {
+          throw new RockSpecError("EXECUTION_OUTCOME_MISMATCH", "Completed execution cannot be assigned a different outcome", {
+            change_id: change.id,
+            execution_id: execution.id,
+            recorded_outcome: execution.outcome,
+            supplied_outcome: outcome
+          });
+        }
+        if (usage && execution.usage && JSON.stringify(execution.usage) !== JSON.stringify(usage)) {
+          throw new RockSpecError("EXECUTION_USAGE_MISMATCH", "Completed execution cannot be assigned different token usage", {
+            execution_id: execution.id,
+            recorded_usage: execution.usage,
+            supplied_usage: usage
+          });
+        }
+        if (usage && !execution.usage)
+          execution.usage = usage;
+        execution.outcome ??= outcome;
+        completed = {
+          id: execution.id,
+          outcome,
+          duration_ms: Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at)),
+          already_completed: true
+        };
+        return completed;
+      }
+      execution.completed_at = this.timestamp();
+      execution.outcome = outcome;
+      if (usage)
+        execution.usage = usage;
+      completed = {
+        id: execution.id,
+        outcome,
+        duration_ms: Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at)),
+        already_completed: false
+      };
+      return completed;
+    });
+    if (!completed)
+      throw new RockSpecError("INTERNAL_ERROR", "Execution completion was not recorded");
+    return { ...await this.statusFor(result.context, result.changeDir, result.change), completed_execution: completed };
   }
   async completeAction(input) {
     if (input.action === "change.promote") {
@@ -27813,6 +28395,8 @@ var RockSpecEngine = class {
       return this.verify(input);
     if (input.action === "change.archive")
       return this.archive(input);
+    if (input.action === "acceptance.uat")
+      return this.completeUat(input);
     const result = await this.mutate(input.changeId, `action.${input.action}.completed`, async (change, changeDir, context) => {
       try {
         assertActionAllowed(change, input.action);
@@ -27836,10 +28420,11 @@ var RockSpecEngine = class {
         case "requirements.clarify":
           await requireArtifacts(changeDir, ["proposal.md", "specs"]);
           await this.assertMaterialized(changeDir, ["proposal.md", "specs"], true);
+          await this.assertProposalReady(changeDir);
           change.state = "SPEC_REVIEW";
           break;
         case "requirements.review":
-          change.reviews.requirements = await this.loadStageReview(changeDir, change.profile, "reviews/requirements-review.md", "requirements", input.verdict);
+          change.reviews.requirements = await this.loadStageReview(changeDir, change, change.profile, "reviews/requirements-review.md", "requirements", input.verdict);
           change.reviews.requirements.content_hash = (await hashPaths(changeDir, ["proposal.md", "specs"])).aggregate_hash;
           actionPassed = change.reviews.requirements.verdict === "PASS";
           break;
@@ -27880,7 +28465,7 @@ var RockSpecEngine = class {
           change.state = "READINESS_REVIEW";
           break;
         case "readiness.review":
-          change.reviews.readiness = await this.loadStageReview(changeDir, change.profile, "reviews/readiness-review.md", "readiness", input.verdict);
+          change.reviews.readiness = await this.loadStageReview(changeDir, change, change.profile, "reviews/readiness-review.md", "readiness", input.verdict);
           change.reviews.readiness.content_hash = (await hashPaths(changeDir, ["design.md", "plan.md", "tasks.md", "tasks"])).aggregate_hash;
           actionPassed = change.reviews.readiness.verdict === "PASS";
           break;
@@ -27896,10 +28481,11 @@ var RockSpecEngine = class {
           if (!task?.base_commit || !task.execution_id) {
             throw new RockSpecError("TASK_EXECUTION_INCOMPLETE", `Task ${taskId} has no bound execution`);
           }
-          if (task.review_attempts >= 3) {
-            throw new RockSpecError("REVIEW_ROUND_LIMIT", `Task ${taskId} exhausted its two fix reviews`, {
+          if (task.review_attempts >= context.config.max_review_rounds) {
+            throw new RockSpecError("REVIEW_ROUND_LIMIT", `Task ${taskId} exhausted its configured Review attempts`, {
               task_id: taskId,
-              review_attempts: task.review_attempts
+              review_attempts: task.review_attempts,
+              max_review_rounds: context.config.max_review_rounds
             });
           }
           if (task.review_package_mode === "scope_blocked") {
@@ -27907,7 +28493,7 @@ var RockSpecEngine = class {
           } else {
             await this.assertTaskProductState(context.root, task);
           }
-          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), taskId, task.review_package_mode ?? "product", task.allowed_paths);
+          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), taskId, task.review_package_mode ?? "product", task.allowed_paths);
           if (task.review_subject && !sameReviewSubject(task.review_subject, reviewPackage.subject)) {
             throw new RockSpecError("STALE_REVIEW_PACKAGE", `Task ${taskId} changed after its Review Package was prepared`, {
               prepared: task.review_subject,
@@ -27915,7 +28501,7 @@ var RockSpecEngine = class {
             });
           }
           task.review_subject = reviewPackage.subject;
-          const taskReview = await this.loadCodeReview(changeDir, change.profile, `reviews/tasks/${taskId}-review.md`, reviewPackage.subject, [task.execution_id], input.verdict);
+          const taskReview = await this.loadCodeReview(changeDir, change, change.profile, `reviews/tasks/${taskId}-review.md`, reviewPackage.subject, [task.execution_id], reviewPackage.scope?.expanded_paths ?? [], input.verdict);
           if (task.review_package_mode === "scope_blocked" && taskReview.verdict === "PASS") {
             throw new RockSpecError("SCOPE_BLOCKED_REVIEW_PASS", "A scope-blocked Task Review must record a non-PASS Finding");
           }
@@ -27934,24 +28520,37 @@ var RockSpecEngine = class {
         case "acceptance.validate":
           await requireArtifacts(changeDir, ["testing/test-plan.md", "testing/test-report.md"]);
           await this.assertNoUncommittedProductChanges(context.root);
-          change.reviews.acceptance = await this.loadAcceptanceReview(changeDir, await git(context.root, ["rev-parse", "HEAD"]), Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution)), input.verdict);
+          change.reviews.acceptance = await this.loadAcceptanceReview(changeDir, change, await git(context.root, ["rev-parse", "HEAD"]), Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution)), input.verdict);
           actionPassed = change.reviews.acceptance.verdict === "PASS";
           if (actionPassed) {
             await this.assertFreshEvidence(context.root, change, { actionId: "acceptance.validate" }, true);
             if (change.prototype.required) {
               await this.assertPrototypeEvidence(context.root, change);
             }
-            change.state = "FINAL_REVIEW";
+            change.state = change.uat.policy === "required" ? "UAT_PENDING" : "FINAL_REVIEW";
           }
           break;
         case "delivery.review": {
           await this.assertNoUncommittedProductChanges(context.root);
           if (!change.base_commit)
             throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
-          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
+          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, change, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
           const implementerExecutions = Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution));
-          change.reviews.delivery = await this.loadCodeReview(changeDir, change.profile, "reviews/delivery-review.md", reviewPackage.subject, implementerExecutions, input.verdict);
+          change.reviews.delivery = await this.loadCodeReview(changeDir, change, change.profile, "reviews/delivery-review.md", reviewPackage.subject, implementerExecutions, [], input.verdict);
           actionPassed = change.reviews.delivery.verdict === "PASS";
+          if (actionPassed) {
+            const unassigned = await this.findUnassignedProductCommits(context.root, change);
+            if (unassigned.length > 0) {
+              throw new RockSpecError("UNASSIGNED_PRODUCT_COMMIT_REVIEW_REQUIRED", "Delivery Review must record an Open Finding for every unassigned product or test Commit", {
+                change_id: change.id,
+                commits: unassigned,
+                recommended_next: {
+                  action: "delivery.review",
+                  instruction: "Update the Delivery Review with a Finding routed to plan.create, then resubmit it as CHANGES_REQUIRED"
+                }
+              });
+            }
+          }
           if (actionPassed)
             change.state = "VERIFYING";
           else if (recoveryDirective(change)?.kind === "action") {
@@ -27969,8 +28568,61 @@ var RockSpecEngine = class {
         change.completed_actions.push(input.action);
       if (actionPassed)
         clearFailedReconciliation(change, input.action);
+      if (input.action !== "task.execute")
+        this.completeActionExecutions(change, input.action);
       await this.refreshArtifacts(changeDir, change);
       return { action: input.action, passed: actionPassed };
+    });
+    return this.statusFor(result.context, result.changeDir, result.change);
+  }
+  async completeUat(input = {}) {
+    const result = await this.mutate(input.changeId, "action.acceptance.uat.completed", async (change, changeDir, context) => {
+      if (change.state !== "UAT_PENDING" || change.uat.policy !== "required") {
+        throw new RockSpecError("UAT_NOT_REQUIRED", "This Change is not waiting for required user acceptance", {
+          state: change.state,
+          policy: change.uat.policy
+        });
+      }
+      const relativePath = input.reportPath ?? "testing/uat-report.md";
+      const content = await readFile3(path3.join(changeDir, relativePath), "utf8").catch(() => null);
+      if (!content) {
+        throw new RockSpecError("UAT_REPORT_MISSING", "Required UAT needs a confirmation report", { path: relativePath });
+      }
+      await this.assertMaterialized(changeDir, [relativePath]);
+      let document;
+      try {
+        document = UatDocumentSchema.parse(parseFrontmatter(content, relativePath));
+      } catch (error51) {
+        throw new RockSpecError("UAT_REPORT_INVALID", "UAT report Frontmatter is invalid", {
+          path: relativePath,
+          error: error51 instanceof Error ? error51.message : String(error51)
+        });
+      }
+      const currentCommit = await git(context.root, ["rev-parse", "HEAD"]);
+      if (document.commit !== currentCommit) {
+        throw new RockSpecError("STALE_UAT", "UAT confirmation does not cover the current Commit", {
+          reported_commit: document.commit,
+          current_commit: currentCommit
+        });
+      }
+      const scenarios = (await this.loadSpecTraceability(changeDir)).scenarioRequirement;
+      const unknown2 = document.scenario_ids.filter((scenarioId) => !scenarios.has(scenarioId));
+      if (unknown2.length > 0) {
+        throw new RockSpecError("UAT_SCENARIO_NOT_FOUND", "UAT references unknown Scenarios", { scenario_ids: unknown2 });
+      }
+      change.uat = {
+        policy: "required",
+        status: "confirmed",
+        report_path: relativePath,
+        report_hash: sha256(content),
+        commit: currentCommit,
+        confirmed_at: this.timestamp()
+      };
+      if (!change.completed_actions.includes("acceptance.uat"))
+        change.completed_actions.push("acceptance.uat");
+      change.state = "FINAL_REVIEW";
+      await this.refreshArtifacts(changeDir, change);
+      return { report_path: relativePath, commit: currentCommit, scenario_ids: document.scenario_ids };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
   }
@@ -27978,14 +28630,46 @@ var RockSpecEngine = class {
     const result = await this.mutate(input.changeId, `approval.${input.gate}.recorded`, async (change, changeDir) => {
       this.assertApprovalState(change, input.gate);
       await this.assertApprovalPrerequisites(changeDir, change, input.gate);
+      const packagePath = `runtime/approvals/${input.gate}-package.yaml`;
+      const packageContent = await readFile3(path3.join(changeDir, packagePath), "utf8").catch(() => null);
+      if (!packageContent) {
+        throw new RockSpecError("APPROVAL_PACKAGE_MISSING", "Prepare and present the Approval Package before recording approval", {
+          gate: input.gate,
+          path: packagePath
+        });
+      }
+      const packageHash = sha256(packageContent);
+      if (packageHash !== input.packageHash) {
+        throw new RockSpecError("APPROVAL_PACKAGE_MISMATCH", "Approval does not bind the prepared package", {
+          gate: input.gate,
+          expected: packageHash,
+          supplied: input.packageHash
+        });
+      }
+      const parsedPackage = ApprovalPackageSchema.safeParse((0, import_yaml2.parse)(packageContent));
+      if (!parsedPackage.success || parsedPackage.data.gate !== input.gate) {
+        throw new RockSpecError("APPROVAL_PACKAGE_INVALID", "Approval Package is invalid or targets another Gate", {
+          gate: input.gate,
+          issues: parsedPackage.success ? [] : parsedPackage.error.issues
+        });
+      }
       const hashes = await hashPaths(changeDir, approvalPaths(input.gate, change.prototype.required));
+      if (hashes.aggregate_hash !== parsedPackage.data.aggregate_hash || JSON.stringify(hashes.artifact_hashes) !== JSON.stringify(parsedPackage.data.artifact_hashes)) {
+        throw new RockSpecError("STALE_APPROVAL_PACKAGE", "Gate artifacts changed after the Approval Package was prepared", {
+          gate: input.gate,
+          prepared: parsedPackage.data.aggregate_hash,
+          current: hashes.aggregate_hash
+        });
+      }
       const approval = {
         gate: input.gate,
         ...hashes,
         approved_by: input.approvedBy ?? "user",
         approved_at: this.timestamp(),
         mode: "human",
-        authority_basis_hash: hashes.aggregate_hash
+        authority_basis_hash: hashes.aggregate_hash,
+        package_path: packagePath,
+        package_hash: packageHash
       };
       change.approvals[input.gate] = approval;
       const activeRevision = change.revisions.find((revision) => revision.status === "open");
@@ -28002,6 +28686,51 @@ var RockSpecEngine = class {
       return { gate: input.gate, aggregate_hash: approval.aggregate_hash };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
+  }
+  async prepareApproval(input) {
+    let prepared;
+    await this.mutate(input.changeId, `approval.${input.gate}.package.prepared`, async (change, changeDir) => {
+      this.assertApprovalState(change, input.gate);
+      await this.assertApprovalPrerequisites(changeDir, change, input.gate);
+      const hashes = await hashPaths(changeDir, approvalPaths(input.gate, change.prototype.required));
+      const proposalContent = await readFile3(path3.join(changeDir, "proposal.md"), "utf8");
+      const proposal = ProposalDefinitionSchema.parse(parseFrontmatter(proposalContent, "proposal.md"));
+      const traceability = await this.loadSpecTraceability(changeDir);
+      const decisionIds = input.gate === "spec" ? [] : parseDesignDefinition(await readFile3(path3.join(changeDir, "design.md"), "utf8"), "design.md").decisions.map((decision) => decision.id).sort();
+      const taskIds = input.gate === "implementation" ? Object.keys(change.tasks).sort() : [];
+      const summary = {
+        non_goals: proposal.non_goals,
+        assumptions: proposal.assumptions,
+        open_questions: proposal.open_questions,
+        requirement_ids: [...traceability.requirementScenarios.keys()].sort(),
+        scenario_ids: [...traceability.scenarioRequirement.keys()].sort(),
+        decision_ids: decisionIds,
+        task_ids: taskIds
+      };
+      const document = ApprovalPackageSchema.parse({
+        schema_version: 1,
+        gate: input.gate,
+        generated_at: this.timestamp(),
+        ...hashes,
+        summary
+      });
+      const content = (0, import_yaml2.stringify)(document, { lineWidth: 0 });
+      const relativePath = `runtime/approvals/${input.gate}-package.yaml`;
+      const packageHash = sha256(content);
+      await atomicWrite(path3.join(changeDir, relativePath), content);
+      prepared = {
+        schema_version: 1,
+        gate: input.gate,
+        path: relativePath,
+        hash: packageHash,
+        ...hashes,
+        summary
+      };
+      return { gate: input.gate, path: relativePath, hash: packageHash };
+    });
+    if (!prepared)
+      throw new RockSpecError("INTERNAL_ERROR", "Approval Package was not prepared");
+    return prepared;
   }
   async prepareReconciliation(input) {
     let prepared;
@@ -28053,6 +28782,7 @@ var RockSpecEngine = class {
       }
       const content = await readFile3(absolutePath, "utf8");
       const review = parseReconciliationReviewDocument(content, relativePath);
+      this.assertRegisteredExecution(change, review.reviewer_execution_id, "reconciliation_reviewer", `reconcile.${input.gate}`);
       if (review.revision_id !== revision.id || review.gate !== input.gate || review.round !== revision.convergence_round) {
         throw new RockSpecError("RECONCILIATION_SUBJECT_MISMATCH", "Reconciliation Review targets the wrong Revision, Gate, or round", {
           expected: { revision_id: revision.id, gate: input.gate, round: revision.convergence_round },
@@ -28172,6 +28902,7 @@ var RockSpecEngine = class {
       change.approvals = {};
       change.reviews = {};
       change.verification = { status: "pending" };
+      resetUat(change);
       await this.ensureTemplates(changeDir, change);
       return { previous_profile: previousProfile, profile: input.profile };
     });
@@ -28223,23 +28954,27 @@ var RockSpecEngine = class {
             state: change.state
           });
         }
-        const findingIds = [...new Set(input.findingIds ?? [])].sort();
-        if (input.reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
+        const findingIds = input.consumeCurrentRecovery ? recovery.finding_ids : [...new Set(input.findingIds ?? [])].sort();
+        const reviewId = input.consumeCurrentRecovery ? recovery.review_id : input.reviewId;
+        if (reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
           throw new RockSpecError("RECOVERY_TRIGGER_MISMATCH", "Recovery must bind every Open Finding in the Engine recommendation", {
+            change_id: change.id,
             expected_review_id: recovery.review_id,
             expected_finding_ids: recovery.finding_ids,
-            provided_review_id: input.reviewId ?? null,
+            provided_review_id: reviewId ?? null,
             provided_finding_ids: findingIds
           });
         }
         if (source && source !== recovery.source) {
           throw new RockSpecError("RECOVERY_SOURCE_MISMATCH", "Recovery source does not match the triggering Review", {
+            change_id: change.id,
             expected: recovery.source,
             provided: source
           });
         }
         if (target && target !== recovery.target) {
           throw new RockSpecError("RECOVERY_TARGET_MISMATCH", "Recovery target must be the earliest responsible capability", {
+            change_id: change.id,
             expected: recovery.target,
             provided: target
           });
@@ -28271,10 +29006,12 @@ var RockSpecEngine = class {
       if (!source || !target)
         throw new RockSpecError("REVISION_ROUTE_REQUIRED", "Revision source and target are required");
       if (approvalPolicy === "auto" && !input.authorExecutionId?.trim()) {
-        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision requires --author-execution for Reviewer independence");
+        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision requires --author-execution for Reviewer independence", {
+          change_id: change.id
+        });
       }
       assertRevisionTargetAllowed(change, target);
-      const reason = input.reason.trim();
+      const reason = input.reason.trim() || (input.consumeCurrentRecovery && trigger ? recoveryRevisionReason(change, trigger.review_id, trigger.finding_ids) : "");
       const affectedIds = [...new Set(input.affectedIds)].sort();
       if (!reason)
         throw new RockSpecError("REVISION_REASON_REQUIRED", "Revision reason must not be empty");
@@ -28352,6 +29089,31 @@ var RockSpecEngine = class {
       };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
+  }
+  async applyRecovery(input = {}) {
+    const status = await this.getStatus(input);
+    const recovery = status.recovery;
+    if (!recovery) {
+      throw new RockSpecError("RECOVERY_NOT_AVAILABLE", "The Change has no current Finding-bound recovery", {
+        change_id: status.change.id,
+        state: status.current_state
+      });
+    }
+    if (recovery.kind !== "revision") {
+      throw new RockSpecError("RECOVERY_ACTION_REQUIRED", "The current recovery continues through an existing Action, not a Revision", {
+        change_id: status.change.id,
+        route_to: recovery.route_to,
+        recommended_next: status.recommended_next
+      });
+    }
+    const revisionInput = {
+      changeId: status.change.id,
+      reason: input.reason?.trim() ?? "",
+      affectedIds: input.affectedIds ?? [],
+      ...input.authorExecutionId?.trim() ? { authorExecutionId: input.authorExecutionId.trim() } : {},
+      consumeCurrentRecovery: true
+    };
+    return status.change.revisions.some((revision) => revision.status === "open") ? this.amendRevision(revisionInput) : this.revise(revisionInput);
   }
   async submitFeedback(input) {
     const reason = input.reason.trim();
@@ -28432,23 +29194,27 @@ var RockSpecEngine = class {
       if (!recovery || recovery.kind !== "revision" || !recovery.target || !recovery.revision_kind) {
         throw new RockSpecError("REVISION_AMENDMENT_FINDING_REQUIRED", "Revision amendment requires a new non-PASS Review with Open Findings");
       }
-      const findingIds = [...new Set(input.findingIds ?? [])].sort();
-      if (input.reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
+      const findingIds = input.consumeCurrentRecovery ? recovery.finding_ids : [...new Set(input.findingIds ?? [])].sort();
+      const reviewId = input.consumeCurrentRecovery ? recovery.review_id : input.reviewId;
+      if (reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
         throw new RockSpecError("RECOVERY_TRIGGER_MISMATCH", "Revision amendment must bind every Open Finding in the Engine recommendation", {
+          change_id: change.id,
           expected_review_id: recovery.review_id,
           expected_finding_ids: recovery.finding_ids,
-          provided_review_id: input.reviewId ?? null,
+          provided_review_id: reviewId ?? null,
           provided_finding_ids: findingIds
         });
       }
       if (input.source && input.source !== recovery.source) {
         throw new RockSpecError("RECOVERY_SOURCE_MISMATCH", "Revision amendment source does not match the triggering Review", {
+          change_id: change.id,
           expected: recovery.source,
           provided: input.source
         });
       }
       if (input.target && input.target !== recovery.target) {
         throw new RockSpecError("RECOVERY_TARGET_MISMATCH", "Revision amendment target must be the earliest responsible capability", {
+          change_id: change.id,
           expected: recovery.target,
           provided: input.target
         });
@@ -28456,7 +29222,7 @@ var RockSpecEngine = class {
       const review = change.reviews[recovery.review_id];
       if (!review)
         throw new RockSpecError("RECOVERY_REVIEW_MISSING", "The triggering Review is no longer available");
-      const reason = input.reason.trim();
+      const reason = input.reason.trim() || (input.consumeCurrentRecovery ? recoveryRevisionReason(change, recovery.review_id, recovery.finding_ids) : "");
       const affectedIds = [...new Set(input.affectedIds)].sort();
       if (!reason)
         throw new RockSpecError("REVISION_REASON_REQUIRED", "Revision amendment reason must not be empty");
@@ -28480,7 +29246,9 @@ var RockSpecEngine = class {
       const approvalPolicy = revision.approval_policy === "human" || recovery.approval_policy === "human" || !isAutoRevision(classifications, authorityDelta) ? "human" : "auto";
       const authorExecutionId = input.authorExecutionId?.trim() || revision.author_execution_id;
       if (approvalPolicy === "auto" && !authorExecutionId) {
-        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision amendment requires --author-execution for Reviewer independence");
+        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision amendment requires --author-execution for Reviewer independence", {
+          change_id: change.id
+        });
       }
       const beforeHashes = await this.revisionHashes(changeDir);
       const invalidatedApprovals = revisionApprovals(amendmentTarget, change.approvals);
@@ -28582,6 +29350,14 @@ var RockSpecEngine = class {
     const result = await this.mutate(input.changeId, "evidence.recorded", async (change, changeDir, context) => {
       const now = this.timestamp();
       const commit = input.commit ?? await git(context.root, ["rev-parse", "HEAD"]);
+      const scenarioIds = [...new Set(input.scenarioIds ?? [])].sort();
+      if (scenarioIds.length > 0) {
+        const known = (await this.loadSpecTraceability(changeDir)).scenarioRequirement;
+        const unknown2 = scenarioIds.filter((scenarioId) => !known.has(scenarioId));
+        if (unknown2.length > 0) {
+          throw new RockSpecError("EVIDENCE_SCENARIO_NOT_FOUND", "Evidence references unknown Scenarios", { scenario_ids: unknown2 });
+        }
+      }
       const record2 = {
         id: `E-${String(change.evidence.length + 1).padStart(3, "0")}`,
         kind: input.kind ?? "verification",
@@ -28592,9 +29368,9 @@ var RockSpecEngine = class {
         exit_code: input.exitCode,
         commit,
         source: input.source ?? "recorded",
-        scenario_ids: [],
-        finding_ids: [],
-        artifact_paths: [],
+        scenario_ids: scenarioIds,
+        finding_ids: [...new Set(input.findingIds ?? [])].sort(),
+        artifact_paths: [...new Set(input.artifactPaths ?? [])].sort(),
         ...input.taskId ? { task_id: input.taskId } : {},
         ...input.actionId ? { action_id: input.actionId } : {},
         ...input.reportPath ? { report_path: input.reportPath } : {},
@@ -28613,6 +29389,36 @@ var RockSpecEngine = class {
     const executable = input.executable.trim();
     if (!executable)
       throw new RockSpecError("INVALID_CHECK_COMMAND", "Check executable cannot be empty");
+    const command = formatCommand(executable, input.args ?? []);
+    const commit = await git(context.root, ["rev-parse", "HEAD"]);
+    const taskScenarioIds = input.taskId ? located.change.tasks[input.taskId]?.scenario_ids : void 0;
+    const scenarioIds = [...new Set(input.scenarioIds ?? taskScenarioIds ?? [])].sort();
+    const findingIds = [...new Set(input.findingIds ?? [])].sort();
+    const artifactPaths = [...new Set(input.artifactPaths ?? [])].sort();
+    if (input.reuseCachedEvidence !== false) {
+      const cached2 = await this.findReusableEvidence(located.changeDir, located.change, {
+        command,
+        commit,
+        ...input.taskId ? { taskId: input.taskId } : {},
+        ...input.actionId ? { actionId: input.actionId } : {},
+        scenarioIds,
+        findingIds,
+        artifactPaths
+      });
+      if (cached2) {
+        return {
+          ...await this.statusFor(context, located.changeDir, located.change),
+          check: {
+            evidence_id: cached2.id,
+            command,
+            exit_code: cached2.exit_code,
+            output_hash: cached2.output_hash,
+            report_path: cached2.report_path,
+            cached: true
+          }
+        };
+      }
+    }
     const startedAt = this.timestamp();
     let stdout2 = "";
     let stderr = "";
@@ -28631,7 +29437,6 @@ var RockSpecEngine = class {
       exitCode = typeof failure.code === "number" ? failure.code : 1;
     }
     const finishedAt = this.timestamp();
-    const command = formatCommand(executable, input.args ?? []);
     const output = [
       `command: ${command}`,
       `cwd: ${context.root}`,
@@ -28660,7 +29465,10 @@ var RockSpecEngine = class {
       outputHash,
       reportPath,
       ...input.taskId ? { taskId: input.taskId } : {},
-      ...input.actionId ? { actionId: input.actionId } : {}
+      ...input.actionId ? { actionId: input.actionId } : {},
+      scenarioIds,
+      findingIds,
+      artifactPaths
     });
     const evidence = status.change.evidence.at(-1);
     if (!evidence)
@@ -28672,7 +29480,8 @@ var RockSpecEngine = class {
         command,
         exit_code: exitCode,
         output_hash: outputHash,
-        report_path: reportPath
+        report_path: reportPath,
+        cached: false
       }
     };
   }
@@ -28758,6 +29567,16 @@ var RockSpecEngine = class {
       delete task.review_subject;
       delete task.review_package_mode;
       task.review_attempts = 0;
+      change.execution.registry.push({
+        id: executionId,
+        role: "task_implementer",
+        action: "task.execute",
+        started_at: task.started_at,
+        ...input.modelTier ? { model_tier: input.modelTier } : {},
+        ...input.hostModel ? { host_model: input.hostModel } : {},
+        context_package_path: briefPath,
+        context_package_hash: briefHash
+      });
       change.execution.active_task = input.taskId;
       change.execution.active_execution = executionId;
       change.state = "IMPLEMENTING";
@@ -28868,7 +29687,7 @@ var RockSpecEngine = class {
         }
         await this.assertMaterialized(changeDir, [task.report_path]);
         task.report_hash = sha256(await readFile3(path3.join(changeDir, task.report_path)));
-        prepared = await this.writeReviewPackage(context.root, changeDir, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), input.taskId, scopeBlocked ? "scope_blocked" : "product", task.allowed_paths);
+        prepared = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), input.taskId, scopeBlocked ? "scope_blocked" : "product", task.allowed_paths);
         task.review_subject = prepared.subject;
         task.review_package_mode = scopeBlocked ? "scope_blocked" : "product";
         prepared.mode = scopeBlocked ? "scope_blocked" : "product";
@@ -28881,7 +29700,7 @@ var RockSpecEngine = class {
         if (!change.base_commit)
           throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
         await this.assertNoUncommittedProductChanges(context.root);
-        prepared = await this.writeReviewPackage(context.root, changeDir, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
+        prepared = await this.writeReviewPackage(context.root, changeDir, change, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
       }
       return { kind: input.kind, path: prepared.path, subject: prepared.subject };
     });
@@ -28933,7 +29752,7 @@ var RockSpecEngine = class {
       }
       if (!task.base_commit)
         throw new RockSpecError("TASK_BASE_MISSING", `Task ${input.taskId} has no base commit`);
-      const currentPackage = await this.writeReviewPackage(context.root, changeDir, "task", task.base_commit, commitSha, input.taskId, "product", task.allowed_paths);
+      const currentPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, commitSha, input.taskId, "product", task.allowed_paths);
       if (!sameReviewSubject(review.subject, currentPackage.subject)) {
         throw new RockSpecError("STALE_REVIEW", `Task ${input.taskId} Review does not cover the final Diff`, {
           reviewed_subject: review.subject,
@@ -28999,7 +29818,7 @@ var RockSpecEngine = class {
         if (!change.base_commit || !change.reviews.delivery?.subject) {
           throw new RockSpecError("DELIVERY_REVIEW_SUBJECT_MISSING", "Delivery Review has no fixed subject");
         }
-        const currentPackage = await this.writeReviewPackage(context.root, changeDir, "delivery", change.base_commit, commit);
+        const currentPackage = await this.writeReviewPackage(context.root, changeDir, change, "delivery", change.base_commit, commit);
         if (!sameReviewSubject(change.reviews.delivery.subject, currentPackage.subject)) {
           throw new RockSpecError("STALE_REVIEW", "Delivery Review does not cover the current commit", {
             reviewed_subject: change.reviews.delivery.subject,
@@ -29039,6 +29858,7 @@ var RockSpecEngine = class {
           current_commit: currentCommit
         });
       }
+      await this.assertDeliveryHeadAncestor(context.root, deliveryHead, currentCommit);
       change.finished_at = this.timestamp();
       return { disposition: input.disposition ?? "keep", commit: deliveryHead, current_commit: currentCommit };
     });
@@ -29062,6 +29882,16 @@ var RockSpecEngine = class {
           change_id: current.id
         });
       }
+      const currentCommit = await git(context.root, ["rev-parse", "HEAD"]);
+      const deliveryHead = current.delivery_head ?? current.verification.commit;
+      if (!deliveryHead || current.verification.commit !== deliveryHead) {
+        throw new RockSpecError("STALE_EVIDENCE", "Archived delivery must remain bound to the verified Commit", {
+          verified_commit: current.verification.commit,
+          delivery_head: deliveryHead,
+          current_commit: currentCommit
+        });
+      }
+      await this.assertDeliveryHeadAncestor(context.root, deliveryHead, currentCommit);
       const date5 = this.clock();
       archivePath = path3.join(context.rocksRoot, "archive", String(date5.getUTCFullYear()), String(date5.getUTCMonth() + 1).padStart(2, "0"), current.id);
       if (await exists(archivePath)) {
@@ -29083,8 +29913,7 @@ var RockSpecEngine = class {
         current.state = "ARCHIVED";
         current.archived_at = this.timestamp();
         current.updated_at = current.archived_at;
-        await writeChange(staging, current);
-        await appendEvent(staging, {
+        await commitChangeMutation(staging, before, current, {
           schema_version: 1,
           sequence: await eventCount(staging) + 1,
           event: "change.archived",
@@ -29123,6 +29952,7 @@ var RockSpecEngine = class {
   async completeKnowledgeEvolution(changeDir, change, context) {
     const sourceDigest = await this.knowledgeSourceDigest(changeDir, change);
     const proposal = await this.loadKnowledgeProposal(context, changeDir, change);
+    this.assertRegisteredExecution(change, proposal.delta.author_execution_id, "knowledge_author", "knowledge.evolve.author");
     if (change.knowledge_evolution.status !== "pending") {
       if (change.knowledge_evolution.source_digest !== sourceDigest) {
         throw new RockSpecError("KNOWLEDGE_EVOLUTION_STALE", "Knowledge evolution no longer matches the frozen Change inputs", {
@@ -29177,6 +30007,7 @@ var RockSpecEngine = class {
       });
     }
     const review = parsedReview.data;
+    this.assertRegisteredExecution(change, review.reviewer_execution_id, "knowledge_reviewer", "knowledge.evolve.review");
     const expectedSubject = {
       source_digest: sourceDigest,
       delta_hash: proposal.deltaHash,
@@ -29400,6 +30231,39 @@ ${hashed.aggregate_hash}
     const repository = await resolveRepository(this.cwd);
     return { ...repository, config: await readConfig(repository.rocksRoot) };
   }
+  async runEnvironmentPreflight(context, changeId) {
+    const checks = [];
+    for (const probe of context.config.environment_preflight) {
+      const started = Date.now();
+      try {
+        await execFileAsync2(probe.command, probe.args, {
+          cwd: context.root,
+          timeout: 15e3,
+          maxBuffer: 256 * 1024
+        });
+        checks.push({
+          id: probe.id,
+          kind: probe.kind,
+          required: probe.required,
+          status: "passed",
+          duration_ms: Date.now() - started,
+          detail: `${probe.kind} probe passed`
+        });
+      } catch (error51) {
+        const message = error51 instanceof Error ? error51.message.split("\n", 1)[0] : String(error51);
+        checks.push({
+          id: probe.id,
+          kind: probe.kind,
+          required: probe.required,
+          status: probe.required ? "failed" : "skipped",
+          duration_ms: Date.now() - started,
+          detail: `${probe.kind} probe failed: ${message}`
+        });
+      }
+    }
+    const valid = checks.every((check2) => !check2.required || check2.status === "passed");
+    return { valid, checks };
+  }
   async locateChange(context, requestedId, includeArchive = false) {
     let id = requestedId;
     if (!id) {
@@ -29438,10 +30302,10 @@ ${hashed.aggregate_hash}
           change_id: change.id
         });
       }
+      const before = structuredClone(change);
       const previousState = change.state;
       const data = await operation(change, initiallyLocated.changeDir, context);
       change.updated_at = this.timestamp();
-      await writeChange(initiallyLocated.changeDir, change);
       const event = {
         schema_version: 1,
         sequence: await eventCount(initiallyLocated.changeDir) + 1,
@@ -29452,7 +30316,7 @@ ${hashed.aggregate_hash}
         current_state: change.state,
         data
       };
-      await appendEvent(initiallyLocated.changeDir, event);
+      await commitChangeMutation(initiallyLocated.changeDir, before, change, event);
     }, this.lockTimeoutMs, this.lockStaleMs);
     return { context, changeDir: initiallyLocated.changeDir, change };
   }
@@ -29690,7 +30554,7 @@ ${hashed.aggregate_hash}
       required2.push("spec");
     if (["plan.create", "readiness.review"].includes(action))
       required2.push("spec", "design");
-    if (["task.execute", "task.review", "acceptance.validate", "delivery.review"].includes(action)) {
+    if (["task.execute", "task.review", "acceptance.validate", "acceptance.uat", "delivery.review"].includes(action)) {
       required2.push("spec", "design", "implementation");
     }
     await this.assertApprovalClosure(changeDir, change, required2);
@@ -29733,13 +30597,16 @@ ${hashed.aggregate_hash}
   async assertApprovalPrerequisites(changeDir, change, gate) {
     if (gate === "spec") {
       await this.assertMaterialized(changeDir, ["proposal.md", "specs"], true);
+      await this.assertProposalReady(changeDir);
       this.assertReviewPassed(change, "requirements");
       await this.assertReviewFresh(changeDir, change, "requirements");
+      await this.assertReviewSourcesFresh(changeDir, change.reviews.requirements);
       return;
     }
     if (gate === "design") {
       await this.assertApprovalFresh(changeDir, change, "spec");
       await this.assertMaterialized(changeDir, change.prototype.required ? ["design.md", "prototype"] : ["design.md"]);
+      await this.assertDesignCoverage(changeDir);
       if (change.prototype.required && change.prototype.status !== "reconciled") {
         throw new RockSpecError("PROTOTYPE_NOT_RECONCILED", "Reconcile the completed UI prototype into Design before approval");
       }
@@ -29750,6 +30617,7 @@ ${hashed.aggregate_hash}
     await this.assertMaterialized(changeDir, ["plan.md", "tasks.md", "tasks"]);
     this.assertReviewPassed(change, "readiness");
     await this.assertReviewFresh(changeDir, change, "readiness");
+    await this.assertReviewSourcesFresh(changeDir, change.reviews.readiness);
     if (Object.keys(change.tasks).length === 0) {
       throw new RockSpecError("NO_TASKS", "At least one Task is required before implementation approval");
     }
@@ -29821,9 +30689,11 @@ ${hashed.aggregate_hash}
       if (content.trim().length === 0) {
         throw new RockSpecError("EMPTY_ARTIFACT", `${relative} is empty`, { path: relative });
       }
-      if (/\bTODO\b/i.test(content)) {
-        throw new RockSpecError("UNRESOLVED_PLACEHOLDER", `${relative} still contains TODO`, {
-          path: relative
+      const placeholder = content.match(/\b(?:TODO|TBD|FIXME)\b|\{\{[^}\n]+\}\}|<placeholder>/i)?.[0];
+      if (placeholder) {
+        throw new RockSpecError("UNRESOLVED_PLACEHOLDER", `${relative} still contains an unresolved placeholder`, {
+          path: relative,
+          placeholder
         });
       }
       if (validateSpecs && relative.startsWith(`specs${path3.sep}`)) {
@@ -29860,7 +30730,7 @@ ${hashed.aggregate_hash}
       });
     }
   }
-  async loadStageReview(changeDir, profile, relativePath, kind, assertedVerdict) {
+  async loadStageReview(changeDir, change, profile, relativePath, kind, assertedVerdict) {
     const sourcePaths = profile === "strict" ? strictReviewerPaths(relativePath) : [relativePath];
     const paths = profile === "strict" ? [...sourcePaths, relativePath] : sourcePaths;
     const sources = [];
@@ -29879,6 +30749,7 @@ ${hashed.aggregate_hash}
       if (!sourcePaths.includes(reviewPath))
         continue;
       const document = parseStageReviewDocument(content, reviewPath, kind);
+      this.assertRegisteredExecution(change, document.reviewer_execution_id, kind === "requirements" ? "requirements_reviewer" : "readiness_reviewer", kind === "requirements" ? "requirements.review" : "readiness.review");
       assertStageFindingRoutes(kind, document.findings, reviewPath);
       combinedVerdict = worseVerdict(combinedVerdict, document.verdict);
       sources.push({
@@ -29925,7 +30796,7 @@ ${hashed.aggregate_hash}
       findings: sources.flatMap((source) => source.findings)
     };
   }
-  async loadCodeReview(changeDir, profile, relativePath, subject, excludedReviewerExecutions, assertedVerdict) {
+  async loadCodeReview(changeDir, change, profile, relativePath, subject, excludedReviewerExecutions, expectedExpandedPaths, assertedVerdict) {
     const sourcePaths = profile === "strict" ? strictReviewerPaths(relativePath) : [relativePath];
     const allPaths = profile === "strict" ? [...sourcePaths, relativePath] : sourcePaths;
     const sources = [];
@@ -29945,6 +30816,16 @@ ${hashed.aggregate_hash}
       if (!sourcePaths.includes(reviewPath))
         continue;
       const document = parseReviewDocument(content, reviewPath);
+      const reviewKind = relativePath.includes("/tasks/") ? "task" : "delivery";
+      this.assertRegisteredExecution(change, document.reviewer_execution_id, reviewKind === "task" ? "task_reviewer" : "delivery_reviewer", reviewKind === "task" ? "task.review" : "delivery.review");
+      const assessedPaths = document.scope_assessment.map((item) => item.path);
+      if (new Set(assessedPaths).size !== assessedPaths.length || JSON.stringify([...assessedPaths].sort()) !== JSON.stringify([...expectedExpandedPaths].sort())) {
+        throw new RockSpecError("SCOPE_ASSESSMENT_MISMATCH", `${reviewPath} must assess every expanded path exactly once`, {
+          path: reviewPath,
+          expected_paths: [...expectedExpandedPaths].sort(),
+          assessed_paths: [...assessedPaths].sort()
+        });
+      }
       assertFindingRoutes(relativePath.includes("/tasks/") ? "task" : "delivery", document.findings, reviewPath);
       if (!sameReviewSubject(document.subject, subject)) {
         throw new RockSpecError("STALE_REVIEW", `${reviewPath} does not cover the current Diff`, {
@@ -30011,10 +30892,41 @@ ${hashed.aggregate_hash}
       findings: sources.flatMap((source) => source.findings)
     };
   }
-  async loadAcceptanceReview(changeDir, currentCommit, excludedReviewerExecutions, assertedVerdict) {
+  async loadAcceptanceReview(changeDir, change, currentCommit, excludedReviewerExecutions, assertedVerdict) {
     const relativePath = "testing/test-report.md";
     const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
     const document = parseAcceptanceDocument(content, relativePath);
+    this.assertRegisteredExecution(change, document.reviewer_execution_id, "acceptance_engineer", "acceptance.validate");
+    if (document.verdict === "PASS") {
+      const expectedScenarios = [...(await this.loadSpecTraceability(changeDir)).scenarioRequirement.keys()].sort();
+      const coveredScenarios = document.scenario_coverage.map((coverage) => coverage.scenario_id).sort();
+      if (JSON.stringify(coveredScenarios) !== JSON.stringify(expectedScenarios)) {
+        throw new RockSpecError("ACCEPTANCE_SCENARIO_COVERAGE_GAP", "Acceptance must cover every approved Scenario", {
+          expected_scenario_ids: expectedScenarios,
+          covered_scenario_ids: coveredScenarios
+        });
+      }
+      for (const coverage of document.scenario_coverage) {
+        for (const evidenceId of coverage.evidence_ids) {
+          await this.assertAcceptanceEvidence(changeDir, change, currentCommit, evidenceId, coverage.scenario_id);
+        }
+      }
+      if (change.prototype.required) {
+        const dimensions = document.ui_evidence.map((item) => item.dimension).sort();
+        const expectedDimensions = ["accessibility", "interaction", "responsive"];
+        if (JSON.stringify(dimensions) !== JSON.stringify(expectedDimensions)) {
+          throw new RockSpecError("UI_EVIDENCE_COVERAGE_GAP", "UI Acceptance must bind responsive, accessibility, and interaction evidence", {
+            expected_dimensions: expectedDimensions,
+            covered_dimensions: dimensions
+          });
+        }
+        for (const item of document.ui_evidence) {
+          for (const evidenceId of item.evidence_ids) {
+            await this.assertAcceptanceEvidence(changeDir, change, currentCommit, evidenceId, void 0, "ui.prototype", true);
+          }
+        }
+      }
+    }
     assertFindingRoutes("acceptance", document.findings, relativePath);
     if (document.commit !== currentCommit) {
       throw new RockSpecError("STALE_ACCEPTANCE", "Acceptance report does not cover the current Commit", {
@@ -30076,6 +30988,51 @@ ${hashed.aggregate_hash}
       }
     }
   }
+  async assertAcceptanceEvidence(changeDir, change, commit, evidenceId, scenarioId, kind, requireArtifact = false) {
+    const evidence = change.evidence.find((record2) => record2.id === evidenceId);
+    if (!evidence || evidence.source !== "executed" || evidence.exit_code !== 0 || evidence.commit !== commit || evidence.action_id !== "acceptance.validate" || scenarioId && !evidence.scenario_ids.includes(scenarioId) || kind && evidence.kind !== kind || requireArtifact && evidence.artifact_paths.length === 0) {
+      throw new RockSpecError("INVALID_ACCEPTANCE_EVIDENCE", "Acceptance coverage references evidence without the required execution binding", {
+        evidence_id: evidenceId,
+        scenario_id: scenarioId ?? null,
+        kind: kind ?? null,
+        commit
+      });
+    }
+    if (!evidence.report_path || !evidence.output_hash) {
+      throw new RockSpecError("INVALID_EXECUTED_EVIDENCE", "Acceptance evidence is missing its log binding", { evidence_id: evidenceId });
+    }
+    const report = path3.join(changeDir, evidence.report_path);
+    if (!await exists(report) || sha256(await readFile3(report)) !== evidence.output_hash) {
+      throw new RockSpecError("STALE_EVIDENCE_LOG", "Acceptance evidence log is missing or changed", { evidence_id: evidenceId });
+    }
+    for (const artifactPath of evidence.artifact_paths) {
+      if (!await exists(path3.join(changeDir, artifactPath))) {
+        throw new RockSpecError("MISSING_EVIDENCE_ARTIFACT", "Acceptance evidence artifact is missing", {
+          evidence_id: evidenceId,
+          artifact_path: artifactPath
+        });
+      }
+    }
+  }
+  assertRegisteredExecution(change, executionId, role, action) {
+    const execution = change.execution.registry.find((record2) => record2.id === executionId);
+    if (!execution || execution.role !== role || execution.action !== action) {
+      throw new RockSpecError("EXECUTION_NOT_REGISTERED", "Report identity is not a registered execution for this role and Action", {
+        execution_id: executionId,
+        expected_role: role,
+        expected_action: action
+      });
+    }
+  }
+  completeActionExecutions(change, action) {
+    const completedAt = this.timestamp();
+    for (const execution of change.execution.registry) {
+      if (execution.action !== action || execution.completed_at)
+        continue;
+      execution.completed_at = completedAt;
+      execution.outcome = "success";
+    }
+  }
   async syncTasks(changeDir, change) {
     const taskFiles = (await walkFiles(path3.join(changeDir, "tasks"))).filter((file2) => /^T-[0-9]{3}\.md$/.test(path3.basename(file2))).sort();
     if (taskFiles.length === 0) {
@@ -30087,6 +31044,7 @@ ${hashed.aggregate_hash}
     const historyProtected = recovery || feedbackRevision;
     const previousTasks = change.tasks;
     const next = {};
+    const immutableChanges = [];
     for (const file2 of taskFiles) {
       const id = path3.basename(file2, ".md");
       const definition = parseTaskDefinition(await readFile3(file2, "utf8"), path3.relative(changeDir, file2));
@@ -30109,7 +31067,11 @@ ${hashed.aggregate_hash}
         });
       }
       if (historyProtected && (previous?.status === "completed" || previous?.status === "suspended") && !sameTaskDefinition(previous, definition)) {
-        throw new RockSpecError(previous.status === "completed" ? "COMPLETED_TASK_IMMUTABLE" : "SUSPENDED_TASK_IMMUTABLE", `${previous.status === "completed" ? "Completed" : "Suspended"} Task ${id} cannot be redefined during recovery; add a new Task`, { task_id: id, revision_id: (recovery ?? feedbackRevision)?.id });
+        immutableChanges.push({
+          task_id: id,
+          status: previous.status,
+          path: path3.relative(changeDir, file2)
+        });
       }
       next[id] = {
         ...previous ?? {
@@ -30125,12 +31087,27 @@ ${hashed.aggregate_hash}
         supersedes: definition.supersedes,
         requirement_ids: definition.requirement_ids,
         scenario_ids: definition.scenario_ids,
+        decision_ids: definition.decision_ids,
         finding_ids: definition.finding_ids,
         acceptance_criteria: definition.acceptance_criteria,
         consumes: definition.consumes,
         produces: definition.produces,
         allowed_paths: definition.allowed_paths
       };
+    }
+    if (immutableChanges.length > 0) {
+      const completed = immutableChanges.filter((item) => item.status === "completed").map((item) => item.task_id);
+      const suspended = immutableChanges.filter((item) => item.status === "suspended").map((item) => item.task_id);
+      throw new RockSpecError("RECOVERY_PLAN_APPEND_ONLY", "Recovery Plan is append-only: preserve completed and suspended Tasks and add a new Remediation or Replacement Task", {
+        revision_id: (recovery ?? feedbackRevision)?.id,
+        immutable_tasks: immutableChanges,
+        completed_task_ids: completed,
+        suspended_task_ids: suspended,
+        recommended_next: {
+          action: "plan.create",
+          instruction: "Restore immutable Task definitions, then append a new T-xxx Task bound to the triggering Finding"
+        }
+      });
     }
     if (historyProtected) {
       for (const task of Object.values(previousTasks)) {
@@ -30305,6 +31282,17 @@ ${hashed.aggregate_hash}
       throw new RockSpecError("DESIGN_COVERAGE_GAP", "Design Decisions must cover every approved Requirement and Scenario", {
         requirement_ids: missingRequirements,
         scenario_ids: missingScenarios
+      });
+    }
+  }
+  async assertProposalReady(changeDir) {
+    const relativePath = "proposal.md";
+    const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
+    const result = ProposalDefinitionSchema.safeParse(parseFrontmatter(content, relativePath));
+    if (!result.success) {
+      throw new RockSpecError("INVALID_PROPOSAL", "Proposal must declare non-goals, assumptions, and resolved open questions", {
+        path: relativePath,
+        issues: result.error.issues
       });
     }
   }
@@ -30526,8 +31514,11 @@ ${hashed.aggregate_hash}
       }
     }
     const { requirementScenarios, scenarioRequirement } = await this.loadSpecTraceability(changeDir);
+    const design = parseDesignDefinition(await readFile3(path3.join(changeDir, "design.md"), "utf8"), "design.md");
+    const knownDecisions = new Set(design.decisions.map((decision) => decision.id));
     const coveredRequirements = /* @__PURE__ */ new Set();
     const coveredScenarios = /* @__PURE__ */ new Set();
+    const coveredDecisions = /* @__PURE__ */ new Set();
     for (const task of Object.values(tasks)) {
       const historical = isHistoricalTask(task);
       for (const requirementId of task.requirement_ids) {
@@ -30558,6 +31549,17 @@ ${hashed.aggregate_hash}
         }
         coveredScenarios.add(scenarioId);
       }
+      for (const decisionId of task.decision_ids) {
+        if (!knownDecisions.has(decisionId)) {
+          if (historical)
+            continue;
+          throw new RockSpecError("TASK_DECISION_NOT_FOUND", `Task ${task.id} references an unknown Design Decision`, {
+            task_id: task.id,
+            decision_id: decisionId
+          });
+        }
+        coveredDecisions.add(decisionId);
+      }
     }
     const verificationOnly = new Set(verificationOnlyScenarioIds);
     for (const scenarioId of verificationOnly) {
@@ -30579,28 +31581,127 @@ ${hashed.aggregate_hash}
         requirement_ids: requirementGaps
       });
     }
+    const decisionGaps = [...knownDecisions].filter((decisionId) => !coveredDecisions.has(decisionId)).sort();
+    if (decisionGaps.length > 0) {
+      throw new RockSpecError("DECISION_COVERAGE_GAP", "Every approved Design Decision must map to a Task", {
+        decision_ids: decisionGaps
+      });
+    }
   }
   async composeTaskBrief(changeDir, change, taskId) {
+    const task = change.tasks[taskId];
+    if (!task)
+      throw new RockSpecError("TASK_NOT_FOUND", `Task ${taskId} does not exist`);
+    const taskPath = `tasks/${taskId}.md`;
     const references = ["proposal.md"];
     const specFiles = (await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort();
-    references.push(...specFiles, "design.md", "plan.md", `tasks/${taskId}.md`);
+    references.push(...specFiles, "design.md", "plan.md", taskPath);
     if (change.prototype.required) {
       await this.assertApprovalFresh(changeDir, change, "design");
-      references.push("prototype/design-system.md", "prototype/prototype.md");
+      references.push("prototype/brief.md", "prototype/design-system.md", "prototype/prototype.md");
     }
-    const sections = [];
-    for (const reference of references) {
-      const target = path3.join(changeDir, reference);
-      if (await exists(target))
-        sections.push(`<!-- source: ${reference} -->
+    const [taskContent, specProjection, designContent, planContent] = await Promise.all([
+      readFile3(path3.join(changeDir, taskPath), "utf8"),
+      this.composeSpecProjection(changeDir, specFiles, task.requirement_ids, task.scenario_ids),
+      readFile3(path3.join(changeDir, "design.md"), "utf8"),
+      readFile3(path3.join(changeDir, "plan.md"), "utf8")
+    ]);
+    const design = parseDesignDefinition(designContent, "design.md");
+    const decisionSections = task.decision_ids.map((decisionId) => extractMarkdownSectionById(designContent, decisionId, "Design Decision", "design.md"));
+    const globalConstraints = [
+      ["design.md", extractOptionalMarkdownSection(designContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"])],
+      ["plan.md", extractOptionalMarkdownSection(planContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"])]
+    ].filter((item) => Boolean(item[1]));
+    const dependencyFacts = collectTaskAncestors(task, change.tasks).map((dependency) => renderDependencyFact(dependency)).join("\n\n");
+    const prototypeSections = [];
+    if (change.prototype.required && await exists(path3.join(changeDir, "prototype", "brief.md"))) {
+      const prototypeBriefContent = await readFile3(path3.join(changeDir, "prototype", "brief.md"), "utf8");
+      const prototypeBrief = parsePrototypeBriefDefinition(prototypeBriefContent, "prototype/brief.md");
+      const relevant = intersects(prototypeBrief.requirement_ids, task.requirement_ids) || intersects(prototypeBrief.scenario_ids, task.scenario_ids) || intersects(prototypeBrief.decision_ids, task.decision_ids);
+      if (relevant) {
+        for (const reference of ["prototype/brief.md", "prototype/design-system.md", "prototype/prototype.md"]) {
+          const target = path3.join(changeDir, reference);
+          if (await exists(target)) {
+            prototypeSections.push(`<!-- source: ${reference} -->
 ${await readFile3(target, "utf8")}`);
+          }
+        }
+      }
     }
-    return {
-      content: `# ${taskId} Execution Brief
+    const manifest = await renderAuthorityManifest(changeDir, references, {
+      [taskPath]: [taskId],
+      ...specProjection.projections,
+      "design.md": task.decision_ids
+    });
+    const sections = [
+      `# ${taskId} Execution Brief`,
+      "This is a frozen projection of the approved authority. Implement the Task contract; do not reinterpret or broaden it.",
+      "If required behavior, an interface contract, a dependency, or an authority source conflicts with this projection, stop and report `CONTRACT_CONFLICT` or `AUTHORITY_CONFLICT`. If a missing repository fact can be discovered without changing the contract, inspect only the necessary code and record the scope expansion.",
+      `## Task Contract
 
-${sections.join("\n\n")}`,
+<!-- source: ${taskPath} -->
+${taskContent}`,
+      `## Relevant Approved Requirements
+
+${specProjection.content}`,
+      `## Relevant Approved Design Decisions
+
+${decisionSections.join("\n\n")}`,
+      ...globalConstraints.length > 0 ? [
+        `## Applicable Global Constraints
+
+${globalConstraints.map(([source, body]) => `<!-- source: ${source} -->
+${body}`).join("\n\n")}`
+      ] : [],
+      `## Dependency Delivery Facts
+
+${dependencyFacts || "None."}`,
+      ...prototypeSections.length > 0 ? [`## Relevant Approved UI/UX Context
+
+${prototypeSections.join("\n\n")}`] : [],
+      `## Authority Manifest
+
+${manifest}`
+    ];
+    return {
+      content: `${sections.join("\n\n")}
+`,
       references
     };
+  }
+  async composeSpecProjection(changeDir, specFiles, requirementIds, scenarioIds) {
+    const remainingRequirements = new Set(requirementIds);
+    const remainingScenarios = new Set(scenarioIds);
+    const sections = [];
+    const projections = {};
+    for (const relativePath of specFiles) {
+      const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
+      const result = validateSpec(content);
+      if (!result.valid || !result.data) {
+        throw new RockSpecError("INVALID_SPEC", `${relativePath} is not a valid RockSpec document`, {
+          path: relativePath,
+          issues: result.issues
+        });
+      }
+      for (const requirement of result.data.requirements) {
+        if (!remainingRequirements.has(requirement.id))
+          continue;
+        const selectedScenarios = requirement.scenarios.map((scenario) => scenario.id).filter((scenarioId) => remainingScenarios.has(scenarioId));
+        sections.push(`<!-- source: ${relativePath}; projection: ${[requirement.id, ...selectedScenarios].join(", ")} -->
+` + projectRequirementMarkdown(content, requirement.id, new Set(selectedScenarios), relativePath));
+        projections[relativePath] = [...projections[relativePath] ?? [], requirement.id, ...selectedScenarios];
+        remainingRequirements.delete(requirement.id);
+        for (const scenarioId of selectedScenarios)
+          remainingScenarios.delete(scenarioId);
+      }
+    }
+    if (remainingRequirements.size > 0 || remainingScenarios.size > 0) {
+      throw new RockSpecError("TASK_AUTHORITY_PROJECTION_GAP", "Task authority IDs could not be projected from the approved Specs", {
+        requirement_ids: [...remainingRequirements].sort(),
+        scenario_ids: [...remainingScenarios].sort()
+      });
+    }
+    return { content: sections.join("\n\n"), projections };
   }
   async assertTaskScopeBlockedState(root, task) {
     if (!task.base_commit)
@@ -30621,6 +31722,24 @@ ${sections.join("\n\n")}`,
       throw new RockSpecError("SCOPE_BLOCKED_PRODUCT_DIFF", `Task ${task.id} scope-blocked review requires no product changes`, {
         task_id: task.id,
         changed_paths: productPaths
+      });
+    }
+  }
+  async assertDeliveryHeadAncestor(root, deliveryHead, currentCommit) {
+    let mergeBase;
+    try {
+      mergeBase = await git(root, ["merge-base", deliveryHead, currentCommit]);
+    } catch {
+      throw new RockSpecError("DELIVERY_HISTORY_DIVERGED", "Current HEAD no longer contains the frozen delivery Commit", {
+        delivery_head: deliveryHead,
+        current_commit: currentCommit
+      });
+    }
+    if (mergeBase !== deliveryHead) {
+      throw new RockSpecError("DELIVERY_HISTORY_DIVERGED", "Current HEAD no longer contains the frozen delivery Commit", {
+        delivery_head: deliveryHead,
+        current_commit: currentCommit,
+        merge_base: mergeBase
       });
     }
   }
@@ -30661,7 +31780,7 @@ ${sections.join("\n\n")}`,
       throw new RockSpecError("EMPTY_TASK_DIFF", `Task ${task.id} has no product changes`);
     }
   }
-  async writeReviewPackage(root, changeDir, kind, baseCommit, headCommit, taskId, mode = "product", plannedPaths = []) {
+  async writeReviewPackage(root, changeDir, change, kind, baseCommit, headCommit, taskId, mode = "product", plannedPaths = []) {
     const diff = await git(root, ["diff", "--full-index", "--binary", "-U10", baseCommit, headCommit]);
     const subject = { base_commit: baseCommit, head_commit: headCommit, diff_hash: sha256(diff) };
     const [commits, stat2, changedPathOutput] = await Promise.all([
@@ -30677,10 +31796,14 @@ ${sections.join("\n\n")}`,
     } : void 0;
     const label = kind === "task" ? `task-${taskId}` : "delivery";
     const relativePath = `runtime/reviews/${label}-${baseCommit.slice(0, 7)}..${headCommit.slice(0, 7)}.diff`;
+    const reviewerContext = kind === "task" && taskId ? await this.composeTaskReviewerContext(changeDir, change, taskId) : await this.composeDeliveryReviewerContext(changeDir, change);
     const content = [
       `# Review package: ${baseCommit}..${headCommit}`,
       `# Diff hash: ${subject.diff_hash}`,
       `# Mode: ${mode}`,
+      "",
+      "## Reviewer Context",
+      reviewerContext,
       "",
       "## Commits",
       commits,
@@ -30706,8 +31829,66 @@ ${sections.join("\n\n")}`,
       ...kind === "task" ? { mode } : {},
       ...scope ? { scope } : {},
       path: relativePath,
+      hash: sha256(content),
       subject
     };
+  }
+  async composeTaskReviewerContext(changeDir, change, taskId) {
+    const task = change.tasks[taskId];
+    if (!task)
+      throw new RockSpecError("TASK_NOT_FOUND", `Task ${taskId} does not exist`);
+    await this.assertTaskBriefFresh(changeDir, task);
+    const briefContent = await readFile3(path3.join(changeDir, task.brief_path), "utf8");
+    const designContent = await readFile3(path3.join(changeDir, "design.md"), "utf8");
+    const design = parseDesignDefinition(designContent, "design.md");
+    const relatedDecisions = design.decisions.filter((decision) => !task.decision_ids.includes(decision.id) && (intersects(decision.requirement_ids, task.requirement_ids) || intersects(decision.scenario_ids, task.scenario_ids)));
+    const crossCheck = relatedDecisions.length > 0 ? relatedDecisions.map((decision) => `Mapped ${decision.id} (${[...decision.requirement_ids, ...decision.scenario_ids].join(", ")})
+
+` + extractMarkdownSectionById(designContent, decision.id, "Design Decision", "design.md")).join("\n\n") : "No additional Design Decisions share this Task's Requirement or Scenario IDs.";
+    const evidence = change.evidence.filter((item) => item.task_id === taskId).map((item) => `- ${item.id}: ${item.source} ${item.kind}, commit ${item.commit}, exit ${item.exit_code}, output ${item.output_hash ?? "unhashed"}`).join("\n");
+    const report = task.report_path && await exists(path3.join(changeDir, task.report_path)) ? `<!-- source: ${task.report_path}; hash: ${sha256(await readFile3(path3.join(changeDir, task.report_path)))} -->
+${await readFile3(path3.join(changeDir, task.report_path), "utf8")}` : "Missing Implementer Report.";
+    return [
+      `### Frozen Implementer Projection
+
+- Path: ${task.brief_path}
+- Hash: ${task.brief_hash}
+
+${briefContent}`,
+      `### Reviewer-only Projection Audit
+
+Task mapping: ${[...task.requirement_ids, ...task.scenario_ids, ...task.decision_ids].join(", ")}
+
+${crossCheck}`,
+      `### Implementer Report
+
+${report}`,
+      `### Executed Evidence Index
+
+${evidence || "No Task evidence is recorded."}`
+    ].join("\n\n");
+  }
+  async composeDeliveryReviewerContext(changeDir, change) {
+    const authorityPaths = [
+      "proposal.md",
+      ...(await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort(),
+      "design.md",
+      "plan.md"
+    ];
+    const manifest = await renderAuthorityManifest(changeDir, authorityPaths, {});
+    const taskCoverage = Object.values(change.tasks).sort((left, right) => left.id.localeCompare(right.id)).map((task) => `- ${task.id}: ${task.status}; commit ${task.commit_sha ?? "pending"}; R/S/D ${[...task.requirement_ids, ...task.scenario_ids, ...task.decision_ids].join(", ")}`).join("\n");
+    const evidence = change.evidence.map((item) => `- ${item.id}: ${item.action_id ?? item.task_id ?? "change"}; ${item.source} ${item.kind}; commit ${item.commit}; scenarios ${item.scenario_ids.join(", ") || "none"}`).join("\n");
+    return [
+      `### Authority Manifest
+
+${manifest}`,
+      `### Change-level Task Coverage
+
+${taskCoverage || "No Tasks."}`,
+      `### Evidence Index
+
+${evidence || "No evidence recorded."}`
+    ].join("\n\n");
   }
   async assertFreshEvidence(root, change, expected, executedOnly = false) {
     const commit = expected.commit ?? await git(root, ["rev-parse", "HEAD"]);
@@ -30742,9 +31923,24 @@ ${sections.join("\n\n")}`,
       }
     }
   }
+  async findReusableEvidence(changeDir, change, expected) {
+    for (const evidence of [...change.evidence].reverse()) {
+      if (evidence.source !== "executed" || evidence.exit_code !== 0 || evidence.commit !== expected.commit || evidence.command !== expected.command || evidence.task_id !== expected.taskId || evidence.action_id !== expected.actionId || !evidence.report_path || !evidence.output_hash)
+        continue;
+      if (JSON.stringify(evidence.scenario_ids) !== JSON.stringify(expected.scenarioIds) || JSON.stringify(evidence.finding_ids) !== JSON.stringify(expected.findingIds) || JSON.stringify(evidence.artifact_paths) !== JSON.stringify(expected.artifactPaths))
+        continue;
+      const report = path3.join(changeDir, evidence.report_path);
+      if (!await exists(report))
+        continue;
+      if (sha256(await readFile3(report)) !== evidence.output_hash)
+        continue;
+      return evidence;
+    }
+    return void 0;
+  }
   async assertPrototypeEvidence(root, change) {
     const commit = await git(root, ["rev-parse", "HEAD"]);
-    const evidence = [...change.evidence].reverse().find((record2) => record2.exit_code === 0 && record2.commit === commit && record2.kind === "ui.prototype");
+    const evidence = [...change.evidence].reverse().find((record2) => record2.exit_code === 0 && record2.commit === commit && record2.kind === "ui.prototype" && record2.source === "executed" && record2.action_id === "acceptance.validate" && Boolean(record2.report_path && record2.output_hash) && record2.artifact_paths.length > 0);
     if (!evidence) {
       throw new RockSpecError("MISSING_UI_EVIDENCE", "UI prototype changes require responsive, accessibility, and interaction evidence", { commit, capability: change.prototype.capability });
     }
@@ -30768,6 +31964,45 @@ ${sections.join("\n\n")}`,
     const paths = output.split("\n").filter(Boolean).map((line) => line.slice(3).trim()).filter((file2) => !isWorkflowAsset(file2));
     if (paths.length > 0) {
       throw new RockSpecError("UNCOMMITTED_PRODUCT_CHANGES", "Acceptance and Delivery Review require product and test assets to be committed", { paths });
+    }
+  }
+  async findUnassignedProductCommits(root, change) {
+    if (!change.base_commit)
+      throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
+    const head = await git(root, ["rev-parse", "HEAD"]);
+    const commits = (await git(root, ["rev-list", "--reverse", `${change.base_commit}..${head}`])).split("\n").filter(Boolean);
+    const assigned = new Set(Object.values(change.tasks).map((task) => task.commit_sha).filter((sha) => Boolean(sha)));
+    const workflowPrefixes = [".rockspec/", ".agents/", ".claude/", ".codex/"];
+    const unassigned = [];
+    for (const commit of commits) {
+      if (assigned.has(commit))
+        continue;
+      const statusLines = (await git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", commit])).split("\n").filter(Boolean);
+      const productStatusLines = statusLines.filter((line) => {
+        const file2 = line.split("	").at(-1) ?? "";
+        return file2 && !workflowPrefixes.some((prefix) => file2 === prefix.slice(0, -1) || file2.startsWith(prefix));
+      });
+      const paths = productStatusLines.map((line) => line.split("	").at(-1) ?? "");
+      const subject = await git(root, ["show", "-s", "--format=%s", commit]);
+      const newAcceptanceTestsOnly = subject.trimStart().startsWith("test(") && productStatusLines.length > 0 && productStatusLines.every((line) => line.trimStart().startsWith("A")) && paths.every((file2) => /(?:test|spec|e2e|fixture)/i.test(file2));
+      if (paths.length > 0 && !newAcceptanceTestsOnly)
+        unassigned.push({ commit, paths });
+    }
+    return unassigned;
+  }
+  async assertProductCommitsAssigned(root, change) {
+    const unassigned = await this.findUnassignedProductCommits(root, change);
+    if (unassigned.length > 0) {
+      const head = await git(root, ["rev-parse", "HEAD"]);
+      throw new RockSpecError("UNASSIGNED_PRODUCT_COMMIT", "Every product or test Commit between the Change base and delivery head must belong to a completed Task or Remediation Task", {
+        base_commit: change.base_commit,
+        head_commit: head,
+        commits: unassigned,
+        recommended_next: {
+          action: "plan.create",
+          instruction: "Attach the repair to a new Finding-bound Remediation Task before Delivery Review"
+        }
+      });
     }
   }
   providerAvailable(provider, distribution) {
@@ -30803,7 +32038,7 @@ ${sections.join("\n\n")}`,
       mkdir2(path3.join(changeDir, "testing"), { recursive: true })
     ]);
     const templates = {
-      "proposal.md": "# Proposal\n\n## Why\n\nTODO\n\n## What\n\nTODO\n",
+      "proposal.md": "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# Proposal\n\n## Why\n\nTODO\n\n## What\n\nTODO\n",
       "specs/change/spec.md": specTemplate(change),
       "design.md": "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nTODO\n\n## Decisions\n\n### D-001\n\nTODO\n",
       "plan.md": "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Implementation Plan\n\n## Approach\n\nTODO\n\n## Task DAG\n\n- T-001\n",
@@ -30814,7 +32049,7 @@ ${sections.join("\n\n")}`,
       "reviews/tasks/T-001-review.md": codeReviewTemplate("T-001 Task Review"),
       "reviews/delivery-review.md": codeReviewTemplate("Delivery Review"),
       "testing/test-plan.md": "# Acceptance Test Plan\n\nTODO\n",
-      "testing/test-report.md": reviewTemplate("Acceptance Test Report")
+      "testing/test-report.md": acceptanceReviewTemplate()
     };
     for (const [relativePath, content] of Object.entries(templates)) {
       await this.writeTemplate(changeDir, relativePath, content);
@@ -30839,6 +32074,9 @@ ${sections.join("\n\n")}`,
         this.writeTemplate(changeDir, "prototype/design-system.md", "# Design System\n\nTODO\n"),
         this.writeTemplate(changeDir, "prototype/prototype.md", "# Prototype\n\nTODO\n")
       ]);
+    }
+    if (change.uat.policy === "required") {
+      await this.writeTemplate(changeDir, "testing/uat-report.md", uatReportTemplate());
     }
   }
   async writeTemplate(changeDir, relativePath, content) {
@@ -30930,6 +32168,112 @@ function strictReviewerPaths(relativePath) {
   const suffix = relativePath.endsWith(".md") ? relativePath.slice(0, -3) : relativePath;
   return [`${suffix}-reviewer-1.md`, `${suffix}-reviewer-2.md`];
 }
+function intersects(left, right) {
+  const values = new Set(right);
+  return left.some((value) => values.has(value));
+}
+function collectTaskAncestors(task, tasks) {
+  const ancestors = /* @__PURE__ */ new Map();
+  const visit = (taskId) => {
+    const dependency = tasks[taskId];
+    if (!dependency || ancestors.has(taskId))
+      return;
+    ancestors.set(taskId, dependency);
+    for (const parent of dependency.dependencies)
+      visit(parent);
+  };
+  for (const dependency of task.dependencies)
+    visit(dependency);
+  return [...ancestors.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+function renderDependencyFact(task) {
+  const contracts = task.produces.length > 0 ? task.produces.map((contract) => `  - ${contract}`).join("\n") : "  - None declared.";
+  return [
+    `### ${task.id}`,
+    `- Status: ${task.status}`,
+    `- Delivered Commit: ${task.commit_sha ?? "not recorded"}`,
+    `- Planned paths: ${task.allowed_paths.join(", ") || "none"}`,
+    "- Produced contracts:",
+    contracts
+  ].join("\n");
+}
+function markdownHeading(line) {
+  const match = /^(#{1,6})\s+(\S.*)\s*$/.exec(line);
+  return match ? { level: match[1].length, title: match[2] } : void 0;
+}
+function extractMarkdownSectionById(content, id, kind, relativePath) {
+  const lines = content.split(/\r?\n/);
+  const idPattern = new RegExp(`^${escapeRegExp(id)}(?:\\b|\\s|:)`);
+  const start = lines.findIndex((line) => {
+    const heading = markdownHeading(line);
+    return heading !== void 0 && idPattern.test(heading.title);
+  });
+  if (start < 0) {
+    throw new RockSpecError("AUTHORITY_SECTION_MISSING", `${kind} ${id} has no Markdown section`, {
+      path: relativePath,
+      id,
+      kind
+    });
+  }
+  const level = markdownHeading(lines[start]).level;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const heading = markdownHeading(lines[index]);
+    if (heading && heading.level <= level) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n").trimEnd();
+}
+function extractOptionalMarkdownSection(content, titles) {
+  const lines = content.split(/\r?\n/);
+  const start = lines.findIndex((line) => {
+    const heading = markdownHeading(line);
+    return heading !== void 0 && titles.includes(heading.title.trim());
+  });
+  if (start < 0)
+    return void 0;
+  const level = markdownHeading(lines[start]).level;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const heading = markdownHeading(lines[index]);
+    if (heading && heading.level <= level) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join("\n").trim();
+}
+function projectRequirementMarkdown(content, requirementId, scenarioIds, relativePath) {
+  const requirementSection = extractMarkdownSectionById(content, requirementId, "Requirement", relativePath);
+  const lines = requirementSection.split(/\r?\n/);
+  const projected = [];
+  let include = true;
+  for (const line of lines) {
+    const heading = markdownHeading(line);
+    const scenarioMatch = heading?.level === 4 ? /^(S-\d{3,})\s+Scenario:/.exec(heading.title) : void 0;
+    if (scenarioMatch)
+      include = scenarioIds.has(scenarioMatch[1]);
+    if (include)
+      projected.push(line);
+  }
+  return projected.join("\n").trimEnd();
+}
+async function renderAuthorityManifest(changeDir, references, projections) {
+  const rows = ["| Source | SHA-256 | Projection |", "|---|---|---|"];
+  for (const relativePath of references) {
+    const target = path3.join(changeDir, relativePath);
+    if (!await exists(target))
+      continue;
+    const ids = projections[relativePath];
+    rows.push(`| ${relativePath} | ${sha256(await readFile3(target))} | ${ids?.join(", ") || "index only"} |`);
+  }
+  return rows.join("\n");
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 function parseFrontmatter(content, relativePath) {
   const lines = content.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") {
@@ -30969,6 +32313,7 @@ function sameTaskDefinition(task, definition) {
     supersedes: task.supersedes,
     requirement_ids: task.requirement_ids,
     scenario_ids: task.scenario_ids,
+    decision_ids: task.decision_ids,
     finding_ids: task.finding_ids,
     acceptance_criteria: task.acceptance_criteria,
     consumes: task.consumes,
@@ -30980,6 +32325,7 @@ function sameTaskDefinition(task, definition) {
     supersedes: definition.supersedes,
     requirement_ids: definition.requirement_ids,
     scenario_ids: definition.scenario_ids,
+    decision_ids: definition.decision_ids,
     finding_ids: definition.finding_ids,
     acceptance_criteria: definition.acceptance_criteria,
     consumes: definition.consumes,
@@ -31029,16 +32375,7 @@ function parseReviewDocument(content, relativePath) {
 }
 function parseStageReviewDocument(content, relativePath, kind) {
   if (!content.trimStart().startsWith("---")) {
-    const verdict = parseVerdict(content);
-    if (verdict !== "PASS") {
-      throw new RockSpecError("UNSTRUCTURED_STAGE_REVIEW", `${relativePath} must use structured Frontmatter when the verdict is not PASS`, { path: relativePath, verdict, kind });
-    }
-    return {
-      schema_version: 1,
-      verdict,
-      reviewer_execution_id: `legacy:${relativePath}`,
-      findings: []
-    };
+    throw new RockSpecError("UNSTRUCTURED_STAGE_REVIEW", `${relativePath} must use structured Frontmatter`, { path: relativePath, kind });
   }
   const result = StageReviewDocumentSchema.safeParse(parseFrontmatter(content, relativePath));
   if (!result.success) {
@@ -31108,6 +32445,14 @@ function formatCommand(executable, args) {
 }
 function changedArtifactPaths(previous, current) {
   return [.../* @__PURE__ */ new Set([...Object.keys(previous), ...Object.keys(current)])].filter((key) => previous[key] !== current[key]).sort();
+}
+function recoveryRevisionReason(change, reviewId, findingIds) {
+  const findings = change.reviews[reviewId]?.findings ?? [];
+  const descriptions = findingIds.map((findingId) => {
+    const description = findings.find((finding) => finding.id === findingId)?.description;
+    return description ? `${findingId}: ${description}` : findingId;
+  });
+  return `${reviewId} recovery: ${descriptions.join("; ")}`;
 }
 var REVISION_ACTIONS = {
   requirements: ["requirements.clarify", "requirements.review", "design.technical", "design.prototype", "plan.create", "readiness.review"],
@@ -31186,7 +32531,7 @@ function revisionReviews(target, reviews, mode = "pre_implementation") {
 function revisionActions(target, completedActions, mode = "pre_implementation") {
   const invalid = new Set(REVISION_ACTIONS[target]);
   if (mode === "implementation_recovery" || mode === "feedback_reopen") {
-    for (const action of ["task.execute", "task.review", "acceptance.validate", "delivery.review", "change.verify"]) {
+    for (const action of ["task.execute", "task.review", "acceptance.validate", "acceptance.uat", "delivery.review", "change.verify"]) {
       invalid.add(action);
     }
   }
@@ -31229,8 +32574,9 @@ function applyPreImplementationRevisionInvalidation(change, target) {
   const invalidActions = new Set(REVISION_ACTIONS[target]);
   change.completed_actions = change.completed_actions.filter((action) => !invalidActions.has(action));
   change.tasks = {};
-  change.execution = { active_task: null, active_execution: null };
+  change.execution = { ...change.execution, active_task: null, active_execution: null };
   change.verification = { status: "pending" };
+  resetUat(change);
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
   change.state = target === "requirements" ? "SCOPING" : target === "plan" ? "DESIGN_APPROVED" : target === "prototype" ? "DESIGNING" : "SPEC_APPROVED";
@@ -31282,8 +32628,9 @@ function applyImplementationRecoveryInvalidation(change, target, revisionId, inv
     delete task.started_at;
     delete task.completed_at;
   }
-  change.execution = { active_task: null, active_execution: null };
+  change.execution = { ...change.execution, active_task: null, active_execution: null };
   change.verification = { status: "pending" };
+  resetUat(change);
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
   change.state = target === "requirements" ? "SCOPING" : target === "plan" ? "DESIGN_APPROVED" : target === "prototype" ? "DESIGNING" : "SPEC_APPROVED";
@@ -31300,14 +32647,18 @@ function applyFeedbackRevisionInvalidation(change, target) {
     delete change.reviews[review];
   const invalidActions = new Set(revisionActions(target, change.completed_actions, "feedback_reopen"));
   change.completed_actions = change.completed_actions.filter((action) => !invalidActions.has(action));
-  change.execution = { active_task: null, active_execution: null };
+  change.execution = { ...change.execution, active_task: null, active_execution: null };
   change.verification = { status: "pending" };
+  resetUat(change);
   change.knowledge_evolution = { schema_version: 1, status: "pending", protocol_version: 1, updates: [] };
   delete change.finished_at;
   delete change.delivery_head;
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
   change.state = target === "requirements" ? "SCOPING" : target === "plan" ? "DESIGN_APPROVED" : target === "prototype" ? "DESIGNING" : "SPEC_APPROVED";
+}
+function resetUat(change) {
+  change.uat = change.uat.policy === "required" ? { policy: "required", status: "pending" } : { policy: change.uat.policy, status: "not_required" };
 }
 var STATE_ORDER = [
   "SCOPING",
@@ -31320,11 +32671,36 @@ var STATE_ORDER = [
   "READY",
   "IMPLEMENTING",
   "ACCEPTANCE_VALIDATING",
+  "UAT_PENDING",
   "FINAL_REVIEW",
   "VERIFYING",
   "READY_TO_FINISH",
   "ARCHIVED"
 ];
+var EXECUTION_ACTION_BY_ROLE = {
+  requirements_author: ["requirements.clarify"],
+  requirements_reviewer: ["requirements.review"],
+  design_author: ["design.technical", "design.prototype"],
+  planner: ["plan.create"],
+  readiness_reviewer: ["readiness.review"],
+  task_implementer: ["task.execute"],
+  task_reviewer: ["task.review"],
+  acceptance_engineer: ["acceptance.validate"],
+  delivery_reviewer: ["delivery.review"],
+  revision_author: ["revision.author"],
+  reconciliation_reviewer: ["reconcile.spec", "reconcile.design", "reconcile.implementation"],
+  knowledge_author: ["knowledge.evolve.author"],
+  knowledge_reviewer: ["knowledge.evolve.review"]
+};
+function assertExecutionRoleAction(role, action) {
+  if (!EXECUTION_ACTION_BY_ROLE[role].includes(action)) {
+    throw new RockSpecError("EXECUTION_ROLE_ACTION_MISMATCH", "Execution role is not allowed for this Action", {
+      role,
+      action,
+      allowed_actions: EXECUTION_ACTION_BY_ROLE[role]
+    });
+  }
+}
 function stateAtLeast(changeState, target) {
   const current = STATE_ORDER.indexOf(changeState);
   return current >= STATE_ORDER.indexOf(target);
@@ -31376,6 +32752,21 @@ function deduplicateBlocks(blocks) {
     return true;
   });
 }
+function normalizeExecutionUsage(usage) {
+  if (!usage)
+    return void 0;
+  const normalized = {};
+  for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"]) {
+    const value = usage[key];
+    if (value === void 0)
+      continue;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RockSpecError("INVALID_EXECUTION_USAGE", `${key} must be a non-negative integer`, { key, value });
+    }
+    normalized[key] = value;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : void 0;
+}
 function briefTemplate(change) {
   return `# ${change.title}
 
@@ -31413,6 +32804,8 @@ dependencies: []
 supersedes: []
 requirement_ids: [R-001]
 scenario_ids: [S-001]
+decision_ids: [D-001]
+finding_ids: []
 acceptance_criteria:
   - TODO
 consumes: []
@@ -31469,6 +32862,7 @@ subject:
   head_commit: TODO
   diff_hash: TODO
 round: 0
+scope_assessment: []
 findings: []
 ---
 
@@ -31481,6 +32875,41 @@ Verdict: BLOCKED
 TODO
 
 ## Findings
+
+TODO
+`;
+}
+function acceptanceReviewTemplate() {
+  return `---
+schema_version: 1
+verdict: BLOCKED
+reviewer_execution_id: TODO
+commit: TODO
+scenario_coverage: []
+ui_evidence: []
+findings: []
+---
+
+# Acceptance Test Report
+
+Verdict: BLOCKED
+
+## Findings
+
+TODO
+`;
+}
+function uatReportTemplate() {
+  return `---
+schema_version: 1
+verdict: CONFIRMED
+confirmed_by: TODO
+commit: TODO
+scenario_ids: [S-001]
+notes: TODO
+---
+
+# User Acceptance
 
 TODO
 `;
@@ -31563,7 +32992,7 @@ TODO
 
 // packages/installer/dist/index.js
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { cp as cp2, lstat, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, readlink, realpath as realpath2, rename as rename3, rm as rm3, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path4 from "node:path";
@@ -32118,7 +33547,7 @@ async function hashPath(target) {
     return hashBytes(`symlink:${await readlink(target)}`);
   if (info.isFile())
     return hashBytes(await readFile4(target));
-  const hash2 = createHash2("sha256");
+  const hash2 = createHash3("sha256");
   for (const file2 of await walk(target)) {
     const relative = path4.relative(target, file2).split(path4.sep).join("/");
     const child = await lstat(file2);
@@ -32135,7 +33564,7 @@ async function hashPath(target) {
   return `sha256:${hash2.digest("hex")}`;
 }
 function hashBytes(content) {
-  return `sha256:${createHash2("sha256").update(content).digest("hex")}`;
+  return `sha256:${createHash3("sha256").update(content).digest("hex")}`;
 }
 async function walk(root) {
   const result = [];
@@ -32202,14 +33631,41 @@ function successEnvelope(command, data) {
 }
 function failureEnvelope(command, error51) {
   const candidate = asErrorRecord(error51);
+  const code = typeof candidate.code === "string" ? candidate.code : "INTERNAL_ERROR";
+  const details = candidate.details ?? candidate.issues ?? null;
+  const detailRecord = isRecord(details) ? details : {};
+  const changeId = typeof detailRecord.change_id === "string" ? detailRecord.change_id : void 0;
+  const recoverApplyCodes = /* @__PURE__ */ new Set([
+    "RECOVERY_TRIGGER_MISMATCH",
+    "RECOVERY_SOURCE_MISMATCH",
+    "RECOVERY_TARGET_MISMATCH",
+    "REVISION_AMENDMENT_FINDING_REQUIRED",
+    "REVISION_AUTHOR_REQUIRED"
+  ]);
+  const changeIdForRecovery = changeId ?? "[change-id]";
+  const recommendedCommandByCode = {
+    EXECUTION_ALREADY_ACTIVE: `rockspec execution complete ${String(detailRecord.execution_id ?? "[execution-id]")} ${changeIdForRecovery} --outcome success`,
+    ENVIRONMENT_PREFLIGHT_FAILED: `rockspec preflight environment ${changeIdForRecovery}`,
+    ACCEPTANCE_PREFLIGHT_REQUIRED: `rockspec preflight acceptance ${changeIdForRecovery}`,
+    COMPLETED_TASK_IMMUTABLE: `rockspec action complete plan.create ${changeIdForRecovery}  # append a new Remediation Task; keep completed Tasks unchanged`,
+    SUSPENDED_TASK_IMMUTABLE: `rockspec action complete plan.create ${changeIdForRecovery}  # append a new Replacement Task; keep suspended Tasks unchanged`,
+    RECOVERY_PLAN_APPEND_ONLY: `rockspec action complete plan.create ${changeIdForRecovery}  # restore immutable Tasks and append a new Finding-bound Task`,
+    UNASSIGNED_PRODUCT_COMMIT: `rockspec action complete plan.create ${changeIdForRecovery}  # attach the repair to a Remediation Task`,
+    UNASSIGNED_PRODUCT_COMMIT_REVIEW_REQUIRED: `rockspec action complete delivery.review ${changeIdForRecovery} --verdict CHANGES_REQUIRED`
+  };
+  const recoveryCommand = typeof candidate.recovery_command === "string" ? candidate.recovery_command : recommendedCommandByCode[code] ? recommendedCommandByCode[code] : recoverApplyCodes.has(code) ? `rockspec recover apply${changeId ? ` ${changeId}` : " [change-id]"}` : null;
   return {
     schema_version: CLI_SCHEMA_VERSION,
     ok: false,
     command,
     error: {
-      code: typeof candidate.code === "string" ? candidate.code : "INTERNAL_ERROR",
+      code,
       message: typeof candidate.message === "string" ? candidate.message : "An unexpected error occurred",
-      details: candidate.details ?? candidate.issues ?? null
+      details,
+      retryable: candidate.retryable === true || code === "LOCK_TIMEOUT",
+      state_changed: candidate.state_changed === true,
+      recovery_command: recoveryCommand,
+      recommended_next: candidate.recommended_next ?? detailRecord.recommended_next ?? null
     }
   };
 }
@@ -32463,6 +33919,65 @@ function parseHosts(value) {
 }
 
 // packages/cli/src/program.ts
+async function recordTelemetry(cwd, record2) {
+  try {
+    await appendRuntimeTelemetry(cwd ?? process.cwd(), record2);
+  } catch {
+  }
+}
+function telemetryChangeId(result, details) {
+  for (const candidate of [result, details]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const record2 = candidate;
+    if (typeof record2.change_id === "string") return record2.change_id;
+    if (record2.change && typeof record2.change === "object") {
+      const change = record2.change;
+      if (typeof change.id === "string") return change.id;
+    }
+  }
+  return void 0;
+}
+function telemetryChangeIdHint(commandName, command) {
+  const localOptions = command.opts();
+  if (typeof localOptions.change === "string") return localOptions.change;
+  const processedArgs = command.processedArgs ?? [];
+  const firstArgumentCommands = /* @__PURE__ */ new Set([
+    "new",
+    "status",
+    "feedback.submit",
+    "continue",
+    "revise",
+    "revise.amend",
+    "recover.apply",
+    "validate",
+    "task.list",
+    "task.next",
+    "knowledge.package",
+    "evidence.add",
+    "uat.confirm",
+    "verify",
+    "finish",
+    "archive"
+  ]);
+  const secondArgumentCommands = /* @__PURE__ */ new Set([
+    "action.complete",
+    "execution.start",
+    "execution.complete",
+    "approval.package",
+    "approve",
+    "promote",
+    "reconcile.prepare",
+    "reconcile.complete",
+    "preflight.implementation",
+    "task.brief",
+    "task.start",
+    "task.complete",
+    "review.package",
+    "preflight"
+  ]);
+  const index = firstArgumentCommands.has(commandName) ? 0 : secondArgumentCommands.has(commandName) ? 1 : -1;
+  return index >= 0 && typeof processedArgs[index] === "string" ? processedArgs[index] : void 0;
+}
 function createProgram(dependencies = {}) {
   const stdout2 = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
@@ -32476,6 +33991,10 @@ function createProgram(dependencies = {}) {
   const program2 = new Command().name("rockspec").description("Deterministic Harness Engineering workflow for coding agents").version("0.1.0").option("--cwd <path>", "run as if started in this directory").option("--provider <skill-name>", "external Skill available in this host; repeat as needed", collect, []).option("--json", "emit a versioned JSON envelope", false).option("--summary", "project status-like command results to a compact summary", false).showHelpAfterError();
   const execute = async (commandName, command, operation) => {
     const options = command.optsWithGlobals();
+    const invocationId = randomUUID3();
+    const startedAt = /* @__PURE__ */ new Date();
+    const started = Date.now();
+    const changeIdHint = telemetryChangeIdHint(commandName, command);
     try {
       const configuredProviders = process.env.ROCKSPEC_AVAILABLE_PROVIDERS?.split(",").map((provider) => provider.trim()).filter(Boolean) ?? [];
       const installedProviders = await listInstalledProviders(options.cwd ?? process.cwd());
@@ -32486,10 +34005,38 @@ function createProgram(dependencies = {}) {
       );
       const output = options.summary && isFullStatusResult(result) ? projectStatus(result, "summary") : result;
       const rendered = options.json ? JSON.stringify(successEnvelope(commandName, output), null, 2) : formatHuman(output);
+      const changeId = telemetryChangeId(result) ?? changeIdHint;
+      await recordTelemetry(options.cwd, {
+        schema_version: 1,
+        invocation_id: invocationId,
+        command: commandName,
+        ...changeId ? { change_id: changeId } : {},
+        started_at: startedAt.toISOString(),
+        finished_at: (/* @__PURE__ */ new Date()).toISOString(),
+        duration_ms: Date.now() - started,
+        result: "success",
+        internal_error: false,
+        response_bytes: Buffer.byteLength(rendered)
+      });
       stdout2.write(`${rendered}
 `);
     } catch (error51) {
       const failure = failureEnvelope(commandName, error51);
+      const renderedFailure = JSON.stringify(failure);
+      const changeId = telemetryChangeId(void 0, failure.error.details) ?? changeIdHint;
+      await recordTelemetry(options.cwd, {
+        schema_version: 1,
+        invocation_id: invocationId,
+        command: commandName,
+        ...changeId ? { change_id: changeId } : {},
+        started_at: startedAt.toISOString(),
+        finished_at: (/* @__PURE__ */ new Date()).toISOString(),
+        duration_ms: Date.now() - started,
+        result: "error",
+        error_code: failure.error.code,
+        internal_error: failure.error.code === "INTERNAL_ERROR",
+        response_bytes: Buffer.byteLength(renderedFailure)
+      });
       if (options.json) {
         stderr.write(`${JSON.stringify(failure, null, 2)}
 `);
@@ -32500,10 +34047,21 @@ function createProgram(dependencies = {}) {
           stderr.write(`${JSON.stringify(failure.error.details, null, 2)}
 `);
         }
+        if (failure.error.recovery_command) {
+          stderr.write(`Recovery: ${failure.error.recovery_command}
+`);
+        }
       }
       setExitCode(errorExitCode(error51));
     }
   };
+  const telemetry = program2.command("telemetry").description("inspect privacy-safe Runtime command telemetry");
+  telemetry.command("report").argument("[change-id]").action(async (changeId, _options, command) => {
+    await execute("telemetry.report", command, () => summarizeRuntimeTelemetry(
+      command.optsWithGlobals().cwd ?? process.cwd(),
+      changeId
+    ));
+  });
   program2.action(async (_options, command) => {
     const cwd = command.optsWithGlobals().cwd;
     await execute("install", command, () => runInstallWizard({ ...cwd ? { cwd } : {} }));
@@ -32564,7 +34122,7 @@ function createProgram(dependencies = {}) {
   program2.command("init").description("initialize .rockspec at the Git repository root").action(async (_options, command) => {
     await execute("init", command, (engine) => engine.init());
   });
-  program2.command("new").description("low-level: create a Change in the workspace selected by RockSpec Skills").argument("<change-id>", "stable English kebab-case change ID").option("--title <title>", "human-readable title").option("--base <ref>", "target branch or ref used as the Change baseline").option("--managed-worktree", "record that RockSpec prepared this linked Worktree", false).option("--based-on-change <change-id>", "parent Change whose frozen delivery snapshot this Change extends").option("--reuse-workspace", "explicitly confirm sequential reuse of the current Worktree", false).option("--confirm-boundary", "confirm that this feedback is an independent Change", false).addOption(new Option("--kind <kind>", "change kind used for triage").choices([...CHANGE_KINDS]).default("feature")).addOption(new Option("--profile <profile>", "explicitly promote the selected profile").choices([...PROFILES])).option("--risk <risk>", "risk tag; repeat for multiple tags", collect, []).option("--ui-impact", "require a UI/UX prototype", false).action(async (changeId, options, command) => {
+  program2.command("new").description("low-level: create a Change in the workspace selected by RockSpec Skills").argument("<change-id>", "stable English kebab-case change ID").option("--title <title>", "human-readable title").option("--base <ref>", "target branch or ref used as the Change baseline").option("--managed-worktree", "record that RockSpec prepared this linked Worktree", false).option("--based-on-change <change-id>", "parent Change whose frozen delivery snapshot this Change extends").option("--reuse-workspace", "explicitly confirm sequential reuse of the current Worktree", false).option("--confirm-boundary", "confirm that this feedback is an independent Change", false).addOption(new Option("--kind <kind>", "change kind used for triage").choices([...CHANGE_KINDS]).default("feature")).addOption(new Option("--profile <profile>", "explicitly promote the selected profile").choices([...PROFILES])).option("--risk <risk>", "risk tag; repeat for multiple tags", collect, []).option("--ui-impact", "require a UI/UX prototype", false).addOption(new Option("--uat <policy>", "user acceptance policy").choices([...UAT_POLICIES])).action(async (changeId, options, command) => {
     await execute("new", command, async (engine) => {
       const triage = triageProfile({
         kind: options.kind,
@@ -32576,7 +34134,10 @@ function createProgram(dependencies = {}) {
         ...options.title ? { title: options.title } : {},
         ...options.base ? { baseRef: options.base } : {},
         profile: triage.profile,
+        kind: options.kind,
+        riskTags: options.risk,
         prototypeRequired: options.uiImpact,
+        ...options.uat ? { uatPolicy: options.uat } : {},
         workspaceManaged: options.managedWorktree,
         ...options.basedOnChange ? { basedOnChange: options.basedOnChange } : {},
         ...options.basedOnChange ? { reuseWorkspace: options.reuseWorkspace } : {},
@@ -32633,7 +34194,53 @@ function createProgram(dependencies = {}) {
       });
     });
   });
-  program2.command("approve").description("record a hash-bound user approval").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").option("--by <identity>", "approver identity", "user").action(async (artifactId, changeId, options, command) => {
+  const execution = program2.command("execution").description("register governed agent executions");
+  execution.command("start").argument("<action>").argument("[change-id]").requiredOption("--role <role>").addOption(new Option("--model-tier <tier>").choices(["fast", "balanced", "deep"])).option("--host-model <model>").option("--parent <execution-id>").option("--context-package <path>", "role-specific compact context package path").option("--context-hash <sha256>", "SHA-256 of the context package").action(async (actionId, changeId, options, command) => {
+    await execute("execution.start", command, (engine) => {
+      if (!EXECUTION_ROLES.includes(options.role)) {
+        throw Object.assign(new Error(`Unknown execution role: ${options.role}`), {
+          code: "INVALID_EXECUTION_ROLE",
+          details: { role: options.role, allowed: EXECUTION_ROLES }
+        });
+      }
+      return engine.startExecution({
+        action: actionId,
+        role: options.role,
+        ...changeId ? { changeId } : {},
+        ...options.modelTier ? { modelTier: options.modelTier } : {},
+        ...options.hostModel ? { hostModel: options.hostModel } : {},
+        ...options.parent ? { parentExecutionId: options.parent } : {},
+        ...options.contextPackage ? { contextPackagePath: options.contextPackage } : {},
+        ...options.contextHash ? { contextPackageHash: options.contextHash } : {}
+      });
+    });
+  });
+  execution.command("complete").argument("<execution-id>").argument("[change-id]").addOption(new Option("--outcome <outcome>").choices(["success", "error", "cancelled"]).default("success")).option("--input-tokens <number>", "fresh input token count", integer2).option("--cached-input-tokens <number>", "cached input token count", integer2).option("--output-tokens <number>", "output token count", integer2).option("--reasoning-tokens <number>", "reasoning token count", integer2).action(async (executionId, changeId, options, command) => {
+    await execute("execution.complete", command, (engine) => engine.completeExecution({
+      executionId,
+      outcome: options.outcome,
+      usage: {
+        ...options.inputTokens !== void 0 ? { input_tokens: options.inputTokens } : {},
+        ...options.cachedInputTokens !== void 0 ? { cached_input_tokens: options.cachedInputTokens } : {},
+        ...options.outputTokens !== void 0 ? { output_tokens: options.outputTokens } : {},
+        ...options.reasoningTokens !== void 0 ? { reasoning_tokens: options.reasoningTokens } : {}
+      },
+      ...changeId ? { changeId } : {}
+    }));
+  });
+  const approval = program2.command("approval").description("prepare hash-bound user approval inputs");
+  approval.command("package").argument("<gate>", "spec, design, or implementation").argument("[change-id]").action(async (gate, changeId, _options, command) => {
+    await execute("approval.package", command, (engine) => {
+      if (!isApprovalGate(gate)) {
+        throw Object.assign(new Error(`Unknown approval gate: ${gate}`), {
+          code: "INVALID_APPROVAL_GATE",
+          details: { gate, allowed: ["spec", "design", "implementation"] }
+        });
+      }
+      return engine.prepareApproval({ gate, ...changeId ? { changeId } : {} });
+    });
+  });
+  program2.command("approve").description("record a hash-bound user approval").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").option("--by <identity>", "approver identity", "user").requiredOption("--package <sha256>", "hash returned by approval package").action(async (artifactId, changeId, options, command) => {
     await execute("approve", command, (engine) => {
       if (!isApprovalGate(artifactId)) {
         throw Object.assign(new Error(`Unknown approval artifact: ${artifactId}`), {
@@ -32641,7 +34248,12 @@ function createProgram(dependencies = {}) {
           details: { artifact_id: artifactId, allowed: ["spec", "design", "implementation"] }
         });
       }
-      return engine.approve({ gate: artifactId, approvedBy: options.by, ...changeId ? { changeId } : {} });
+      return engine.approve({
+        gate: artifactId,
+        approvedBy: options.by,
+        packageHash: options.package,
+        ...changeId ? { changeId } : {}
+      });
     });
   });
   program2.command("promote").description("promote a change to a more rigorous workflow profile").argument("<profile>", "standard or strict").argument("[change-id]").action(async (profile, changeId, _options, command) => {
@@ -32674,6 +34286,15 @@ function createProgram(dependencies = {}) {
       };
       return options.amend ? engine.amendRevision(input) : engine.revise(input);
     });
+  });
+  const recover = program2.command("recover").description("consume the Engine's current Finding-bound recovery");
+  recover.command("apply").argument("[change-id]").option("--affected <id>", "affected R-/S-/D- ID; repeat as needed", collect, []).option("--reason <reason>", "optional audit reason; defaults to current Finding descriptions").option("--author-execution <execution-id>", "Revision Author execution ID required for automatic reconciliation").action(async (changeId, options, command) => {
+    await execute("recover.apply", command, (engine) => engine.applyRecovery({
+      ...changeId ? { changeId } : {},
+      affectedIds: options.affected,
+      ...options.reason ? { reason: options.reason } : {},
+      ...options.authorExecution ? { authorExecutionId: options.authorExecution } : {}
+    }));
   });
   const reconcile = program2.command("reconcile").description("prepare or complete an independent automatic Reconciliation Review");
   reconcile.command("prepare").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").action(async (artifactId, changeId, _options, command) => {
@@ -32708,30 +34329,31 @@ function createProgram(dependencies = {}) {
       "VALIDATION_FAILED"
     ));
   });
-  program2.command("preflight").description("validate Runtime installation and a stage before entering it").argument("<stage>", "currently: implementation").argument("[change-id]").option("--change <change-id>", "compatibility alias for the positional Change ID").action(async (stage, positionalId, options, command) => {
+  program2.command("preflight").description("validate Runtime installation and a stage before entering it").argument("<stage>", "implementation, acceptance, or environment").argument("[change-id]").option("--change <change-id>", "compatibility alias for the positional Change ID").action(async (stage, positionalId, options, command) => {
     await execute("preflight", command, async (engine) => {
       const changeId = resolveChangeId(positionalId, options.change);
-      if (stage !== "implementation") {
+      if (!["implementation", "acceptance", "environment"].includes(stage)) {
         throw Object.assign(new Error(`Unknown preflight stage: ${stage}`), {
           code: "INVALID_PREFLIGHT_STAGE",
-          details: { stage, allowed: ["implementation"] }
+          details: { stage, allowed: ["implementation", "acceptance", "environment"] }
         });
       }
       const cwd = command.optsWithGlobals().cwd ?? process.cwd();
       const installation = await doctorProject(cwd);
-      if (!installation.valid) {
+      if (stage === "implementation" && !installation.valid) {
         throw Object.assign(new Error("RockSpec installation is not consistent with install.lock.yaml"), {
           code: "PREFLIGHT_INSTALLATION_INVALID",
           details: installation
         });
       }
+      const result = stage === "implementation" ? await engine.preflightImplementation({ ...changeId ? { changeId } : {} }) : stage === "acceptance" ? await engine.preflightAcceptance({ ...changeId ? { changeId } : {} }) : await engine.preflightEnvironment({ ...changeId ? { changeId } : {} });
       return {
-        ...await engine.preflightImplementation({ ...changeId ? { changeId } : {} }),
-        installation: {
+        ...result,
+        ...stage === "implementation" ? { installation: {
           valid: installation.valid,
           rockspec_version: installation.rockspec_version,
           project_root: installation.project_root
-        }
+        } } : {}
       };
     });
   });
@@ -32754,8 +34376,13 @@ function createProgram(dependencies = {}) {
   task.command("brief").argument("<task-id>").argument("[change-id]").action(async (taskId, changeId, _options, command) => {
     await execute("task.brief", command, (engine) => engine.getTaskBrief({ taskId, ...changeId ? { changeId } : {} }));
   });
-  task.command("start").argument("<task-id>").argument("[change-id]").action(async (taskId, changeId, _options, command) => {
-    await execute("task.start", command, (engine) => engine.startTask({ taskId, ...changeId ? { changeId } : {} }));
+  task.command("start").argument("<task-id>").argument("[change-id]").addOption(new Option("--model-tier <tier>", "selected model tier").choices(["fast", "balanced", "deep"])).option("--host-model <model>").action(async (taskId, changeId, options, command) => {
+    await execute("task.start", command, (engine) => engine.startTask({
+      taskId,
+      ...changeId ? { changeId } : {},
+      ...options.modelTier ? { modelTier: options.modelTier } : {},
+      ...options.hostModel ? { hostModel: options.hostModel } : {}
+    }));
   });
   task.command("complete").argument("<task-id>").argument("[change-id]").option("--commit <sha>").action(async (taskId, changeId, options, command) => {
     await execute("task.complete", command, (engine) => engine.completeTask({
@@ -32788,7 +34415,7 @@ function createProgram(dependencies = {}) {
     }));
   });
   const check2 = program2.command("check").description("execute checks and record bound evidence");
-  check2.command("run").argument("<executable>").argument("[args...]").option("--change <change-id>").option("--kind <kind>", "evidence kind", "verification").option("--task <task-id>").option("--action <action-id>").action(async (executable, args, options, command) => {
+  check2.command("run").argument("<executable>").argument("[args...]").option("--change <change-id>").option("--kind <kind>", "evidence kind", "verification").option("--task <task-id>").option("--action <action-id>").option("--scenario <scenario-id>", "Scenario covered by this check; repeat as needed", collect, []).option("--finding <finding-id>", "Finding addressed by this check; repeat as needed", collect, []).option("--artifact <path>", "evidence artifact produced by this check; repeat as needed", collect, []).option("--no-cache", "force execution even when matching evidence exists").action(async (executable, args, options, command) => {
     await execute("check.run", command, async (engine) => {
       if (options.action && !ACTION_IDS.includes(options.action)) {
         throw Object.assign(new Error(`Unknown action: ${options.action}`), {
@@ -32802,19 +34429,27 @@ function createProgram(dependencies = {}) {
         kind: options.kind,
         ...options.change ? { changeId: options.change } : {},
         ...options.task ? { taskId: options.task } : {},
-        ...options.action ? { actionId: options.action } : {}
+        ...options.action ? { actionId: options.action } : {},
+        scenarioIds: options.scenario,
+        findingIds: options.finding,
+        artifactPaths: options.artifact,
+        reuseCachedEvidence: options.cache
       });
       if (result.check.exit_code !== 0) {
         throw Object.assign(new Error(`Check failed with exit code ${result.check.exit_code}`), {
           code: "CHECK_FAILED",
-          details: result.check
+          details: {
+            ...result.check,
+            change_id: result.change.id
+          },
+          state_changed: true
         });
       }
       return result;
     });
   });
   const evidence = program2.command("evidence").description("record fresh verification evidence");
-  evidence.command("add").argument("[change-id]").requiredOption("--command <command>").requiredOption("--exit-code <number>", "process exit code", integer2).option("--kind <kind>", "evidence kind", "verification").option("--workdir <path>").option("--started-at <iso-time>").option("--finished-at <iso-time>").option("--commit <sha>").option("--task <task-id>").option("--action <action-id>").option("--report <path>").action(async (changeId, options, command) => {
+  evidence.command("add").argument("[change-id]").requiredOption("--command <command>").requiredOption("--exit-code <number>", "process exit code", integer2).option("--kind <kind>", "evidence kind", "verification").option("--workdir <path>").option("--started-at <iso-time>").option("--finished-at <iso-time>").option("--commit <sha>").option("--task <task-id>").option("--action <action-id>").option("--report <path>").option("--scenario <scenario-id>", "Scenario covered by this evidence; repeat as needed", collect, []).option("--finding <finding-id>", "Finding addressed by this evidence; repeat as needed", collect, []).option("--artifact <path>", "evidence artifact; repeat as needed", collect, []).action(async (changeId, options, command) => {
     await execute("evidence.add", command, (engine) => {
       if (options.action && !ACTION_IDS.includes(options.action)) {
         throw Object.assign(new Error(`Unknown action: ${options.action}`), {
@@ -32833,9 +34468,19 @@ function createProgram(dependencies = {}) {
         ...options.commit ? { commit: options.commit } : {},
         ...options.task ? { taskId: options.task } : {},
         ...options.action ? { actionId: options.action } : {},
-        ...options.report ? { reportPath: options.report } : {}
+        ...options.report ? { reportPath: options.report } : {},
+        scenarioIds: options.scenario,
+        findingIds: options.finding,
+        artifactPaths: options.artifact
       });
     });
+  });
+  const uat = program2.command("uat").description("record conditional user acceptance confirmation");
+  uat.command("confirm").argument("[change-id]").option("--report <path>", "UAT report relative to the Change directory", "testing/uat-report.md").action(async (changeId, options, command) => {
+    await execute("uat.confirm", command, (engine) => engine.completeUat({
+      reportPath: options.report,
+      ...changeId ? { changeId } : {}
+    }));
   });
   program2.command("verify").argument("[change-id]").action(async (changeId, _options, command) => {
     await execute("verify", command, (engine) => engine.verify({ ...changeId ? { changeId } : {} }));

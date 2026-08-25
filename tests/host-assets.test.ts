@@ -254,28 +254,30 @@ describe("host assets", () => {
     const requirementsAction = parse(requirementsActionText) as {
       executor?: { mode?: string; collaboration?: { mode?: string } };
     };
-    expect(requirements).toContain("只有这类歧义才阻塞");
-    expect(requirements).toContain("每条消息只问当前最重要的一个问题");
+    expect(requirements).toContain("四项 Authority 测试");
     expect(requirements).toContain(interactiveGate);
-    expect(requirements).toContain("每次只展示一个章节");
+    expect(requirements).toContain("章节是最终产物结构，不是会话停点");
     expect(requirements).toContain("## Conversation presentation");
     expect(requirements).toContain("比较、规则和映射用表格");
     expect(requirements).toContain("简单流程、依赖或状态变化用紧凑 ASCII 图");
     expect(requirements).toContain("不要为了丰富形式强制添加图表");
-    expect(requirements).toContain("整理时不得引入未经讨论的新决策");
-    expect(requirements).toContain("结束当前回复并等待");
-    expect(requirements).toContain("不得写入最终 Proposal");
-    expect(requirements).toContain("不得启动 Requirements Reviewer");
-    expect(requirements).toContain("不得进入 Design");
+    expect(requirements).toContain("结束当前回复等待");
+    expect(requirements).toContain("没有新的产品选择，就不得产生新的确认停点");
+    expect(requirements).toContain("没有开放决策时可以直接写入最终 Proposal");
     expect(requirements).toContain("Open Revision");
     expect(requirements).toContain("失效的下游产物、Review 和 Approval");
-    expect(requirements).toContain("feedback_reopen + interaction_mode: compact");
-    expect(requirements).toContain("不运行五章节循环");
-    expect(requirements).toContain("Reviewer PASS 后一次性展示 reviewed Delta");
+    expect(requirements).toContain("decision-free authoring");
+    expect(requirements).toContain("不运行章节确认循环");
+    expect(requirements).toContain("不得在 Hash Approval 前再增加 reviewed Delta 确认");
     expect(requirements).toContain("人工审批强度不决定交互次数");
-    expect(requirementsActionText).toContain("compact 禁止逐章节确认");
+    expect(requirementsActionText).toContain("章节不是停点");
     expect(requirementsActionText).toContain("从磁盘重读");
     expect(requirementsActionText).toContain("不得用假设绕过");
+    expect(requirementsActionText).toContain("没有新的产品选择就不得暂停");
+    expect(await readFile(
+      path.join(requirementsRoot, "references", "aggregate-root-deletion.md"),
+      "utf8",
+    )).toContain("Owned dependents");
     expect(requirementsAction.executor?.mode).toBe("inline");
     expect(requirementsAction.executor?.collaboration?.mode).toBe("interactive");
 
@@ -288,27 +290,25 @@ describe("host assets", () => {
     const designAction = parse(designActionText) as {
       executor?: { mode?: string; collaboration?: { mode?: string } };
     };
-    expect(design).toContain("拆成多个 Change");
+    expect(design).toContain("才把 Change 拆分作为开放决策");
     expect(design).toContain("2 至 3 个真正不同的方案");
     expect(design).toContain(interactiveGate);
-    expect(design).toContain("每次只展示一个章节");
+    expect(design).toContain("章节是最终产物结构，不是会话停点");
     expect(design).toContain("## Conversation presentation");
     expect(design).toContain("比较、规则和映射用表格");
     expect(design).toContain("简单流程、依赖或状态变化用紧凑 ASCII 图");
     expect(design).toContain("关系复杂或容易产生歧义时");
     expect(design).toContain("UI 布局和视觉交互交给 `$rockspec-prototype`");
-    expect(design).toContain("结束当前回复并等待");
-    expect(design).toContain("不得写入最终 `design.md`");
-    expect(design).toContain("不得完成 `design.technical`");
-    expect(design).toContain("不得启动 Reviewer 或 Prototype");
-    expect(design).toContain("不得进入 Plan");
+    expect(design).toContain("结束当前回复等待");
+    expect(design).toContain("没有开放决策时可直接写入最终 `design.md`");
+    expect(design).toContain("锁、事务隔离、SQL 顺序");
     expect(design).toContain("rockspec revise --source design.technical --target requirements");
     expect(design).toContain("`inputs.spec_hash`");
     expect(design).toContain("`TODO/TBD`");
-    expect(design).toContain("feedback_reopen + interaction_mode: compact");
-    expect(design).toContain("不得按组件、接口、错误、安全、测试等章节重复询问");
-    expect(designActionText).toContain("human Gate 不等于 full 交互");
-    expect(designActionText).toContain("分段确认不得替代绑定 Hash 的 Design Approval");
+    expect(design).toContain("decision-free authoring");
+    expect(design).toContain("不得把范围架构、模块、接口、错误并发、安全迁移、测试和原型拆成章节确认");
+    expect(designActionText).toContain("首次 Design、human Gate 或 full interaction 都不自动增加交互");
+    expect(designActionText).toContain("Decision Package 也不得替代绑定 Hash 的 Design Approval");
     expect(designAction.executor?.mode).toBe("inline");
     expect(designAction.executor?.collaboration?.mode).toBe("interactive");
 
@@ -377,6 +377,7 @@ describe("host assets", () => {
     expect(reconciliation).toContain("Content Hash");
     expect(reconciliation).toContain("Authority Baseline");
     expect(reconciliation).toContain("旧报告缺少分类字段");
+    expect(reconciliation).toContain("Critical 表示问题在修复前持续阻塞，不等于产品 Authority 已变化");
     for (const classification of [
       "consistency_fix",
       "derived_gap",
@@ -463,10 +464,10 @@ describe("host assets", () => {
       "rockspec-requirements",
       "rockspec-design",
     ]);
-    expect(recipe.invariants?.join("\n")).toContain("不得在同一回复中进入下一能力");
-    expect(change).toContain("调用后将控制权交还用户");
-    expect(change).toContain("不得在同一回复中重载状态、自动串联下一能力");
-    expect(change).toContain("端到端执行不构成对尚未展示内容的预先确认");
+    expect(recipe.invariants?.join("\n")).toContain("只有遇到未关闭的 Decision Package 或正式 Approval Package 时才等待用户");
+    expect(change).toContain("只有返回尚未关闭的 Decision Package 时才将控制权交还用户");
+    expect(change).toContain("没有开放决策时允许当前 Skill 完成产物、Review 准备并重新加载状态");
+    expect(change).toContain("端到端执行不构成对尚未展示 Authority 决策或 Hash Package 的预先确认");
     expect(change).toContain("`rockspec revise`");
     expect(change).toContain("不得因文件 Hash 过期直接重新审批");
 

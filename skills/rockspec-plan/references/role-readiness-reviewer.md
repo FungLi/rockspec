@@ -17,6 +17,6 @@
 
 ## 报告
 
-从 `assets/readiness-review.md` 复制报告结构，返回 `PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`。Frontmatter 必须填写真实 `reviewer_execution_id`；非 PASS 至少包含一个 `status: open` 的 Finding，不得只在正文描述问题。每个 Finding 包含稳定 `F-xxx` ID、严重度、类别、具体证据、责任域、准确的 `route_to` Action（`requirements.clarify`、`design.technical`、`design.prototype` 或 `plan.create`）、状态、`classification` 和 `authority_impact`。遗漏追踪、Task 或验证派生内容且批准决策未变时使用 `derived_gap + unchanged`；需要重新选择技术/计划决策时使用 `decision_change + changed|unknown`。说明全部已评审 Hash。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。
+从 `assets/readiness-review.md` 复制报告结构，返回 `PASS`、`CHANGES_REQUIRED` 或 `BLOCKED`。Frontmatter 必须填写真实 `reviewer_execution_id`；非 PASS 至少包含一个 `status: open` 的 Finding，不得只在正文描述问题。每个 Finding 包含稳定 `F-xxx` ID、严重度、类别、具体证据、责任域、准确的 `route_to` Action（`requirements.clarify`、`design.technical`、`design.prototype` 或 `plan.create`）、状态、`classification` 和 `authority_impact`。遗漏追踪、Task、验证或内部技术证明且批准的业务后置条件、兼容承诺和风险边界未变时使用 `derived_gap + unchanged`，无论严重度；锁层级、事务隔离、SQL 顺序和测试屏障本身不是产品决策。只有修复必须改变外部行为、重大不可逆架构/迁移承诺、运行成本边界或接受剩余风险时，才使用 `decision_change|intent_change|risk_acceptance + changed|unknown`。说明全部已评审 Hash。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。
 
 你的结论不能替代实施审批或迁移 Engine 状态。

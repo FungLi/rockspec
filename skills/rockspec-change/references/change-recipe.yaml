@@ -17,6 +17,7 @@ capability_skills:
   task.execute: "rockspec-implement"
   task.review: "rockspec-review"
   acceptance.validate: "rockspec-acceptance"
+  acceptance.uat: "rockspec-acceptance"
   delivery.review: "rockspec-review"
   change.verify: "rockspec-finish"
   knowledge.evolve: "rockspec-evolve"
@@ -32,7 +33,7 @@ invariants:
   - "Acceptance 必须先于 delivery.review 完成。"
   - "每个已完成 Task 只拥有一个最终 Commit。"
   - "一个 Active Change 只绑定一个工作区；所有 Worker 和 Reviewer 使用该工作区 cwd。"
-  - "交互 Skill 等待用户确认问题、方案或章节时必须结束当前回复；不得在同一回复中进入下一能力。"
+  - "交互 Skill 只有遇到未关闭的 Decision Package 或正式 Approval Package 时才等待用户并结束当前回复；章节和普通工程方案不是等待点。"
   - "跨阶段内容变化必须通过 rockspec revise 从最上游受影响能力重放 Gate；已有 Open Revision 时使用 rockspec revise --amend 追加新 Review Findings，不得创建第二个 Revision。"
   - "首次 Gate 始终由用户审批；自动对账只能续期本次 Revision 失效且具有人工 Authority Baseline 的 Gate。"
 workspace:
@@ -66,6 +67,7 @@ profiles:
       - "task.execute"
       - "task.review"
       - "acceptance.validate"
+      - "acceptance.uat"
       - "delivery.review"
       - "change.verify"
       - "knowledge.evolve"
@@ -73,21 +75,23 @@ profiles:
     conditional:
       - action: "design.prototype"
         when: "prototype.required == true"
+      - action: "acceptance.uat"
+        when: "uat.policy == required"
       - actions: ["task.execute", "task.review"]
         repeat: "对每个 Ready Task 重复，包括 Remediation Task"
     approval_gates:
       - id: "spec"
         after: "requirements.review"
         after_actions: ["requirements.review"]
-        operation: "rockspec approve spec"
+        operation: "rockspec approval package spec <change-id>; rockspec approve spec <change-id> --package <sha256>"
       - id: "design"
         after: "需要原型时在 design.prototype 后，否则在 design.technical 后"
         after_actions: ["design.technical", "design.prototype"]
-        operation: "rockspec approve design"
+        operation: "rockspec approval package design <change-id>; rockspec approve design <change-id> --package <sha256>"
       - id: "implementation"
         after: "readiness.review"
         after_actions: ["readiness.review"]
-        operation: "rockspec approve implementation"
+        operation: "rockspec approval package implementation <change-id>; rockspec approve implementation <change-id> --package <sha256>"
   strict:
     extends: "standard"
     reviewers: 2
@@ -101,15 +105,20 @@ profiles:
       - "运行完整回归证据并限制 Task 并行实施。"
 recovery:
   revision: "实施前可显式修订；实施后只允许绑定 non-PASS Review/Open Finding 的 Recovery Revision，并由 Engine 推导最早责任域"
+  operation: "rockspec recover apply <change-id> --affected <R-/S-/D-id> [--author-execution <execution-id>]；Engine 消费当前全部 Finding，不由 Agent 重抄绑定"
   amendment: "Open Revision 期间发现新的 non-PASS Review/Open Finding 时追加 AM-xxx，扩展影响集并按最保守策略继续同一 Revision"
-  reconciliation: "仅 consistency_fix、derived_gap 或 implementation_fix 且 authority_impact=unchanged、非 Critical 时自动；独立 Reviewer 续期既有人工 Gate"
+  reconciliation: "仅 consistency_fix、derived_gap 或 implementation_fix 且 authority_impact=unchanged 时自动；Critical 仍阻塞并要求 Deep 独立复审，但不单独触发产品授权；独立 Reviewer 续期既有人工 Gate"
   max_reconciliation_rounds: 2
-  escalation: "首次审批、decision_change、intent_change、risk_acceptance、changed/unknown authority、Critical、Reviewer 分歧或超时转人工"
-  max_task_repair_rounds: 2
+  escalation: "首次审批、decision_change、intent_change、risk_acceptance、changed/unknown authority、Reviewer 分歧或超时转人工"
+  max_review_rounds: "读取 config.max_review_rounds；默认 3 次 Review（含初审，即默认最多两轮修复）"
   task_review_failure: "task.execute"
   acceptance_implementation_failure: "回到 plan.create，新增映射触发 Finding 的 Remediation Task，重新 Readiness/审批后执行"
   stale_approval: "返回负责 Action 并请求重新审批"
   missing_capability: "BLOCKED"
+telemetry:
+  report: "rockspec telemetry report <change-id> --json"
+  privacy: "只记录命令类别、耗时、结果码、响应体积和 Change ID；不记录 Prompt、源码、CLI 参数或反馈正文"
+  authority: "诊断数据，不替代 Event、Review、Approval 或 Evidence"
 standalone:
   artifact_root: ".rockspec/workbench/<capability>/<slug>/"
   receipt: "receipt.yaml"
