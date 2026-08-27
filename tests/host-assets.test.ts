@@ -270,6 +270,7 @@ describe("host assets", () => {
     expect(requirements).toContain("不运行章节确认循环");
     expect(requirements).toContain("不得在 Hash Approval 前再增加 reviewed Delta 确认");
     expect(requirements).toContain("人工审批强度不决定交互次数");
+    expect(requirements).toContain("不得把路径重新拼成一行");
     expect(requirementsActionText).toContain("章节不是停点");
     expect(requirementsActionText).toContain("从磁盘重读");
     expect(requirementsActionText).toContain("不得用假设绕过");
@@ -291,6 +292,7 @@ describe("host assets", () => {
       executor?: { mode?: string; collaboration?: { mode?: string } };
     };
     expect(design).toContain("才把 Change 拆分作为开放决策");
+    expect(design).toContain("派只读 Subagent 完成核对");
     expect(design).toContain("2 至 3 个真正不同的方案");
     expect(design).toContain(interactiveGate);
     expect(design).toContain("章节是最终产物结构，不是会话停点");
@@ -328,6 +330,7 @@ describe("host assets", () => {
     expect(plan).toContain("文件职责图");
     expect(plan).toContain("`consumes`/`produces`");
     expect(plan).toContain("`supersedes`");
+    expect(plan).toContain("只展示一次 `artifact_root`");
     expect(plan).toContain("原样保留已经完成的历史 `supersedes` 关系");
     expect(plan).toContain("仍存在于当前 Spec 的 ID 可继续贡献覆盖");
     expect(plan).toContain("不存在永久阻塞路径");
@@ -412,7 +415,8 @@ describe("host assets", () => {
       path.join(debugRoot, "assets", "debug-report.md"),
       "utf8",
     );
-    expect(debug).toContain("首版保持 Inline，不创建 Subagent");
+    expect(debug).toContain("迭代诊断保持 Inline");
+    expect(debug).toContain("一次性只读事实核对可外包");
     expect(debug).toContain(".rockspec/workbench/debug/<slug>/report.md");
     expect(debugProtocol).toContain("根因门禁");
     expect(debugProtocol).toContain("每次只改变一个变量");
@@ -428,7 +432,8 @@ describe("host assets", () => {
       path.join(researchRoot, "assets", "research-report.md"),
       "utf8",
     );
-    expect(research).toContain("首版保持 Inline，不创建后台 Research Subagent");
+    expect(research).toContain("研究编排与用户协作保持 Inline");
+    expect(research).toContain("只读事实检索可外包");
     expect(research).toContain(".rockspec/workbench/research/<slug>/research.md");
     expect(research).toContain("<INTERACTIVE-GATE>");
     expect(research).toContain("1 至 3 条真实可行的研究或证据路径");

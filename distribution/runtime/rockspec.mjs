@@ -10796,7 +10796,7 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 var import_yaml2 = __toESM(require_dist(), 1);
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { execFile as execFile2 } from "node:child_process";
-import { cp, mkdir as mkdir2, readFile as readFile3, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { cp, mkdir as mkdir2, readFile as readFile3, realpath as realpath2, rename as rename2, rm as rm2 } from "node:fs/promises";
 import path3 from "node:path";
 import { promisify as promisify2 } from "node:util";
 
@@ -25506,6 +25506,33 @@ var InstallLockSchema = external_exports.object({
   managed_paths: external_exports.array(ManagedInstallPathSchema)
 }).strict();
 
+// packages/protocol/dist/markdown.js
+function parseMarkdownHeading(line) {
+  const match = /^ {0,3}(#{1,6})\s+(\S.*)\s*$/.exec(line);
+  return match ? { level: match[1].length, title: match[2] } : void 0;
+}
+function scanMarkdown(markdown) {
+  const lines = markdown.split(/\r?\n/);
+  let fence;
+  return lines.map((text, index) => {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(text);
+    const wasInFence = fence !== void 0;
+    if (!fence && marker) {
+      fence = { marker: marker[1][0], length: marker[1].length };
+    } else if (fence && marker && marker[1][0] === fence.marker && marker[1].length >= fence.length && marker[2].trim() === "") {
+      fence = void 0;
+    }
+    const inFence = wasInFence || marker !== null;
+    return {
+      index,
+      number: index + 1,
+      text,
+      inFence,
+      ...!inFence && parseMarkdownHeading(text) ? { heading: parseMarkdownHeading(text) } : {}
+    };
+  });
+}
+
 // packages/protocol/dist/profile.js
 var CHANGE_KINDS = [
   "copy",
@@ -25879,6 +25906,7 @@ var ExecutionRecordSchema = external_exports.object({
   parent_execution_id: external_exports.string().uuid().optional(),
   context_package_path: external_exports.string().min(1).optional(),
   context_package_hash: Sha256Schema.optional(),
+  context_package_verified: external_exports.boolean().optional(),
   usage: external_exports.object({
     input_tokens: external_exports.number().int().nonnegative().optional(),
     cached_input_tokens: external_exports.number().int().nonnegative().optional(),
@@ -25886,6 +25914,12 @@ var ExecutionRecordSchema = external_exports.object({
     reasoning_tokens: external_exports.number().int().nonnegative().optional()
   }).strict().optional()
 }).strict().superRefine((execution, context) => {
+  if (execution.context_package_path === void 0 !== (execution.context_package_hash === void 0)) {
+    context.addIssue({ code: "custom", path: ["context_package_path"], message: "Context package path and hash must be provided together" });
+  }
+  if (execution.context_package_verified && execution.context_package_path === void 0) {
+    context.addIssue({ code: "custom", path: ["context_package_verified"], message: "Verified context requires a bound package" });
+  }
   if (execution.outcome !== void 0 && execution.completed_at === void 0) {
     context.addIssue({
       code: "custom",
@@ -25984,7 +26018,24 @@ var ApprovalPackageSchema = external_exports.object({
     scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)),
     decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)),
     task_ids: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/))
-  }).strict()
+  }).strict(),
+  review_summary: external_exports.object({
+    language: external_exports.enum(["zh-CN", "en-US"]),
+    title: external_exports.string().trim().min(1),
+    approval_prompt: external_exports.string().trim().min(1),
+    machine_receipt_note: external_exports.string().trim().min(1),
+    artifact_root: external_exports.string().trim().min(1).optional(),
+    artifacts: external_exports.array(external_exports.object({
+      label: external_exports.string().trim().min(1),
+      path: external_exports.string().trim().min(1),
+      relative_path: external_exports.string().trim().min(1).optional(),
+      description: external_exports.string().trim().min(1).optional()
+    }).strict()).min(1),
+    sections: external_exports.array(external_exports.object({
+      title: external_exports.string().trim().min(1),
+      items: external_exports.array(external_exports.string().trim().min(1)).min(1)
+    }).strict()).min(1)
+  }).strict().optional()
 }).strict();
 var DesignDecisionCoverageSchema = external_exports.object({
   id: external_exports.string().regex(/^D-\d{3,}$/),
@@ -26038,7 +26089,9 @@ var TaskDefinitionSchema = external_exports.object({
   scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).min(1),
   decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)).min(1),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).default([]),
+  adopted_commit: GitCommitSchema.optional(),
   acceptance_criteria: external_exports.array(external_exports.string().trim().min(1)).min(1),
+  validation_commands: external_exports.array(external_exports.string().trim().min(1)).default([]),
   consumes: external_exports.array(InterfaceContractSchema).default([]),
   produces: external_exports.array(InterfaceContractSchema).default([]),
   allowed_paths: external_exports.array(RepositoryRelativePathSchema).min(1)
@@ -26064,7 +26117,7 @@ var TaskDefinitionSchema = external_exports.object({
       message: "A Task cannot supersede itself"
     });
   }
-  for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"]) {
+  for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "validation_commands", "consumes", "produces"]) {
     if (new Set(task[field]).size !== task[field].length) {
       context.addIssue({
         code: "custom",
@@ -26072,6 +26125,44 @@ var TaskDefinitionSchema = external_exports.object({
         message: `Task ${field} values must be unique`
       });
     }
+  }
+});
+var ImplementerBlockerSchema = external_exports.object({
+  kind: external_exports.enum(["contract_conflict", "authority_conflict"]),
+  source_refs: external_exports.array(external_exports.string().trim().min(1)).min(1),
+  summary: external_exports.string().trim().min(1),
+  recommended_route: external_exports.enum(["plan.create", "requirements.clarify", "design.technical"])
+}).strict().superRefine((blocker, context) => {
+  if (blocker.kind === "contract_conflict" && blocker.recommended_route !== "plan.create") {
+    context.addIssue({
+      code: "custom",
+      path: ["recommended_route"],
+      message: "A contract conflict must route to plan.create"
+    });
+  }
+  if (blocker.kind === "authority_conflict" && blocker.recommended_route === "plan.create") {
+    context.addIssue({
+      code: "custom",
+      path: ["recommended_route"],
+      message: "An authority conflict must route to requirements.clarify or design.technical"
+    });
+  }
+});
+var ImplementerReportDocumentSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  task_id: external_exports.string().regex(/^T-\d{3,}$/),
+  execution_id: external_exports.string().min(1),
+  base_commit: GitCommitSchema,
+  brief_path: RepositoryRelativePathSchema,
+  brief_hash: Sha256Schema,
+  outcome: external_exports.enum(["implemented", "blocked"]),
+  blocker: ImplementerBlockerSchema.optional()
+}).strict().superRefine((report, context) => {
+  if (report.outcome === "blocked" && report.blocker === void 0) {
+    context.addIssue({ code: "custom", path: ["blocker"], message: "A blocked report requires a structured blocker" });
+  }
+  if (report.outcome === "implemented" && report.blocker !== void 0) {
+    context.addIssue({ code: "custom", path: ["blocker"], message: "An implemented report cannot declare a blocker" });
   }
 });
 var TaskAttemptSchema = external_exports.object({
@@ -26087,7 +26178,7 @@ var TaskAttemptSchema = external_exports.object({
   review_path: external_exports.string().min(1).optional(),
   review_hash: Sha256Schema.optional(),
   review_subject: ReviewSubjectSchema.optional(),
-  review_package_mode: external_exports.enum(["product", "scope_blocked"]).optional(),
+  review_package_mode: external_exports.enum(["product", "scope_blocked", "historical_attribution"]).optional(),
   review_attempts: external_exports.number().int().nonnegative(),
   started_at: TimestampSchema.optional(),
   suspended_at: TimestampSchema
@@ -26102,7 +26193,9 @@ var TaskRecordSchema = external_exports.object({
   scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).default([]),
   decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)).default([]),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).default([]),
+  adopted_commit: GitCommitSchema.optional(),
   acceptance_criteria: external_exports.array(external_exports.string().min(1)).default([]),
+  validation_commands: external_exports.array(external_exports.string().min(1)).default([]),
   consumes: external_exports.array(InterfaceContractSchema).default([]),
   produces: external_exports.array(InterfaceContractSchema).default([]),
   allowed_paths: external_exports.array(RepositoryRelativePathSchema).default([]),
@@ -26114,7 +26207,7 @@ var TaskRecordSchema = external_exports.object({
   report_path: external_exports.string().min(1).optional(),
   report_hash: Sha256Schema.optional(),
   review_subject: ReviewSubjectSchema.optional(),
-  review_package_mode: external_exports.enum(["product", "scope_blocked"]).optional(),
+  review_package_mode: external_exports.enum(["product", "scope_blocked", "historical_attribution"]).optional(),
   review_attempts: external_exports.number().int().nonnegative().default(0),
   attempts: external_exports.array(TaskAttemptSchema).default([]),
   started_at: TimestampSchema.optional(),
@@ -26502,10 +26595,11 @@ var KnowledgeEvolutionSchema = external_exports.object({
   if (["approved", "applied"].includes(evolution.status) && evolution.updates.length === 0) {
     context.addIssue({ code: "custom", path: ["updates"], message: "Knowledge updates are required" });
   }
-  if (["approved", "applied"].includes(evolution.status) && !evolution.review) {
-    context.addIssue({ code: "custom", path: ["review"], message: "Knowledge updates require independent review" });
+  const hasNormativeUpdates = evolution.updates.some((update) => update.authority === "normative");
+  if (["approved", "applied"].includes(evolution.status) && hasNormativeUpdates && !evolution.review) {
+    context.addIssue({ code: "custom", path: ["review"], message: "Normative knowledge updates require independent review" });
   }
-  if (evolution.updates.some((update) => update.authority === "normative") && !evolution.approval) {
+  if (hasNormativeUpdates && !evolution.approval) {
     context.addIssue({ code: "custom", path: ["approval"], message: "Normative knowledge updates require human approval" });
   }
   if (evolution.status === "applied" && !evolution.applied_at) {
@@ -26565,6 +26659,28 @@ var ChangeSnapshotSchema = external_exports.object({
     updates: []
   }),
   completed_actions: external_exports.array(ActionIdSchema).default([]),
+  finish_disposition: external_exports.object({
+    choice: external_exports.enum(["local_merge", "push", "keep"]),
+    status: external_exports.enum(["pending_external_action", "completed"]),
+    recorded_at: TimestampSchema,
+    pending_action: external_exports.string().min(1).nullable(),
+    result_ref: external_exports.string().min(1).optional(),
+    result_commit: GitCommitSchema.optional(),
+    completed_at: TimestampSchema.optional()
+  }).strict().superRefine((disposition, context) => {
+    if (disposition.status === "completed" && !disposition.completed_at) {
+      context.addIssue({ code: "custom", path: ["completed_at"], message: "A completed disposition must record its completion time" });
+    }
+    if (disposition.status === "completed" && disposition.pending_action !== null) {
+      context.addIssue({ code: "custom", path: ["pending_action"], message: "A completed disposition cannot retain a pending action" });
+    }
+    if (disposition.status === "pending_external_action" && !disposition.pending_action) {
+      context.addIssue({ code: "custom", path: ["pending_action"], message: "A pending disposition must describe the external action" });
+    }
+    if (disposition.choice === "keep" && disposition.status !== "completed") {
+      context.addIssue({ code: "custom", path: ["status"], message: "keep does not require an external action" });
+    }
+  }).optional(),
   finished_at: TimestampSchema.optional(),
   delivery_head: GitCommitSchema.optional(),
   based_on_change: ChangeIdSchema.optional(),
@@ -26601,6 +26717,13 @@ var ChangeSnapshotSchema = external_exports.object({
       message: "An archived change must record archived_at"
     });
   }
+  if (snapshot.finished_at !== void 0 && snapshot.finish_disposition?.status === "pending_external_action") {
+    context.addIssue({
+      code: "custom",
+      path: ["finished_at"],
+      message: "A Change cannot be finished while its external disposition is pending"
+    });
+  }
   if (snapshot.revisions.filter((revision) => revision.status === "open").length > 1) {
     context.addIssue({ code: "custom", path: ["revisions"], message: "Only one Revision may be open at a time" });
   }
@@ -26625,6 +26748,7 @@ var WorkspaceConfigSchema = external_exports.object({
 var ConfigSchema = external_exports.object({
   schema_version: external_exports.literal(1).default(1),
   default_profile: WorkflowProfileSchema.default("standard"),
+  artifact_language: external_exports.enum(["zh-CN", "en-US"]).default("zh-CN"),
   capabilities: external_exports.record(external_exports.string().min(1), CapabilityBindingSchema).default({}),
   workspace: WorkspaceConfigSchema.default({
     mode: "auto",
@@ -26666,6 +26790,7 @@ var SpecDocumentSchema = external_exports.object({
 }).strict();
 function validateSpec(markdown) {
   const lines = markdown.split(/\r?\n/);
+  const scanned = scanMarkdown(markdown);
   const issues = [];
   const drafts = [];
   let operation;
@@ -26693,6 +26818,8 @@ function validateSpec(markdown) {
   };
   lines.forEach((line, index) => {
     const lineNumber = index + 1;
+    if (scanned[index]?.inFence)
+      return;
     const operationMatch = /^##\s+(ADDED|MODIFIED|REMOVED|RENAMED) Requirements\s*$/.exec(line);
     if (operationMatch !== null) {
       flushRequirement();
@@ -26819,6 +26946,39 @@ function validateSpec(markdown) {
   }
   return { valid: true, data: schemaResult.data, issues: [] };
 }
+function parseSpec(markdown) {
+  const result = validateSpec(markdown);
+  if (result.valid)
+    return result.data;
+  throw new ProtocolValidationError("Invalid RockSpec spec", result.issues);
+}
+function parseSpecSource(markdown) {
+  const document = parseSpec(markdown);
+  const lines = markdown.split(/\r?\n/);
+  const scanned = scanMarkdown(markdown);
+  const requirementStarts = scanned.filter((line) => line.heading?.level === 3 && /^R-\d{3,}\s+Requirement:/.test(line.heading.title)).map((line) => ({ id: /^((?:R)-\d{3,})/.exec(line.heading.title)[1], startLine: line.index }));
+  const requirements = document.requirements.map((requirement) => {
+    const located = requirementStarts.find((candidate) => candidate.id === requirement.id);
+    if (!located)
+      throw new ProtocolValidationError(`Missing source span for ${requirement.id}`, []);
+    const endLine = scanned.find((line) => line.index > located.startLine && line.heading && line.heading.level <= 3)?.index ?? lines.length;
+    const scenarioStarts = scanned.filter((line) => line.index > located.startLine && line.index < endLine && line.heading?.level === 4).map((line) => ({ id: /^(S-\d{3,})\s+Scenario:/.exec(line.heading.title)?.[1], startLine: line.index })).filter((item) => Boolean(item.id));
+    const scenarios = requirement.scenarios.map((scenario) => {
+      const scenarioStart = scenarioStarts.find((candidate) => candidate.id === scenario.id);
+      if (!scenarioStart)
+        throw new ProtocolValidationError(`Missing source span for ${scenario.id}`, []);
+      const next = scenarioStarts.find((candidate) => candidate.startLine > scenarioStart.startLine);
+      return { id: scenario.id, span: { startLine: scenarioStart.startLine, endLine: next?.startLine ?? endLine } };
+    });
+    return {
+      id: requirement.id,
+      span: { startLine: located.startLine, endLine },
+      preambleSpan: { startLine: located.startLine, endLine: scenarios[0]?.span.startLine ?? endLine },
+      scenarios
+    };
+  });
+  return { document, lines, requirements };
+}
 
 // packages/protocol/dist/validators.js
 var TaskCommitSchema = external_exports.object({
@@ -26874,6 +27034,7 @@ var execFileAsync = promisify(execFile);
 var DEFAULT_CONFIG = {
   schema_version: 1,
   default_profile: "standard",
+  artifact_language: "zh-CN",
   max_review_rounds: 3,
   max_reconciliation_rounds: 2,
   environment_preflight: [],
@@ -27953,7 +28114,7 @@ function workflowAdvice(change, blocked, recovery = null) {
       }
       if (!change.finished_at) {
         return {
-          recommended: recommendation("finish", "Choose a platform-independent branch disposition"),
+          recommended: recommendation("finish", change.finish_disposition?.status === "pending_external_action" ? "Execute the recorded external disposition and confirm its target Ref and Commit" : "Choose a platform-independent branch disposition"),
           alternatives: [],
           allowed: ["finish", "validate"]
         };
@@ -28162,7 +28323,7 @@ var RockSpecEngine = class {
       try {
         await mkdir2(path3.dirname(changeDir), { recursive: true });
         await mkdir2(changeDir, { recursive: false });
-        await this.ensureTemplates(changeDir, createdSnapshot);
+        await this.ensureTemplates(changeDir, createdSnapshot, context.config.artifact_language);
         await this.refreshArtifacts(changeDir, createdSnapshot);
         await commitChangeMutation(changeDir, null, createdSnapshot, {
           schema_version: 1,
@@ -28241,10 +28402,10 @@ var RockSpecEngine = class {
         { id: "readiness", status: "passed", detail: "Readiness Review is PASS and covers the current Plan" },
         { id: "task_graph", status: "passed", detail: "Task dependencies and supersession form a runnable graph" },
         { id: "recovery", status: "passed", detail: "No unresolved Finding recovery blocks implementation" },
-        { id: "review_modes", status: "passed", detail: "Product and zero-Diff scope-blocked Task Review paths are available" },
+        { id: "review_modes", status: "passed", detail: "Product, historical-attribution, and zero-Diff scope-blocked Task Review paths are available" },
         ...environment.checks.length > 0 ? [{ id: "environment", status: "passed", detail: "Configured database, browser, credential, and custom probes passed" }] : []
       ],
-      review_modes: ["product", "scope_blocked"]
+      review_modes: ["product", "scope_blocked", "historical_attribution"]
     };
   }
   async preflightAcceptance(input = {}) {
@@ -28291,7 +28452,13 @@ var RockSpecEngine = class {
   async startExecution(input) {
     assertExecutionRoleAction(input.role, input.action);
     let started;
-    const result = await this.mutate(input.changeId, "execution.started", async (change) => {
+    const result = await this.mutate(input.changeId, "execution.started", async (change, changeDir, context) => {
+      if (input.role === "knowledge_reviewer" && input.action === "knowledge.evolve.review") {
+        const proposal = await this.loadKnowledgeProposal(context, changeDir, change);
+        if (!proposal.delta.updates.some((update) => update.authority === "normative")) {
+          throw new RockSpecError("KNOWLEDGE_REVIEW_NOT_REQUIRED", "Independent Knowledge Review is only required for normative updates", { authorities: [...new Set(proposal.delta.updates.map((update) => update.authority))] });
+        }
+      }
       const active = input.role === "acceptance_engineer" ? change.execution.registry.find((record2) => record2.role === input.role && record2.action === input.action && !record2.completed_at) : void 0;
       if (active) {
         throw new RockSpecError("EXECUTION_ALREADY_ACTIVE", `An active ${input.role} execution already exists for ${input.action}`, {
@@ -28310,6 +28477,75 @@ var RockSpecEngine = class {
           parent_execution_id: input.parentExecutionId
         });
       }
+      if ((input.role === "task_reviewer" || input.role === "delivery_reviewer") && !input.contextPackagePath) {
+        throw new RockSpecError("REVIEW_CONTEXT_REQUIRED", "Code Reviewer \u542F\u52A8\u65F6\u5FC5\u987B\u7ED1\u5B9A Engine \u751F\u6210\u7684\u51BB\u7ED3 Review Package", { role: input.role, action: input.action });
+      }
+      if (input.contextPackagePath === void 0 !== (input.contextPackageHash === void 0)) {
+        throw new RockSpecError("CONTEXT_PACKAGE_BINDING_INCOMPLETE", "Context package path and hash must be supplied together");
+      }
+      if (input.contextPackagePath && input.contextPackageHash) {
+        const absolute = path3.resolve(changeDir, input.contextPackagePath);
+        const relative = path3.relative(changeDir, absolute);
+        if (relative.startsWith("..") || path3.isAbsolute(relative) || !await exists(absolute)) {
+          throw new RockSpecError("CONTEXT_PACKAGE_NOT_FOUND", "Context package must be an existing file inside the Change", {
+            path: input.contextPackagePath
+          });
+        }
+        const resolvedChangeDir = await realpath2(changeDir);
+        const resolvedPackage = await realpath2(absolute);
+        const resolvedRelative = path3.relative(resolvedChangeDir, resolvedPackage);
+        if (resolvedRelative.startsWith("..") || path3.isAbsolute(resolvedRelative)) {
+          throw new RockSpecError("CONTEXT_PACKAGE_NOT_FOUND", "Context package symlinks must remain inside the Change", {
+            path: input.contextPackagePath
+          });
+        }
+        const actualHash = sha256(await readFile3(absolute));
+        if (actualHash !== input.contextPackageHash) {
+          throw new RockSpecError("CONTEXT_PACKAGE_HASH_MISMATCH", "Context package hash does not match its contents", {
+            path: input.contextPackagePath,
+            supplied_hash: input.contextPackageHash,
+            actual_hash: actualHash
+          });
+        }
+        const expectedPrefix = input.role === "task_reviewer" ? "runtime/reviews/task-" : input.role === "delivery_reviewer" ? "runtime/reviews/delivery-" : void 0;
+        if (expectedPrefix && !input.contextPackagePath.startsWith(expectedPrefix)) {
+          throw new RockSpecError("CONTEXT_PACKAGE_ROLE_MISMATCH", "Context package is not valid for the requested Reviewer role", {
+            role: input.role,
+            path: input.contextPackagePath,
+            expected_prefix: expectedPrefix
+          });
+        }
+        if (input.role === "task_reviewer") {
+          const taskId = change.execution.active_task;
+          const task = taskId ? change.tasks[taskId] : void 0;
+          if (!taskId || !task?.base_commit) {
+            throw new RockSpecError("REVIEW_CONTEXT_NOT_PREPARED", "Task Reviewer context requires an active Task with a frozen base");
+          }
+          const reviewHead = task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]);
+          const expectedPath = `runtime/reviews/task-${taskId}-${task.base_commit.slice(0, 7)}..${reviewHead.slice(0, 7)}.diff`;
+          if (input.contextPackagePath !== expectedPath) {
+            throw new RockSpecError("CONTEXT_PACKAGE_ROLE_MISMATCH", "Task Reviewer must bind the current Engine-generated Review Package", {
+              role: input.role,
+              path: input.contextPackagePath,
+              expected_path: expectedPath
+            });
+          }
+        }
+        if (input.role === "delivery_reviewer") {
+          if (!change.base_commit) {
+            throw new RockSpecError("REVIEW_CONTEXT_NOT_PREPARED", "Delivery Reviewer context requires a frozen Change base");
+          }
+          const head = await git(context.root, ["rev-parse", "HEAD"]);
+          const expectedPath = `runtime/reviews/delivery-${change.base_commit.slice(0, 7)}..${head.slice(0, 7)}.diff`;
+          if (input.contextPackagePath !== expectedPath) {
+            throw new RockSpecError("CONTEXT_PACKAGE_ROLE_MISMATCH", "Delivery Reviewer must bind the current Engine-generated Review Package", {
+              role: input.role,
+              path: input.contextPackagePath,
+              expected_path: expectedPath
+            });
+          }
+        }
+      }
       const id = randomUUID2();
       change.execution.registry.push({
         id,
@@ -28320,7 +28556,8 @@ var RockSpecEngine = class {
         ...input.hostModel ? { host_model: input.hostModel } : {},
         ...input.parentExecutionId ? { parent_execution_id: input.parentExecutionId } : {},
         ...input.contextPackagePath ? { context_package_path: input.contextPackagePath } : {},
-        ...input.contextPackageHash ? { context_package_hash: input.contextPackageHash } : {}
+        ...input.contextPackageHash ? { context_package_hash: input.contextPackageHash } : {},
+        ...input.contextPackagePath ? { context_package_verified: true } : {}
       });
       started = { id, role: input.role, action: input.action };
       return { execution_id: id, role: input.role, action: input.action };
@@ -28461,7 +28698,7 @@ var RockSpecEngine = class {
         case "plan.create":
           await requireArtifacts(changeDir, ["plan.md", "tasks.md", "tasks"]);
           await this.assertMaterialized(changeDir, ["plan.md", "tasks.md", "tasks"]);
-          await this.syncTasks(changeDir, change);
+          await this.syncTasks(changeDir, change, context.root);
           change.state = "READINESS_REVIEW";
           break;
         case "readiness.review":
@@ -28489,11 +28726,14 @@ var RockSpecEngine = class {
             });
           }
           if (task.review_package_mode === "scope_blocked") {
-            await this.assertTaskScopeBlockedState(context.root, task);
+            await this.assertTaskScopeBlockedState(context.root, changeDir, task);
+          } else if (task.adopted_commit) {
+            await this.assertHistoricalAttributionState(context.root, change, task);
           } else {
             await this.assertTaskProductState(context.root, task);
+            await this.assertTaskImplementedReport(changeDir, task);
           }
-          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), taskId, task.review_package_mode ?? "product", task.allowed_paths);
+          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]), taskId, task.review_package_mode ?? (task.adopted_commit ? "historical_attribution" : "product"), task.allowed_paths);
           if (task.review_subject && !sameReviewSubject(task.review_subject, reviewPackage.subject)) {
             throw new RockSpecError("STALE_REVIEW_PACKAGE", `Task ${taskId} changed after its Review Package was prepared`, {
               prepared: task.review_subject,
@@ -28689,7 +28929,7 @@ var RockSpecEngine = class {
   }
   async prepareApproval(input) {
     let prepared;
-    await this.mutate(input.changeId, `approval.${input.gate}.package.prepared`, async (change, changeDir) => {
+    await this.mutate(input.changeId, `approval.${input.gate}.package.prepared`, async (change, changeDir, context) => {
       this.assertApprovalState(change, input.gate);
       await this.assertApprovalPrerequisites(changeDir, change, input.gate);
       const hashes = await hashPaths(changeDir, approvalPaths(input.gate, change.prototype.required));
@@ -28707,12 +28947,21 @@ var RockSpecEngine = class {
         decision_ids: decisionIds,
         task_ids: taskIds
       };
+      const reviewSummary = await buildApprovalReviewSummary({
+        gate: input.gate,
+        change,
+        changeDir,
+        repositoryRoot: context.root,
+        language: context.config.artifact_language,
+        specFiles: (await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort()
+      });
       const document = ApprovalPackageSchema.parse({
         schema_version: 1,
         gate: input.gate,
         generated_at: this.timestamp(),
         ...hashes,
-        summary
+        summary,
+        review_summary: reviewSummary
       });
       const content = (0, import_yaml2.stringify)(document, { lineWidth: 0 });
       const relativePath = `runtime/approvals/${input.gate}-package.yaml`;
@@ -28724,7 +28973,8 @@ var RockSpecEngine = class {
         path: relativePath,
         hash: packageHash,
         ...hashes,
-        summary
+        summary,
+        review_summary: reviewSummary
       };
       return { gate: input.gate, path: relativePath, hash: packageHash };
     });
@@ -28883,7 +29133,7 @@ var RockSpecEngine = class {
     return this.statusFor(result.context, result.changeDir, result.change);
   }
   async promote(input) {
-    const result = await this.mutate(input.changeId, "change.promoted", async (change, changeDir) => {
+    const result = await this.mutate(input.changeId, "change.promoted", async (change, changeDir, context) => {
       const ranks = { lite: 0, standard: 1, strict: 2 };
       if (ranks[input.profile] <= ranks[change.profile]) {
         throw new RockSpecError("INVALID_PROMOTION", "Profiles can only be promoted upward", {
@@ -28903,7 +29153,7 @@ var RockSpecEngine = class {
       change.reviews = {};
       change.verification = { status: "pending" };
       resetUat(change);
-      await this.ensureTemplates(changeDir, change);
+      await this.ensureTemplates(changeDir, change, context.config.artifact_language);
       return { previous_profile: previousProfile, profile: input.profile };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
@@ -29333,11 +29583,12 @@ var RockSpecEngine = class {
   async validate(input = {}) {
     const context = await this.context();
     const located = await this.locateChange(context, input.changeId, true);
-    const errors = await this.validationErrors(context, located.changeDir, located.change, input.gate, input.strict ?? false);
+    const errors = input.artifactPath ? await this.artifactValidationErrors(located.changeDir, input.artifactPath) : await this.validationErrors(context, located.changeDir, located.change, input.gate, input.strict ?? false);
     const status = await this.statusFor(context, located.changeDir, located.change);
     return {
       valid: errors.length === 0,
       ...input.gate ? { gate: input.gate } : {},
+      ...input.artifactPath ? { artifact: input.artifactPath } : {},
       errors,
       warnings: [],
       status
@@ -29536,7 +29787,10 @@ var RockSpecEngine = class {
       }
       await this.assertNoUncommittedProductChanges(context.root);
       const suspendedAttempt = task.status === "suspended" ? task.attempts.at(-1) : void 0;
-      const baseCommit = suspendedAttempt?.base_commit ?? await git(context.root, ["rev-parse", "HEAD"]);
+      const baseCommit = suspendedAttempt?.base_commit ?? (task.adopted_commit ? await git(context.root, ["rev-parse", `${task.adopted_commit}^`]) : await git(context.root, ["rev-parse", "HEAD"]));
+      if (task.adopted_commit) {
+        await this.assertHistoricalAttributionState(context.root, change, task);
+      }
       if (suspendedAttempt) {
         const headCommit = await git(context.root, ["rev-parse", "HEAD"]);
         const mergeBase = await git(context.root, ["merge-base", baseCommit, headCommit]);
@@ -29575,7 +29829,8 @@ var RockSpecEngine = class {
         ...input.modelTier ? { model_tier: input.modelTier } : {},
         ...input.hostModel ? { host_model: input.hostModel } : {},
         context_package_path: briefPath,
-        context_package_hash: briefHash
+        context_package_hash: briefHash,
+        context_package_verified: true
       });
       change.execution.active_task = input.taskId;
       change.execution.active_execution = executionId;
@@ -29642,6 +29897,7 @@ var RockSpecEngine = class {
     })))) {
       return knowledgePackageFromReceipt(located.change.knowledge_evolution, sourceDigest);
     }
+    const reviewRequired = proposal.delta.updates.some((update) => update.authority === "normative");
     return {
       change_id: located.change.id,
       already_evolved: false,
@@ -29651,8 +29907,10 @@ var RockSpecEngine = class {
       delta_hash: proposal.deltaHash,
       baseline_hashes: proposal.baselineHashes,
       candidate_hashes: proposal.candidateHashes,
-      ...proposal.delta.outcome === "proposed" ? { review_path: "reviews/knowledge-review.md" } : {},
-      requires_human_approval: proposal.delta.updates.some((update) => update.authority === "normative")
+      review_required: reviewRequired,
+      ...reviewRequired ? { review_path: "reviews/knowledge-review.md" } : {},
+      requires_human_approval: reviewRequired,
+      semantic_warnings: proposal.semanticWarnings
     };
   }
   async prepareReviewPackage(input) {
@@ -29678,19 +29936,26 @@ var RockSpecEngine = class {
           throw new RockSpecError("REVIEW_PACKAGE_MODE_CONFLICT", "Review package mode cannot be both product and scope_blocked");
         }
         await this.assertTaskBriefFresh(changeDir, task);
+        if (scopeBlocked && task.adopted_commit) {
+          throw new RockSpecError("REVIEW_PACKAGE_MODE_CONFLICT", "Historical attribution Tasks cannot use scope_blocked Review mode");
+        }
         if (scopeBlocked)
-          await this.assertTaskScopeBlockedState(context.root, task);
-        else
+          await this.assertTaskScopeBlockedState(context.root, changeDir, task);
+        else if (task.adopted_commit)
+          await this.assertHistoricalAttributionState(context.root, change, task);
+        else {
           await this.assertTaskProductState(context.root, task);
+          await this.assertTaskImplementedReport(changeDir, task);
+        }
         if (!task.report_path) {
           throw new RockSpecError("IMPLEMENTER_REPORT_MISSING", `Task ${input.taskId} has no Implementer report path`);
         }
         await this.assertMaterialized(changeDir, [task.report_path]);
         task.report_hash = sha256(await readFile3(path3.join(changeDir, task.report_path)));
-        prepared = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), input.taskId, scopeBlocked ? "scope_blocked" : "product", task.allowed_paths);
+        prepared = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]), input.taskId, scopeBlocked ? "scope_blocked" : task.adopted_commit ? "historical_attribution" : "product", task.allowed_paths);
         task.review_subject = prepared.subject;
-        task.review_package_mode = scopeBlocked ? "scope_blocked" : "product";
-        prepared.mode = scopeBlocked ? "scope_blocked" : "product";
+        task.review_package_mode = scopeBlocked ? "scope_blocked" : task.adopted_commit ? "historical_attribution" : "product";
+        prepared.mode = task.review_package_mode;
       } else {
         if (change.state !== "FINAL_REVIEW") {
           throw new RockSpecError("ILLEGAL_ACTION", "Delivery Review package requires FINAL_REVIEW state", {
@@ -29725,16 +29990,26 @@ var RockSpecEngine = class {
         });
       }
       await this.assertTaskBriefFresh(changeDir, task);
-      const requestedSha = input.commitSha ?? await git(context.root, ["rev-parse", "HEAD"]);
+      const requestedSha = input.commitSha ?? task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]);
       const commitSha = await git(context.root, ["rev-parse", `${requestedSha}^{commit}`]);
       const headCommit = await git(context.root, ["rev-parse", "HEAD"]);
-      if (commitSha !== headCommit) {
+      if (task.adopted_commit && commitSha !== task.adopted_commit) {
+        throw new RockSpecError("ADOPTED_COMMIT_MISMATCH", `Task ${input.taskId} must complete against its adopted Commit`, {
+          task_id: input.taskId,
+          adopted_commit: task.adopted_commit,
+          requested_commit: commitSha
+        });
+      }
+      if (!task.adopted_commit && commitSha !== headCommit) {
         throw new RockSpecError("TASK_HEAD_MISMATCH", `Task ${input.taskId} must complete at the current HEAD`, {
           requested_commit: commitSha,
           current_head: headCommit
         });
       }
-      await this.assertTaskProductState(context.root, task);
+      if (task.adopted_commit)
+        await this.assertHistoricalAttributionState(context.root, change, task);
+      else
+        await this.assertTaskProductState(context.root, task);
       const duplicate = Object.values(change.tasks).find((candidate) => candidate.id !== input.taskId && candidate.commit_sha === commitSha);
       if (duplicate) {
         throw new RockSpecError("DUPLICATE_TASK_COMMIT", `Commit ${commitSha} already belongs to ${duplicate.id}`, {
@@ -29752,7 +30027,7 @@ var RockSpecEngine = class {
       }
       if (!task.base_commit)
         throw new RockSpecError("TASK_BASE_MISSING", `Task ${input.taskId} has no base commit`);
-      const currentPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, commitSha, input.taskId, "product", task.allowed_paths);
+      const currentPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, commitSha, input.taskId, task.adopted_commit ? "historical_attribution" : "product", task.allowed_paths);
       if (!sameReviewSubject(review.subject, currentPackage.subject)) {
         throw new RockSpecError("STALE_REVIEW", `Task ${input.taskId} Review does not cover the final Diff`, {
           reviewed_subject: review.subject,
@@ -29770,7 +30045,21 @@ var RockSpecEngine = class {
           current_hash: reportHash
         });
       }
-      await this.assertFreshEvidence(context.root, change, { taskId: input.taskId, commit: commitSha }, true);
+      const evidenceCommit = task.adopted_commit ? headCommit : commitSha;
+      if (task.adopted_commit) {
+        await this.assertFreshTaskScenarioEvidence(context.root, change, task, evidenceCommit);
+      } else {
+        await this.assertFreshEvidence(context.root, change, { taskId: input.taskId, commit: evidenceCommit }, true);
+      }
+      const coveredCommands = new Set(change.evidence.filter((item) => item.task_id === input.taskId && item.commit === evidenceCommit && item.source === "executed" && item.exit_code === 0).map((item) => item.command.trim()));
+      const missingValidationCommands = task.validation_commands.filter((command) => !coveredCommands.has(command.trim()));
+      if (missingValidationCommands.length > 0) {
+        throw new RockSpecError("TASK_VALIDATION_EVIDENCE_MISSING", `Task ${input.taskId} \u7F3A\u5C11\u58F0\u660E\u9A8C\u8BC1\u547D\u4EE4\u7684\u65B0\u9C9C\u6210\u529F\u8BC1\u636E`, {
+          task_id: input.taskId,
+          commit: evidenceCommit,
+          missing_commands: missingValidationCommands
+        });
+      }
       task.status = "completed";
       task.commit_sha = commitSha;
       task.completed_at = this.timestamp();
@@ -29859,8 +30148,77 @@ var RockSpecEngine = class {
         });
       }
       await this.assertDeliveryHeadAncestor(context.root, deliveryHead, currentCommit);
-      change.finished_at = this.timestamp();
-      return { disposition: input.disposition ?? "keep", commit: deliveryHead, current_commit: currentCommit };
+      const disposition = input.disposition ?? change.finish_disposition?.choice ?? "keep";
+      if (change.finish_disposition && change.finish_disposition.choice !== disposition) {
+        throw new RockSpecError("FINISH_DISPOSITION_MISMATCH", "\u5DF2\u8BB0\u5F55\u7684\u5904\u7F6E\u9009\u62E9\u4E0D\u80FD\u88AB\u9759\u9ED8\u66FF\u6362", {
+          recorded: change.finish_disposition.choice,
+          supplied: disposition
+        });
+      }
+      const now = this.timestamp();
+      if (disposition === "keep") {
+        if (input.executed || input.resultRef || input.resultCommit) {
+          throw new RockSpecError("FINISH_CONFIRMATION_NOT_APPLICABLE", "keep \u4E0D\u9700\u8981\u5916\u90E8\u6267\u884C\u786E\u8BA4");
+        }
+        change.finish_disposition = {
+          choice: disposition,
+          status: "completed",
+          recorded_at: change.finish_disposition?.recorded_at ?? now,
+          pending_action: null,
+          completed_at: change.finish_disposition?.completed_at ?? now
+        };
+        change.finished_at ??= now;
+        return { disposition, disposition_status: "completed", commit: deliveryHead, current_commit: currentCommit };
+      }
+      if (!input.executed) {
+        if (input.resultRef || input.resultCommit) {
+          throw new RockSpecError("FINISH_CONFIRMATION_INCOMPLETE", "result-ref/result-commit \u53EA\u80FD\u4E0E --executed \u4E00\u8D77\u4F7F\u7528");
+        }
+        change.finish_disposition = {
+          choice: disposition,
+          status: "pending_external_action",
+          recorded_at: change.finish_disposition?.recorded_at ?? now,
+          pending_action: disposition === "push" ? `\u5C06\u51BB\u7ED3\u4EA4\u4ED8 Commit ${deliveryHead} \u63A8\u9001\u5230\u7528\u6237\u9009\u62E9\u7684\u8FDC\u7AEF Ref\uFF0C\u7136\u540E\u56DE\u586B Ref \u4E0E Commit` : `\u5C06\u51BB\u7ED3\u4EA4\u4ED8 Commit ${deliveryHead} \u5408\u5E76\u5230\u7528\u6237\u9009\u62E9\u7684\u672C\u5730\u76EE\u6807 Ref\uFF0C\u7136\u540E\u56DE\u586B Ref \u4E0E\u5408\u5E76\u7ED3\u679C Commit`
+        };
+        delete change.finished_at;
+        return { disposition, disposition_status: "pending_external_action", commit: deliveryHead, current_commit: currentCommit };
+      }
+      if (change.finish_disposition?.status !== "pending_external_action") {
+        throw new RockSpecError("FINISH_DISPOSITION_NOT_PENDING", "\u5916\u90E8\u5904\u7F6E\u5FC5\u987B\u5148\u8BB0\u5F55\u9009\u62E9\uFF0C\u518D\u786E\u8BA4\u6267\u884C\u7ED3\u679C", {
+          disposition
+        });
+      }
+      if (!input.resultRef || !input.resultCommit) {
+        throw new RockSpecError("FINISH_CONFIRMATION_INCOMPLETE", "\u786E\u8BA4\u5916\u90E8\u5904\u7F6E\u9700\u8981 --result-ref \u548C --result-commit");
+      }
+      const resultCommit = await git(context.root, ["rev-parse", `${input.resultCommit}^{commit}`]);
+      if (disposition === "push" && resultCommit !== deliveryHead) {
+        throw new RockSpecError("PUSH_RESULT_MISMATCH", "Push \u786E\u8BA4\u5FC5\u987B\u7ED1\u5B9A\u51BB\u7ED3\u4EA4\u4ED8 Commit", {
+          delivery_head: deliveryHead,
+          result_commit: resultCommit
+        });
+      }
+      if (disposition === "local_merge") {
+        await this.assertDeliveryHeadAncestor(context.root, deliveryHead, resultCommit);
+      }
+      change.finish_disposition = {
+        choice: disposition,
+        status: "completed",
+        recorded_at: change.finish_disposition.recorded_at,
+        pending_action: null,
+        result_ref: input.resultRef,
+        result_commit: resultCommit,
+        completed_at: now
+      };
+      change.finished_at = now;
+      return {
+        disposition,
+        disposition_status: "completed",
+        commit: deliveryHead,
+        current_commit: currentCommit,
+        result_ref: input.resultRef,
+        result_commit: resultCommit
+      };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
   }
@@ -29993,51 +30351,56 @@ var RockSpecEngine = class {
       change.knowledge_evolution = receipt2;
       return;
     }
-    const reviewPath = "reviews/knowledge-review.md";
-    const absoluteReviewPath = path3.join(changeDir, reviewPath);
-    if (!await exists(absoluteReviewPath)) {
-      throw new RockSpecError("MISSING_ARTIFACT", `Required artifact ${reviewPath} does not exist`, { path: reviewPath });
-    }
-    const reviewContent = await readFile3(absoluteReviewPath, "utf8");
-    const parsedReview = KnowledgeReviewDocumentSchema.safeParse(parseFrontmatter(reviewContent, reviewPath));
-    if (!parsedReview.success) {
-      throw new RockSpecError("INVALID_KNOWLEDGE_REVIEW", "Knowledge Review metadata is invalid", {
-        path: reviewPath,
-        issues: parsedReview.error.issues
-      });
-    }
-    const review = parsedReview.data;
-    this.assertRegisteredExecution(change, review.reviewer_execution_id, "knowledge_reviewer", "knowledge.evolve.review");
-    const expectedSubject = {
-      source_digest: sourceDigest,
-      delta_hash: proposal.deltaHash,
-      baseline_hashes: proposal.baselineHashes,
-      candidate_hashes: proposal.candidateHashes
-    };
-    if (!sameJson(review.subject, expectedSubject)) {
-      throw new RockSpecError("STALE_KNOWLEDGE_REVIEW", "Knowledge Review does not cover the current Delta and candidates", {
-        reviewed_subject: review.subject,
-        current_subject: expectedSubject
-      });
-    }
-    if (review.reviewer_execution_id === proposal.delta.author_execution_id) {
-      throw new RockSpecError("REVIEWER_NOT_INDEPENDENT", "Knowledge Reviewer must be independent from the Delta author");
-    }
-    if (review.verdict !== "PASS") {
-      throw new RockSpecError("KNOWLEDGE_REVIEW_FAILED", "Resolve the Knowledge Review Findings before completion", {
-        verdict: review.verdict,
-        finding_ids: review.findings.filter((finding) => finding.status === "open").map((finding) => finding.id)
-      });
+    const reviewRequired = proposal.delta.updates.some((update) => update.authority === "normative");
+    let reviewReceipt;
+    if (reviewRequired) {
+      const reviewPath = "reviews/knowledge-review.md";
+      const absoluteReviewPath = path3.join(changeDir, reviewPath);
+      if (!await exists(absoluteReviewPath)) {
+        throw new RockSpecError("MISSING_ARTIFACT", `Required artifact ${reviewPath} does not exist`, { path: reviewPath });
+      }
+      const reviewContent = await readFile3(absoluteReviewPath, "utf8");
+      const parsedReview = KnowledgeReviewDocumentSchema.safeParse(parseFrontmatter(reviewContent, reviewPath));
+      if (!parsedReview.success) {
+        throw new RockSpecError("INVALID_KNOWLEDGE_REVIEW", "Knowledge Review metadata is invalid", {
+          path: reviewPath,
+          issues: parsedReview.error.issues
+        });
+      }
+      const review = parsedReview.data;
+      this.assertRegisteredExecution(change, review.reviewer_execution_id, "knowledge_reviewer", "knowledge.evolve.review");
+      const expectedSubject = {
+        source_digest: sourceDigest,
+        delta_hash: proposal.deltaHash,
+        baseline_hashes: proposal.baselineHashes,
+        candidate_hashes: proposal.candidateHashes
+      };
+      if (!sameJson(review.subject, expectedSubject)) {
+        throw new RockSpecError("STALE_KNOWLEDGE_REVIEW", "Knowledge Review does not cover the current Delta and candidates", {
+          reviewed_subject: review.subject,
+          current_subject: expectedSubject
+        });
+      }
+      if (review.reviewer_execution_id === proposal.delta.author_execution_id) {
+        throw new RockSpecError("REVIEWER_NOT_INDEPENDENT", "Knowledge Reviewer must be independent from the Delta author");
+      }
+      if (review.verdict !== "PASS") {
+        throw new RockSpecError("KNOWLEDGE_REVIEW_FAILED", "Resolve the Knowledge Review Findings before completion", {
+          verdict: review.verdict,
+          finding_ids: review.findings.filter((finding) => finding.status === "open").map((finding) => finding.id)
+        });
+      }
+      reviewReceipt = {
+        reviewer_execution_id: review.reviewer_execution_id,
+        report_path: reviewPath,
+        report_hash: sha256(reviewContent)
+      };
     }
     const receipt = KnowledgeEvolutionSchema.parse({
       ...baseReceipt,
       status: "approved",
       updates: proposal.updates,
-      review: {
-        reviewer_execution_id: review.reviewer_execution_id,
-        report_path: reviewPath,
-        report_hash: sha256(reviewContent)
-      },
+      ...reviewReceipt ? { review: reviewReceipt } : {},
       ...proposal.delta.approval ? { approval: proposal.delta.approval } : {}
     });
     await atomicWrite(path3.join(changeDir, "knowledge-evolution.yaml"), (0, import_yaml2.stringify)(receipt, { lineWidth: 0 }));
@@ -30064,6 +30427,24 @@ var RockSpecEngine = class {
         actual_change_id: delta.change_id
       });
     }
+    for (const update of delta.updates) {
+      for (const source of update.sources) {
+        const sourcePath = source.split("#", 1)[0]?.trim();
+        if (!sourcePath || path3.isAbsolute(sourcePath) || sourcePath.includes("\\") || sourcePath.split("/").includes("..")) {
+          throw new RockSpecError("INVALID_KNOWLEDGE_SOURCE", `Knowledge source ${source} must reference a Change-relative artifact`, {
+            target: update.target,
+            source
+          });
+        }
+        if (!await exists(path3.join(changeDir, sourcePath))) {
+          throw new RockSpecError("KNOWLEDGE_SOURCE_MISSING", `Knowledge source artifact ${sourcePath} does not exist`, {
+            target: update.target,
+            source,
+            path: sourcePath
+          });
+        }
+      }
+    }
     const candidateRoot = path3.join(changeDir, "knowledge", "updates");
     const candidateFiles = await exists(candidateRoot) ? (await walkFiles(candidateRoot)).map((file2) => path3.relative(candidateRoot, file2)).sort() : [];
     const declaredTargets = delta.updates.map((update) => update.target).sort();
@@ -30075,6 +30456,7 @@ var RockSpecEngine = class {
     }
     const candidateHashes = {};
     const baselineHashes = {};
+    const semanticWarnings = [];
     const updates = [];
     for (const update of delta.updates) {
       const candidatePath = path3.join(candidateRoot, update.target);
@@ -30098,6 +30480,19 @@ var RockSpecEngine = class {
       }
       const beforeDigest = baselineExists ? sha256(await readFile3(baselinePath)) : null;
       const afterDigest = sha256(candidateContent);
+      if (update.authority === "derived") {
+        const beforeMarkers = baselineExists ? modalMarkers(await readFile3(baselinePath, "utf8")) : [];
+        const afterMarkers = modalMarkers(candidateContent.toString("utf8"));
+        if (!sameJson(beforeMarkers, afterMarkers) && (beforeMarkers.length > 0 || afterMarkers.length > 0)) {
+          semanticWarnings.push({
+            code: "POSSIBLE_NORMATIVE_MODAL_CHANGE",
+            target: update.target,
+            message: "\u5019\u9009\u4E2D\u7684\u4E49\u52A1\u5F3A\u5EA6\u8BCD\u53EF\u80FD\u53D1\u751F\u53D8\u5316\uFF1B\u8BF7\u786E\u8BA4\u8FD9\u53EA\u662F\u65E2\u6709\u51B3\u7B56\u7684\u7B49\u4E49\u6D3E\u751F\uFF0C\u5426\u5219\u5E94\u6539\u4E3A normative\u3002",
+            before_markers: beforeMarkers,
+            after_markers: afterMarkers
+          });
+        }
+      }
       baselineHashes[update.target] = beforeDigest;
       candidateHashes[update.target] = afterDigest;
       updates.push({ ...update, before_digest: beforeDigest, after_digest: afterDigest });
@@ -30107,6 +30502,7 @@ var RockSpecEngine = class {
       deltaHash: sha256(deltaContent),
       baselineHashes: Object.fromEntries(Object.entries(baselineHashes).sort(([left], [right]) => left.localeCompare(right))),
       candidateHashes: Object.fromEntries(Object.entries(candidateHashes).sort(([left], [right]) => left.localeCompare(right))),
+      semanticWarnings,
       updates
     };
   }
@@ -30189,7 +30585,7 @@ ${hashed.aggregate_hash}
         const stagedTargetExists = await exists(stagedTarget);
         const actualBefore = stagedTargetExists ? sha256(await readFile3(stagedTarget)) : null;
         if (actualBefore !== update.before_digest) {
-          throw new RockSpecError("KNOWLEDGE_BASELINE_DIVERGED", `Knowledge target ${update.target} changed after Review`, {
+          throw new RockSpecError("KNOWLEDGE_BASELINE_DIVERGED", `Knowledge target ${update.target} changed after validation`, {
             target: update.target,
             reviewed_digest: update.before_digest,
             current_digest: actualBefore
@@ -30197,7 +30593,7 @@ ${hashed.aggregate_hash}
         }
         const candidate = path3.join(changeDir, "knowledge", "updates", update.target);
         if (!await exists(candidate) || sha256(await readFile3(candidate)) !== update.after_digest) {
-          throw new RockSpecError("KNOWLEDGE_CANDIDATE_DIVERGED", `Knowledge candidate ${update.target} changed after Review`, {
+          throw new RockSpecError("KNOWLEDGE_CANDIDATE_DIVERGED", `Knowledge candidate ${update.target} changed after validation`, {
             target: update.target
           });
         }
@@ -30547,6 +30943,40 @@ ${hashed.aggregate_hash}
       }
     }
     return deduplicateBlocks(errors);
+  }
+  async artifactValidationErrors(changeDir, artifactPath) {
+    const absolute = path3.resolve(changeDir, artifactPath);
+    const relative = path3.relative(changeDir, absolute);
+    if (relative.startsWith("..") || path3.isAbsolute(relative) || !await exists(absolute)) {
+      return [{
+        code: "ARTIFACT_NOT_FOUND",
+        message: "\u5F85\u6821\u9A8C\u4EA7\u7269\u5FC5\u987B\u662F\u5F53\u524D Change \u4E2D\u5DF2\u5B58\u5728\u7684\u6587\u4EF6",
+        paths: [artifactPath]
+      }];
+    }
+    const normalized = relative.split(path3.sep).join("/");
+    const content = await readFile3(absolute, "utf8");
+    try {
+      if (/^specs\/[^/]+\.md$/.test(normalized)) {
+        const result2 = validateSpec(content);
+        return result2.valid ? [] : result2.issues.map((issue2) => validationIssue(normalized, issue2));
+      }
+      const document = parseFrontmatter(content, normalized);
+      const result = artifactSchemaResult(normalized, document);
+      if (!result) {
+        return [{
+          code: "ARTIFACT_SCHEMA_UNKNOWN",
+          message: "\u8BE5\u8DEF\u5F84\u6CA1\u6709\u53EF\u7528\u7684 RockSpec \u4EA7\u7269 Schema",
+          paths: [normalized]
+        }];
+      }
+      return result.success ? [] : result.error.issues.map((issue2) => validationIssue(normalized, issue2));
+    } catch (error51) {
+      if (error51 instanceof RockSpecError) {
+        return [{ code: error51.code, message: error51.message, paths: [normalized] }];
+      }
+      throw error51;
+    }
   }
   async assertNoStalePrerequisites(changeDir, change, action) {
     const required2 = [];
@@ -31023,6 +31453,13 @@ ${hashed.aggregate_hash}
         expected_action: action
       });
     }
+    if ((role === "task_reviewer" || role === "delivery_reviewer") && !execution.context_package_verified) {
+      throw new RockSpecError("REVIEW_CONTEXT_NOT_VERIFIED", "Code Review execution must bind the Engine-generated Review Package", {
+        execution_id: executionId,
+        role,
+        action
+      });
+    }
   }
   completeActionExecutions(change, action) {
     const completedAt = this.timestamp();
@@ -31033,13 +31470,17 @@ ${hashed.aggregate_hash}
       execution.outcome = "success";
     }
   }
-  async syncTasks(changeDir, change) {
+  async syncTasks(changeDir, change, root = path3.resolve(changeDir, "../../..")) {
     const taskFiles = (await walkFiles(path3.join(changeDir, "tasks"))).filter((file2) => /^T-[0-9]{3}\.md$/.test(path3.basename(file2))).sort();
     if (taskFiles.length === 0) {
       throw new RockSpecError("NO_TASKS", "The task plan must contain at least one tasks/T-xxx.md file");
     }
     const plan = parsePlanDefinition(await readFile3(path3.join(changeDir, "plan.md"), "utf8"), "plan.md");
     const recovery = change.revisions.find((revision) => revision.status === "open" && revision.mode === "implementation_recovery");
+    const recoveryFindingIds = /* @__PURE__ */ new Set([
+      ...recovery?.trigger?.finding_ids ?? [],
+      ...recovery?.amendments.flatMap((amendment) => amendment.trigger.finding_ids) ?? []
+    ]);
     const feedbackRevision = change.revisions.find((revision) => revision.status === "open" && revision.mode === "feedback_reopen");
     const historyProtected = recovery || feedbackRevision;
     const previousTasks = change.tasks;
@@ -31056,6 +31497,44 @@ ${hashed.aggregate_hash}
         });
       }
       const previous = previousTasks[id];
+      let adoptedCommit = definition.adopted_commit;
+      if (adoptedCommit) {
+        if (!recovery) {
+          throw new RockSpecError("ADOPTED_COMMIT_REQUIRES_RECOVERY", `Task ${id} can only adopt a historical Commit during implementation Recovery`, { task_id: id, adopted_commit: adoptedCommit });
+        }
+        if (definition.finding_ids.length === 0 || !definition.finding_ids.some((findingId) => recoveryFindingIds.has(findingId))) {
+          throw new RockSpecError("ADOPTED_COMMIT_FINDING_REQUIRED", `Task ${id} must bind its adopted Commit to a Recovery Finding`, {
+            task_id: id,
+            revision_id: recovery.id,
+            recovery_finding_ids: [...recoveryFindingIds].sort()
+          });
+        }
+        if (!change.base_commit)
+          throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
+        adoptedCommit = await git(root, ["rev-parse", `${adoptedCommit}^{commit}`]);
+        if (previous && previous.adopted_commit !== adoptedCommit) {
+          throw new RockSpecError("ADOPTED_TASK_MUST_BE_NEW", `Historical attribution Task ${id} must use a new Task ID`, {
+            task_id: id,
+            revision_id: recovery.id
+          });
+        }
+        const headCommit = await git(root, ["rev-parse", "HEAD"]);
+        const commits = (await git(root, ["rev-list", `${change.base_commit}..${headCommit}`])).split("\n").filter(Boolean);
+        if (!commits.includes(adoptedCommit)) {
+          throw new RockSpecError("ADOPTED_COMMIT_OUT_OF_RANGE", `Task ${id} adopted Commit must be inside the Change base..HEAD history`, { task_id: id, adopted_commit: adoptedCommit, base_commit: change.base_commit, head_commit: headCommit });
+        }
+        const duplicate = [
+          ...Object.values(previousTasks),
+          ...Object.values(next)
+        ].find((candidate) => candidate.id !== id && (candidate.commit_sha === adoptedCommit || candidate.adopted_commit === adoptedCommit));
+        if (duplicate) {
+          throw new RockSpecError("DUPLICATE_TASK_COMMIT", `Commit ${adoptedCommit} already belongs to ${duplicate.id}`, {
+            task_id: id,
+            other_task_id: duplicate.id,
+            commit_sha: adoptedCommit
+          });
+        }
+      }
       const activeRevision = recovery ?? feedbackRevision;
       const historicalSupersession = feedbackRevision !== void 0 && previous !== void 0 && sameTaskDefinition(previous, definition) && definition.supersedes.length > 0 && definition.supersedes.every((supersededId) => {
         const superseded = previousTasks[supersededId];
@@ -31089,11 +31568,15 @@ ${hashed.aggregate_hash}
         scenario_ids: definition.scenario_ids,
         decision_ids: definition.decision_ids,
         finding_ids: definition.finding_ids,
+        ...adoptedCommit ? { adopted_commit: adoptedCommit } : {},
         acceptance_criteria: definition.acceptance_criteria,
+        validation_commands: definition.validation_commands,
         consumes: definition.consumes,
         produces: definition.produces,
         allowed_paths: definition.allowed_paths
       };
+      if (!adoptedCommit)
+        delete next[id].adopted_commit;
     }
     if (immutableChanges.length > 0) {
       const completed = immutableChanges.filter((item) => item.status === "completed").map((item) => item.task_id);
@@ -31125,10 +31608,6 @@ ${hashed.aggregate_hash}
         return;
       }
       const superseders = /* @__PURE__ */ new Map();
-      const recoveryFindingIds = /* @__PURE__ */ new Set([
-        ...recovery.trigger?.finding_ids ?? [],
-        ...recovery.amendments.flatMap((amendment) => amendment.trigger.finding_ids)
-      ]);
       for (const task of Object.values(next)) {
         if (task.supersedes.length === 0)
           continue;
@@ -31284,6 +31763,7 @@ ${hashed.aggregate_hash}
         scenario_ids: missingScenarios
       });
     }
+    assertDesignStructure(content, design.decisions.map((decision) => decision.id));
   }
   async assertProposalReady(changeDir) {
     const relativePath = "proposal.md";
@@ -31606,10 +32086,17 @@ ${hashed.aggregate_hash}
       readFile3(path3.join(changeDir, "design.md"), "utf8"),
       readFile3(path3.join(changeDir, "plan.md"), "utf8")
     ]);
-    const design = parseDesignDefinition(designContent, "design.md");
+    parseDesignDefinition(designContent, "design.md");
     const decisionSections = task.decision_ids.map((decisionId) => extractMarkdownSectionById(designContent, decisionId, "Design Decision", "design.md"));
+    const designGlobalConstraints = extractOptionalMarkdownSection(designContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"]);
+    if (!designGlobalConstraints) {
+      throw new RockSpecError("DESIGN_GLOBAL_CONSTRAINTS_MISSING", "Design must declare an explicit Global Constraints section", {
+        path: "design.md",
+        accepted_headings: ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"]
+      });
+    }
     const globalConstraints = [
-      ["design.md", extractOptionalMarkdownSection(designContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"])],
+      ["design.md", designGlobalConstraints],
       ["plan.md", extractOptionalMarkdownSection(planContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"])]
     ].filter((item) => Boolean(item[1]));
     const dependencyFacts = collectTaskAncestors(task, change.tasks).map((dependency) => renderDependencyFact(dependency)).join("\n\n");
@@ -31629,9 +32116,18 @@ ${await readFile3(target, "utf8")}`);
       }
     }
     const manifest = await renderAuthorityManifest(changeDir, references, {
-      [taskPath]: [taskId],
+      [taskPath]: { ids: [taskId], projectionHash: sha256(taskContent) },
       ...specProjection.projections,
-      "design.md": task.decision_ids
+      "design.md": {
+        ids: [...task.decision_ids, "Global Constraints"],
+        projectionHash: sha256([...decisionSections, designGlobalConstraints].join("\n\n"))
+      },
+      ...globalConstraints.some(([source]) => source === "plan.md") ? {
+        "plan.md": {
+          ids: ["Global Constraints"],
+          projectionHash: sha256(globalConstraints.find(([source]) => source === "plan.md")[1])
+        }
+      } : {}
     });
     const sections = [
       `# ${taskId} Execution Brief`,
@@ -31641,6 +32137,11 @@ ${await readFile3(target, "utf8")}`);
 
 <!-- source: ${taskPath} -->
 ${taskContent}`,
+      ...task.adopted_commit ? [
+        `## Historical Attribution Mode
+
+This Task does not create a new product Commit. Independently review and attribute the fixed Diff \`${task.adopted_commit}^..${task.adopted_commit}\`, then run fresh executed validation at current HEAD for every projected Scenario before completion.`
+      ] : [],
       `## Relevant Approved Requirements
 
 ${specProjection.content}`,
@@ -31673,7 +32174,7 @@ ${manifest}`
     const remainingRequirements = new Set(requirementIds);
     const remainingScenarios = new Set(scenarioIds);
     const sections = [];
-    const projections = {};
+    const projectedBySource = /* @__PURE__ */ new Map();
     for (const relativePath of specFiles) {
       const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
       const result = validateSpec(content);
@@ -31683,13 +32184,29 @@ ${manifest}`
           issues: result.issues
         });
       }
-      for (const requirement of result.data.requirements) {
+      const source = parseSpecSource(content);
+      for (const requirement of source.document.requirements) {
         if (!remainingRequirements.has(requirement.id))
           continue;
         const selectedScenarios = requirement.scenarios.map((scenario) => scenario.id).filter((scenarioId) => remainingScenarios.has(scenarioId));
-        sections.push(`<!-- source: ${relativePath}; projection: ${[requirement.id, ...selectedScenarios].join(", ")} -->
-` + projectRequirementMarkdown(content, requirement.id, new Set(selectedScenarios), relativePath));
-        projections[relativePath] = [...projections[relativePath] ?? [], requirement.id, ...selectedScenarios];
+        const requirementSource = source.requirements.find((candidate) => candidate.id === requirement.id);
+        if (!requirementSource) {
+          throw new RockSpecError("TASK_AUTHORITY_PROJECTION_GAP", `Requirement ${requirement.id} has no source span`, {
+            path: relativePath,
+            requirement_id: requirement.id
+          });
+        }
+        const fragment = [
+          ...source.lines.slice(requirementSource.preambleSpan.startLine, requirementSource.preambleSpan.endLine),
+          ...requirementSource.scenarios.filter((scenario) => selectedScenarios.includes(scenario.id)).flatMap((scenario) => source.lines.slice(scenario.span.startLine, scenario.span.endLine))
+        ].join("\n").trimEnd();
+        const ids = [requirement.id, ...selectedScenarios];
+        sections.push(`<!-- source: ${relativePath}; projection: ${ids.join(", ")}; projection-hash: ${sha256(fragment)} -->
+${fragment}`);
+        const projected = projectedBySource.get(relativePath) ?? { ids: [], sections: [] };
+        projected.ids.push(...ids);
+        projected.sections.push(fragment);
+        projectedBySource.set(relativePath, projected);
         remainingRequirements.delete(requirement.id);
         for (const scenarioId of selectedScenarios)
           remainingScenarios.delete(scenarioId);
@@ -31701,11 +32218,24 @@ ${manifest}`
         scenario_ids: [...remainingScenarios].sort()
       });
     }
-    return { content: sections.join("\n\n"), projections };
+    return {
+      content: sections.join("\n\n"),
+      projections: Object.fromEntries([...projectedBySource].map(([relativePath, projection]) => [relativePath, {
+        ids: projection.ids,
+        projectionHash: sha256(projection.sections.join("\n\n"))
+      }]))
+    };
   }
-  async assertTaskScopeBlockedState(root, task) {
+  async assertTaskScopeBlockedState(root, changeDir, task) {
     if (!task.base_commit)
       throw new RockSpecError("TASK_BASE_MISSING", `Task ${task.id} has no recorded base commit`);
+    const report = await this.loadBoundImplementerReport(changeDir, task);
+    if (report.outcome !== "blocked" || !report.blocker) {
+      throw new RockSpecError("SCOPE_BLOCKED_REPORT_REQUIRED", `Task ${task.id} requires a structured blocked Implementer report`, {
+        task_id: task.id,
+        outcome: report.outcome
+      });
+    }
     await this.assertNoUncommittedProductChanges(root);
     const head = await git(root, ["rev-parse", "HEAD"]);
     const mergeBase = await git(root, ["merge-base", task.base_commit, head]);
@@ -31724,6 +32254,35 @@ ${manifest}`
         changed_paths: productPaths
       });
     }
+  }
+  async assertTaskImplementedReport(changeDir, task) {
+    const report = await this.loadBoundImplementerReport(changeDir, task);
+    if (report.outcome !== "implemented") {
+      throw new RockSpecError("IMPLEMENTED_REPORT_REQUIRED", `Task ${task.id} product Review requires an implemented outcome`, {
+        task_id: task.id,
+        outcome: report.outcome
+      });
+    }
+  }
+  async loadBoundImplementerReport(changeDir, task) {
+    if (!task.report_path || !await exists(path3.join(changeDir, task.report_path))) {
+      throw new RockSpecError("IMPLEMENTER_REPORT_MISSING", `Task ${task.id} has no Implementer report`);
+    }
+    const report = parseImplementerReport(await readFile3(path3.join(changeDir, task.report_path), "utf8"), task.report_path);
+    const binding = {
+      task_id: task.id,
+      execution_id: task.execution_id,
+      base_commit: task.base_commit,
+      brief_path: task.brief_path,
+      brief_hash: task.brief_hash
+    };
+    if (Object.entries(binding).some(([key, value]) => report[key] !== value)) {
+      throw new RockSpecError("IMPLEMENTER_REPORT_BINDING_MISMATCH", `Task ${task.id} Implementer report does not match its frozen execution`, {
+        task_id: task.id,
+        expected: binding
+      });
+    }
+    return report;
   }
   async assertDeliveryHeadAncestor(root, deliveryHead, currentCommit) {
     let mergeBase;
@@ -31778,6 +32337,33 @@ ${manifest}`
     const changedPaths = (await git(root, ["diff", "--name-only", "-z", task.base_commit, head])).split("\0").filter(Boolean).filter((candidate) => candidate !== ".rockspec" && !candidate.startsWith(".rockspec/"));
     if (changedPaths.length === 0) {
       throw new RockSpecError("EMPTY_TASK_DIFF", `Task ${task.id} has no product changes`);
+    }
+  }
+  async assertHistoricalAttributionState(root, change, task) {
+    if (!task.adopted_commit) {
+      throw new RockSpecError("ADOPTED_COMMIT_MISSING", `Task ${task.id} does not declare an adopted Commit`);
+    }
+    if (!change.base_commit)
+      throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
+    await this.assertNoUncommittedProductChanges(root);
+    const adoptedCommit = await git(root, ["rev-parse", `${task.adopted_commit}^{commit}`]);
+    const headCommit = await git(root, ["rev-parse", "HEAD"]);
+    const commits = (await git(root, ["rev-list", `${change.base_commit}..${headCommit}`])).split("\n").filter(Boolean);
+    if (!commits.includes(adoptedCommit)) {
+      throw new RockSpecError("ADOPTED_COMMIT_OUT_OF_RANGE", `Task ${task.id} adopted Commit must remain inside the Change base..HEAD history`, { task_id: task.id, adopted_commit: adoptedCommit, base_commit: change.base_commit, head_commit: headCommit });
+    }
+    const parentCommit = await git(root, ["rev-parse", `${adoptedCommit}^`]);
+    if (task.base_commit && task.base_commit !== parentCommit) {
+      throw new RockSpecError("ADOPTED_COMMIT_BASE_MISMATCH", `Task ${task.id} base must be the adopted Commit parent`, {
+        task_id: task.id,
+        adopted_commit: adoptedCommit,
+        expected_base_commit: parentCommit,
+        recorded_base_commit: task.base_commit
+      });
+    }
+    const changedPaths = (await git(root, ["diff", "--name-only", "-z", parentCommit, adoptedCommit])).split("\0").filter(Boolean).filter((candidate) => candidate !== ".rockspec" && !candidate.startsWith(".rockspec/"));
+    if (changedPaths.length === 0) {
+      throw new RockSpecError("EMPTY_TASK_DIFF", `Adopted Commit for Task ${task.id} has no product changes`);
     }
   }
   async writeReviewPackage(root, changeDir, change, kind, baseCommit, headCommit, taskId, mode = "product", plannedPaths = []) {
@@ -31869,13 +32455,35 @@ ${evidence || "No Task evidence is recorded."}`
     ].join("\n\n");
   }
   async composeDeliveryReviewerContext(changeDir, change) {
+    const specPaths = (await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort();
     const authorityPaths = [
       "proposal.md",
-      ...(await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort(),
+      ...specPaths,
       "design.md",
       "plan.md"
     ];
-    const manifest = await renderAuthorityManifest(changeDir, authorityPaths, {});
+    const requirementIds = new Set(Object.values(change.tasks).flatMap((task) => task.requirement_ids));
+    const scenarioIds = new Set(Object.values(change.tasks).flatMap((task) => task.scenario_ids));
+    const decisionIds = new Set(Object.values(change.tasks).flatMap((task) => task.decision_ids));
+    const coverage = {};
+    for (const specPath of specPaths) {
+      const spec = parseSpecSource(await readFile3(path3.join(changeDir, specPath), "utf8")).document;
+      const ids = spec.requirements.flatMap((requirement) => [
+        ...requirementIds.has(requirement.id) ? [requirement.id] : [],
+        ...requirement.scenarios.filter((scenario) => scenarioIds.has(scenario.id)).map((scenario) => scenario.id)
+      ]);
+      if (ids.length > 0)
+        coverage[specPath] = { ids };
+    }
+    const design = parseDesignDefinition(await readFile3(path3.join(changeDir, "design.md"), "utf8"), "design.md");
+    coverage["design.md"] = {
+      ids: [
+        ...design.decisions.filter((decision) => decisionIds.has(decision.id)).map((decision) => decision.id),
+        "Global Constraints"
+      ]
+    };
+    coverage["plan.md"] = { ids: Object.keys(change.tasks).sort() };
+    const manifest = await renderAuthorityManifest(changeDir, authorityPaths, coverage);
     const taskCoverage = Object.values(change.tasks).sort((left, right) => left.id.localeCompare(right.id)).map((task) => `- ${task.id}: ${task.status}; commit ${task.commit_sha ?? "pending"}; R/S/D ${[...task.requirement_ids, ...task.scenario_ids, ...task.decision_ids].join(", ")}`).join("\n");
     const evidence = change.evidence.map((item) => `- ${item.id}: ${item.action_id ?? item.task_id ?? "change"}; ${item.source} ${item.kind}; commit ${item.commit}; scenarios ${item.scenario_ids.join(", ") || "none"}`).join("\n");
     return [
@@ -31921,6 +32529,32 @@ ${evidence || "No evidence recorded."}`
           current_hash: currentHash
         });
       }
+    }
+  }
+  async assertFreshTaskScenarioEvidence(root, change, task, commit) {
+    const requiredScenarios = new Set(task.scenario_ids);
+    const evidence = [...change.evidence].reverse().find((record2) => record2.source === "executed" && record2.exit_code === 0 && record2.commit === commit && record2.task_id === task.id && [...requiredScenarios].every((scenarioId) => record2.scenario_ids.includes(scenarioId)));
+    if (!evidence) {
+      throw new RockSpecError("TASK_SCENARIO_EVIDENCE_MISSING", `Historical attribution Task ${task.id} requires fresh executed evidence covering all Task Scenarios at current HEAD`, { task_id: task.id, commit, required_scenario_ids: task.scenario_ids });
+    }
+    if (!evidence.report_path || !evidence.output_hash) {
+      throw new RockSpecError("INVALID_EXECUTED_EVIDENCE", "Executed evidence is missing its log binding", {
+        evidence_id: evidence.id
+      });
+    }
+    const reportPath = path3.join(root, ".rockspec", "changes", change.id, evidence.report_path);
+    if (!await exists(reportPath)) {
+      throw new RockSpecError("MISSING_EVIDENCE_LOG", `Evidence log ${evidence.report_path} does not exist`, {
+        evidence_id: evidence.id
+      });
+    }
+    const currentHash = sha256(await readFile3(reportPath));
+    if (currentHash !== evidence.output_hash) {
+      throw new RockSpecError("STALE_EVIDENCE_LOG", `Evidence log ${evidence.report_path} has changed`, {
+        evidence_id: evidence.id,
+        recorded_hash: evidence.output_hash,
+        current_hash: currentHash
+      });
     }
   }
   async findReusableEvidence(changeDir, change, expected) {
@@ -32023,10 +32657,10 @@ ${evidence || "No evidence recorded."}`
       });
     }
   }
-  async ensureTemplates(changeDir, change) {
+  async ensureTemplates(changeDir, change, language) {
     await Promise.all([
       mkdir2(path3.join(changeDir, "evidence"), { recursive: true }),
-      this.writeTemplate(changeDir, "brief.md", briefTemplate(change)),
+      this.writeTemplate(changeDir, "brief.md", briefTemplate(change, language)),
       this.writeTemplate(changeDir, "evidence/verification.yaml", (0, import_yaml2.stringify)({ schema_version: 1, evidence: [] }))
     ]);
     if (change.profile === "lite")
@@ -32038,18 +32672,18 @@ ${evidence || "No evidence recorded."}`
       mkdir2(path3.join(changeDir, "testing"), { recursive: true })
     ]);
     const templates = {
-      "proposal.md": "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# Proposal\n\n## Why\n\nTODO\n\n## What\n\nTODO\n",
-      "specs/change/spec.md": specTemplate(change),
-      "design.md": "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nTODO\n\n## Decisions\n\n### D-001\n\nTODO\n",
-      "plan.md": "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Implementation Plan\n\n## Approach\n\nTODO\n\n## Task DAG\n\n- T-001\n",
-      "tasks.md": "# Tasks\n\n- [ ] T-001\n",
-      "tasks/T-001.md": taskTemplate("T-001"),
-      "reviews/requirements-review.md": reviewTemplate("Requirements Review"),
-      "reviews/readiness-review.md": reviewTemplate("Readiness Review"),
-      "reviews/tasks/T-001-review.md": codeReviewTemplate("T-001 Task Review"),
-      "reviews/delivery-review.md": codeReviewTemplate("Delivery Review"),
-      "testing/test-plan.md": "# Acceptance Test Plan\n\nTODO\n",
-      "testing/test-report.md": acceptanceReviewTemplate()
+      "proposal.md": proposalTemplate(language),
+      "specs/change/spec.md": specTemplate(change, language),
+      "design.md": designTemplate(language),
+      "plan.md": planTemplate(language),
+      "tasks.md": language === "zh-CN" ? "# \u4EFB\u52A1\n\n- [ ] T-001\n" : "# Tasks\n\n- [ ] T-001\n",
+      "tasks/T-001.md": taskTemplate("T-001", language),
+      "reviews/requirements-review.md": reviewTemplate(language === "zh-CN" ? "\u9700\u6C42\u8BC4\u5BA1" : "Requirements Review", language),
+      "reviews/readiness-review.md": reviewTemplate(language === "zh-CN" ? "\u5B9E\u65BD\u5C31\u7EEA\u8BC4\u5BA1" : "Readiness Review", language),
+      "reviews/tasks/T-001-review.md": codeReviewTemplate(language === "zh-CN" ? "T-001 \u4EFB\u52A1\u8BC4\u5BA1" : "T-001 Task Review", language),
+      "reviews/delivery-review.md": codeReviewTemplate(language === "zh-CN" ? "\u4EA4\u4ED8\u8BC4\u5BA1" : "Delivery Review", language),
+      "testing/test-plan.md": language === "zh-CN" ? "# \u9A8C\u6536\u6D4B\u8BD5\u8BA1\u5212\n\nTODO\n" : "# Acceptance Test Plan\n\nTODO\n",
+      "testing/test-report.md": acceptanceReviewTemplate(language)
     };
     for (const [relativePath, content] of Object.entries(templates)) {
       await this.writeTemplate(changeDir, relativePath, content);
@@ -32062,7 +32696,7 @@ ${evidence || "No evidence recorded."}`
         "reviews/delivery-review.md"
       ]) {
         for (const strictPath of reviewPaths("strict", base)) {
-          const template = base.includes("/tasks/") || base.includes("delivery-review") ? codeReviewTemplate(path3.basename(strictPath, ".md")) : reviewTemplate(path3.basename(strictPath, ".md"));
+          const template = base.includes("/tasks/") || base.includes("delivery-review") ? codeReviewTemplate(path3.basename(strictPath, ".md"), language) : reviewTemplate(path3.basename(strictPath, ".md"), language);
           await this.writeTemplate(changeDir, strictPath, template);
         }
       }
@@ -32070,13 +32704,32 @@ ${evidence || "No evidence recorded."}`
     if (change.prototype.required) {
       await mkdir2(path3.join(changeDir, "prototype", "assets"), { recursive: true });
       await Promise.all([
-        this.writeTemplate(changeDir, "prototype/brief.md", "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\n  design_hash: TODO\nrequirement_ids: [R-001]\nscenario_ids: [S-001]\ndecision_ids: [D-001]\n---\n\n# Prototype Brief\n\nTODO\n"),
-        this.writeTemplate(changeDir, "prototype/design-system.md", "# Design System\n\nTODO\n"),
-        this.writeTemplate(changeDir, "prototype/prototype.md", "# Prototype\n\nTODO\n")
+        this.writeTemplate(changeDir, "prototype/brief.md", `---
+schema_version: 1
+inputs:
+  spec_hash: TODO
+  design_hash: TODO
+requirement_ids: [R-001]
+scenario_ids: [S-001]
+decision_ids: [D-001]
+---
+
+# ${language === "zh-CN" ? "\u539F\u578B\u8BF4\u660E" : "Prototype Brief"}
+
+TODO
+`),
+        this.writeTemplate(changeDir, "prototype/design-system.md", `# ${language === "zh-CN" ? "\u8BBE\u8BA1\u7CFB\u7EDF" : "Design System"}
+
+TODO
+`),
+        this.writeTemplate(changeDir, "prototype/prototype.md", `# ${language === "zh-CN" ? "\u4EA4\u4E92\u539F\u578B" : "Prototype"}
+
+TODO
+`)
       ]);
     }
     if (change.uat.policy === "required") {
-      await this.writeTemplate(changeDir, "testing/uat-report.md", uatReportTemplate());
+      await this.writeTemplate(changeDir, "testing/uat-report.md", uatReportTemplate(language));
     }
   }
   async writeTemplate(changeDir, relativePath, content) {
@@ -32156,13 +32809,264 @@ function knowledgePackageFromReceipt(receipt, sourceDigest) {
     ...receipt.delta_hash ? { delta_hash: receipt.delta_hash } : {},
     baseline_hashes: Object.fromEntries(receipt.updates.map((update) => [update.target, update.before_digest])),
     candidate_hashes: Object.fromEntries(receipt.updates.map((update) => [update.target, update.after_digest])),
-    requires_human_approval: receipt.updates.some((update) => update.authority === "normative")
+    review_required: receipt.updates.some((update) => update.authority === "normative"),
+    requires_human_approval: receipt.updates.some((update) => update.authority === "normative"),
+    semantic_warnings: []
   };
+}
+function modalMarkers(content) {
+  const matches = content.match(/必须|不得|只能|恰好|至少|至多|可以|\bmust\b|\bshall\b|\bshould\b|\bmay\b|\bexactly\b|\bat least\b|\bat most\b/giu) ?? [];
+  return [...new Set(matches.map((value) => value.toLocaleLowerCase()))].sort();
 }
 function reviewPaths(profile, relativePath) {
   if (profile !== "strict")
     return [relativePath];
   return [...strictReviewerPaths(relativePath), relativePath];
+}
+async function buildApprovalReviewSummary(input) {
+  const zh = input.language === "zh-CN";
+  const artifactRoot = path3.relative(input.repositoryRoot, input.changeDir);
+  const projectPath = (relativePath) => path3.relative(input.repositoryRoot, path3.join(input.changeDir, relativePath));
+  const artifact = (label, relativePath, description) => ({
+    label,
+    path: projectPath(relativePath),
+    relative_path: relativePath,
+    description
+  });
+  const none = zh ? "\u65E0" : "None";
+  const descriptions = zh ? {
+    proposal: "\u63CF\u8FF0\u9700\u6C42\u80CC\u666F\u3001\u76EE\u6807\u3001\u8303\u56F4\u3001\u975E\u76EE\u6807\u3001\u5047\u8BBE\u548C\u5F00\u653E\u95EE\u9898\u3002",
+    spec: "\u5B9A\u4E49\u5177\u6709\u7EA6\u675F\u529B\u7684 Requirement\u3001Scenario \u548C\u53EF\u9A8C\u6536\u884C\u4E3A\u3002",
+    requirementsReview: "\u8BB0\u5F55\u72EC\u7ACB\u9700\u6C42\u8BC4\u5BA1\u7ED3\u8BBA\u3001\u8986\u76D6\u68C0\u67E5\u548C Findings\u3002",
+    design: "\u8BB0\u5F55\u65B9\u6848\u6BD4\u8F83\u3001\u67B6\u6784\u51B3\u7B56\u3001\u6A21\u5757\u63A5\u53E3\u3001\u5931\u8D25\u3001\u5B89\u5168\u548C\u56DE\u6EDA\u8BBE\u8BA1\u3002",
+    prototypeBrief: "\u8BF4\u660E\u539F\u578B\u8986\u76D6\u7684\u7528\u6237\u3001\u9875\u9762\u3001\u6D41\u7A0B\u3001\u4F53\u9A8C\u76EE\u6807\u548C\u7EA6\u675F\u3002",
+    designSystem: "\u5B9A\u4E49\u539F\u578B\u91C7\u7528\u7684\u89C6\u89C9 Token\u3001\u7EC4\u4EF6\u72B6\u6001\u3001\u54CD\u5E94\u5F0F\u548C\u53EF\u8BBF\u95EE\u6027\u89C4\u5219\u3002",
+    prototype: "\u5448\u73B0\u5DF2\u6279\u51C6\u7684\u9875\u9762\u7ED3\u6784\u3001\u4EA4\u4E92\u6D41\u7A0B\u3001\u72B6\u6001\u548C\u54CD\u5E94\u5F0F\u884C\u4E3A\u3002",
+    plan: "\u63CF\u8FF0\u603B\u4F53\u5B9E\u65BD\u65B9\u5F0F\u3001Task DAG\u3001\u4EA4\u4ED8\u987A\u5E8F\u3001\u8DE8 Task \u5951\u7EA6\u548C\u9A8C\u8BC1\u7B56\u7565\u3002",
+    taskIndex: "\u6C47\u603B\u5168\u90E8 Task \u53CA\u5176\u5F53\u524D\u8BA1\u5212\u987A\u5E8F\u3002",
+    task: "\u5B9A\u4E49\u5355\u4E2A Task \u7684\u76EE\u6807\u3001\u6587\u4EF6\u8303\u56F4\u3001\u63A5\u53E3\u5951\u7EA6\u3001\u9A8C\u6536\u6807\u51C6\u548C\u9A8C\u8BC1\u6B65\u9AA4\u3002",
+    readinessReview: "\u8BB0\u5F55\u8BA1\u5212\u8986\u76D6\u3001\u4F9D\u8D56\u3001\u63A5\u53E3\u3001\u9A8C\u8BC1\u548C\u5B9E\u65BD\u5C31\u7EEA\u5EA6\u8BC4\u5BA1\u7ED3\u8BBA\u3002"
+  } : {
+    proposal: "Describes the problem, goals, scope, non-goals, assumptions, and open questions.",
+    spec: "Defines binding Requirements, Scenarios, and observable acceptance behavior.",
+    requirementsReview: "Records independent requirements review results, coverage checks, and Findings.",
+    design: "Records option analysis, architecture decisions, interfaces, failures, security, and rollback design.",
+    prototypeBrief: "Defines the users, pages, flows, experience goals, and constraints covered by the prototype.",
+    designSystem: "Defines visual tokens, component states, responsive behavior, and accessibility rules.",
+    prototype: "Presents the approved page structure, interaction flows, states, and responsive behavior.",
+    plan: "Describes the implementation approach, Task DAG, delivery order, contracts, and verification strategy.",
+    taskIndex: "Summarizes all Tasks and their planned order.",
+    task: "Defines one Task's goal, file scope, interface contracts, acceptance criteria, and verification steps.",
+    readinessReview: "Records the plan coverage, dependencies, interfaces, verification, and readiness verdict."
+  };
+  const common = {
+    language: input.language,
+    artifact_root: artifactRoot,
+    approval_prompt: zh ? `\u8BF7\u8F93\u5165\u201C\u6279\u51C6${input.gate === "spec" ? "\u9700\u6C42" : input.gate === "design" ? "\u8BBE\u8BA1" : "\u5B9E\u65BD"}\u201D\u7EE7\u7EED\uFF0C\u6216\u76F4\u63A5\u63D0\u51FA\u4FEE\u6539\u610F\u89C1\u3002` : `Reply with "Approve ${input.gate}" to continue, or provide revision feedback.`,
+    machine_receipt_note: zh ? "\u4E0B\u65B9 Hash \u4EC5\u7528\u4E8E\u673A\u5668\u4E00\u81F4\u6027\u6821\u9A8C\uFF0C\u65E0\u9700\u590D\u5236\u6216\u7406\u89E3\u3002" : "The Hash below is only a machine consistency receipt; you do not need to copy it."
+  };
+  if (input.gate === "spec") {
+    const proposal = await readFile3(path3.join(input.changeDir, "proposal.md"), "utf8");
+    const proposalDefinition = ProposalDefinitionSchema.parse(parseFrontmatter(proposal, "proposal.md"));
+    const requirements = [];
+    for (const relativePath of input.specFiles) {
+      const parsed = parseSpecSource(await readFile3(path3.join(input.changeDir, relativePath), "utf8"));
+      for (const requirement of parsed.document.requirements) {
+        requirements.push(`${requirement.id} ${requirement.title}: ${summarizeText(requirement.statement)}`);
+        for (const scenario of requirement.scenarios)
+          requirements.push(`  ${scenario.id} ${scenario.title}`);
+      }
+    }
+    const scopeItems = [
+      extractSummary(proposal, ["\u539F\u56E0\u4E0E\u4EF7\u503C", "Why"]),
+      extractSummary(proposal, ["\u884C\u4E3A\u53D8\u5316", "What", "Behavior Changes"]),
+      extractSummary(proposal, ["\u8303\u56F4", "Scope"]),
+      extractSummary(proposal, ["\u975E\u76EE\u6807", "Non-goals", "Non-goals and Scope"])
+    ].filter((item) => Boolean(item));
+    const assumptionAndQuestionItems = [
+      ...proposalDefinition.assumptions.map((assumption) => `${assumption.id}: ${assumption.description}; ${zh ? "\u4F9D\u636E" : "basis"}: ${assumption.basis}; ${zh ? "\u9519\u8BEF\u5F71\u54CD" : "impact if wrong"}: ${assumption.impact_if_wrong}`),
+      ...proposalDefinition.open_questions.map((question) => `${question.id} [${question.status}]: ${question.question}; ${zh ? "\u5F71\u54CD" : "impact"}: ${question.impact}`)
+    ];
+    return {
+      ...common,
+      title: zh ? "\u9700\u6C42\u5BA1\u6279" : "Requirements Approval",
+      artifacts: [
+        artifact(zh ? "\u9700\u6C42\u63D0\u6848" : "Proposal", "proposal.md", descriptions.proposal),
+        ...input.specFiles.map((file2) => artifact(zh ? "\u884C\u4E3A\u89C4\u683C" : "Behavior Spec", file2, descriptions.spec)),
+        ...reviewPaths(input.change.profile, "reviews/requirements-review.md").map((file2) => artifact(zh ? "\u9700\u6C42\u8BC4\u5BA1" : "Requirements Review", file2, descriptions.requirementsReview))
+      ],
+      sections: [
+        {
+          title: zh ? "\u5BA1\u9605\u95EE\u9898" : "Review Question",
+          items: [zh ? "\u662F\u5426\u6279\u51C6\u4EE5\u4E0B\u9700\u6C42\u8303\u56F4\u548C\u53EF\u9A8C\u6536\u884C\u4E3A\u8FDB\u5165\u6280\u672F\u8BBE\u8BA1\uFF1F" : "Approve the following scope and observable behavior for technical design?"]
+        },
+        { title: zh ? "\u76EE\u6807\u3001\u53D8\u66F4\u8303\u56F4\u4E0E\u975E\u76EE\u6807" : "Goals, Change Scope, and Non-goals", items: scopeItems.length > 0 ? scopeItems : [none] },
+        { title: zh ? "\u5173\u952E\u9700\u6C42\u4E0E\u9A8C\u6536\u884C\u4E3A" : "Key Requirements and Acceptance Behavior", items: requirements.length > 0 ? requirements : [none] },
+        {
+          title: zh ? "\u5047\u8BBE\u3001\u98CE\u9669\u4E0E\u5F85\u786E\u8BA4\u4E8B\u9879" : "Assumptions, Risks, and Open Items",
+          items: assumptionAndQuestionItems.length > 0 ? assumptionAndQuestionItems : [none]
+        }
+      ]
+    };
+  }
+  const designContent = await readFile3(path3.join(input.changeDir, "design.md"), "utf8");
+  const design = parseDesignDefinition(designContent, "design.md");
+  const decisionSections = design.decisions.map((decision) => ({
+    id: decision.id,
+    content: extractMarkdownSectionById(designContent, decision.id, "Design Decision", "design.md")
+  }));
+  if (input.gate === "design") {
+    const approachContent = extractOptionalMarkdownSection(designContent, ["\u603B\u4F53\u65B9\u6848\u6BD4\u8F83", "Approach Comparison"]);
+    const recommendation2 = extractLabeledMarkdownValue(approachContent, ["\u63A8\u8350\u7406\u7531", "Recommendation", "Recommendation Rationale"]);
+    const scopeItems = [
+      extractSummary(designContent, ["\u4E0A\u4E0B\u6587\u4E0E\u4ED3\u5E93\u4E8B\u5B9E", "\u4E0A\u4E0B\u6587", "Context and Repository Facts", "Context"]),
+      extractSummary(designContent, ["\u8303\u56F4\u9002\u914D\u4E0E\u62C6\u5206", "Scope Fit and Decomposition"]),
+      extractSummary(designContent, ["\u5168\u5C40\u7EA6\u675F", "Global Constraints"])
+    ].filter((item) => Boolean(item));
+    const decisionItems = decisionSections.map(({ id, content }) => {
+      const title = markdownHeadingTitle(content) ?? id;
+      const architectureContent = extractOptionalMarkdownSection(content, ["\u67B6\u6784\u51B3\u7B56", "Architecture Decision"]);
+      const decision = extractLabeledMarkdownValue(architectureContent, ["\u51B3\u7B56", "Decision"]) ?? (architectureContent ? summarizeText(architectureContent) : void 0) ?? none;
+      const rationale = extractLabeledMarkdownValue(architectureContent, ["\u7406\u7531", "Rationale", "Reason"]) ?? extractLabeledMarkdownValue(architectureContent, ["\u4ED3\u5E93\u8BC1\u636E", "Repository Evidence", "Evidence"]) ?? extractSummary(content, ["\u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669", "Trade-offs and Residual Risks"]) ?? none;
+      const modules = extractSummary(content, ["\u6A21\u5757\u4E0E\u804C\u8D23", "Modules and Responsibilities"]);
+      const interfaces = extractSummary(content, ["\u63A5\u53E3\u4E0E\u6570\u636E\u6D41", "Interfaces and Data Flow"]);
+      const impact = extractLabeledMarkdownValue(architectureContent, ["\u5F71\u54CD", "Impact"]) ?? ([modules, interfaces].filter(Boolean).join("; ") || none);
+      return [
+        title,
+        `${zh ? "\u51B3\u5B9A\uFF1A" : "Decision: "}${decision}`,
+        `${zh ? "\u7406\u7531\uFF1A" : "Rationale: "}${rationale}`,
+        `${zh ? "\u5F71\u54CD\uFF1A" : "Impact: "}${impact}`
+      ].join("\n");
+    });
+    const flowItems = decisionSections.map(({ id, content }) => {
+      const modules = extractSummary(content, ["\u6A21\u5757\u4E0E\u804C\u8D23", "Modules and Responsibilities"]);
+      const interfaces = extractSummary(content, ["\u63A5\u53E3\u4E0E\u6570\u636E\u6D41", "Interfaces and Data Flow"]);
+      return `${id}: ${[modules, interfaces].filter(Boolean).join("; ") || none}`;
+    });
+    const failureItems = decisionSections.map(({ id, content }) => {
+      const parts = [
+        extractSummary(content, ["\u5931\u8D25\u4E0E\u8FB9\u754C\u884C\u4E3A", "Failure and Boundary Behavior"]),
+        extractSummary(content, ["\u5B89\u5168\u4E0E\u9690\u79C1", "Security and Privacy"])
+      ].filter((item) => Boolean(item));
+      return `${id}: ${parts.join(" | ") || none}`;
+    });
+    const deliveryItems = decisionSections.map(({ id, content }) => {
+      const parts = [
+        extractSummary(content, ["\u517C\u5BB9\u3001\u8FC1\u79FB\u4E0E\u56DE\u6EDA", "Compatibility, Migration, and Rollback"]),
+        extractSummary(content, ["\u9A8C\u8BC1\u7B56\u7565", "Verification Strategy"])
+      ].filter((item) => Boolean(item));
+      return `${id}: ${parts.join(" | ") || none}`;
+    });
+    const riskItems = [
+      ...decisionSections.map(({ id, content }) => `${id}: ${extractSummary(content, ["\u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669", "Trade-offs and Residual Risks"]) ?? none}`),
+      extractSummary(designContent, ["\u672A\u89E3\u51B3\u98CE\u9669", "Unresolved Risks"]) ?? none
+    ];
+    const openItems = extractSummary(designContent, ["\u5F85\u51B3\u5B9A\u4E8B\u9879", "Open Items", "Open Decisions"]);
+    const artifacts = [artifact(zh ? "\u6280\u672F\u8BBE\u8BA1" : "Technical Design", "design.md", descriptions.design)];
+    if (input.change.prototype.required) {
+      for (const [label, relativePath, description] of [
+        [zh ? "\u539F\u578B\u8BF4\u660E" : "Prototype Brief", "prototype/brief.md", descriptions.prototypeBrief],
+        [zh ? "\u8BBE\u8BA1\u7CFB\u7EDF" : "Design System", "prototype/design-system.md", descriptions.designSystem],
+        [zh ? "\u4EA4\u4E92\u539F\u578B" : "Prototype", "prototype/prototype.md", descriptions.prototype]
+      ])
+        artifacts.push(artifact(label, relativePath, description));
+    }
+    return {
+      ...common,
+      title: zh ? "\u8BBE\u8BA1\u5BA1\u6279" : "Design Approval",
+      artifacts,
+      sections: [
+        {
+          title: zh ? "\u5BA1\u9605\u95EE\u9898" : "Review Question",
+          items: [zh ? "\u662F\u5426\u6279\u51C6\u4EE5\u4E0B\u6280\u672F\u8BBE\u8BA1\u8FDB\u5165\u5B9E\u65BD\u8BA1\u5212\uFF1F" : "Approve the following technical design for implementation planning?"]
+        },
+        {
+          title: zh ? "\u5BA1\u9605\u7ED3\u8BBA\u4E0E\u65B9\u6848\u63A8\u8350" : "Review Summary and Recommendation",
+          items: [recommendation2 ?? (approachContent ? summarizeText(approachContent) : none)]
+        },
+        { title: zh ? "\u53D8\u66F4\u8303\u56F4\u4E0E\u7EA6\u675F" : "Change Scope and Constraints", items: scopeItems.length > 0 ? scopeItems : [none] },
+        { title: zh ? "\u6838\u5FC3\u8BBE\u8BA1\u51B3\u7B56" : "Key Design Decisions", items: decisionItems.length > 0 ? decisionItems : [none] },
+        { title: zh ? "\u6A21\u5757\u3001\u63A5\u53E3\u4E0E\u6570\u636E\u6D41" : "Modules, Interfaces, and Data Flow", items: flowItems.length > 0 ? flowItems : [none] },
+        { title: zh ? "\u5931\u8D25\u3001\u5B89\u5168\u4E0E\u8FB9\u754C" : "Failure, Security, and Boundaries", items: failureItems.length > 0 ? failureItems : [none] },
+        { title: zh ? "\u517C\u5BB9\u3001\u56DE\u6EDA\u4E0E\u9A8C\u8BC1" : "Compatibility, Rollback, and Verification", items: deliveryItems.length > 0 ? deliveryItems : [none] },
+        {
+          title: zh ? "\u5269\u4F59\u98CE\u9669" : "Residual Risks",
+          items: riskItems
+        },
+        {
+          title: zh ? "\u5F85\u7528\u6237\u51B3\u5B9A" : "Open Decisions",
+          items: [openItems ?? none]
+        }
+      ]
+    };
+  }
+  const planContent = await readFile3(path3.join(input.changeDir, "plan.md"), "utf8");
+  const taskEntries = await Promise.all(Object.values(input.change.tasks).sort((left, right) => left.id.localeCompare(right.id)).map(async (task) => {
+    const relativePath = `tasks/${task.id}.md`;
+    const content = await readFile3(path3.join(input.changeDir, relativePath), "utf8");
+    return { task, relativePath, content };
+  }));
+  const dagItems = taskEntries.map(({ task }) => `${task.id} <- ${task.dependencies.length > 0 ? task.dependencies.join(", ") : zh ? "\u65E0\u524D\u7F6E\u4EFB\u52A1" : "no dependencies"}`);
+  const taskItems = taskEntries.map(({ task, content }) => {
+    const goal = extractSummary(content, ["\u76EE\u6807", "Goal"]);
+    const attribution = task.adopted_commit ? `; ${zh ? "\u5386\u53F2\u5F52\u5C5E Commit" : "historical attributed Commit"}: ${task.adopted_commit}` : "";
+    return `${task.id} ${task.title}: ${goal ?? none}; ${zh ? "\u5173\u952E\u8DEF\u5F84" : "key paths"}: ${task.allowed_paths.join(", ") || none}${attribution}`;
+  });
+  const contractItems = taskEntries.map(({ task }) => `${task.id}: consumes [${task.consumes.join(", ") || none}]; produces [${task.produces.join(", ") || none}]`);
+  const verificationItems = taskEntries.map(({ task, content }) => `${task.id}: ${extractSummary(content, ["TDD \u4E0E\u9A8C\u8BC1", "TDD and Verification", "Verification", "\u9A8C\u8BC1"]) ?? task.acceptance_criteria.join("; ")}`);
+  return {
+    ...common,
+    title: zh ? "\u5B9E\u65BD\u5BA1\u6279" : "Implementation Approval",
+    artifacts: [
+      artifact(zh ? "\u6280\u672F\u8BBE\u8BA1" : "Technical Design", "design.md", descriptions.design),
+      artifact(zh ? "\u5B9E\u65BD\u8BA1\u5212" : "Implementation Plan", "plan.md", descriptions.plan),
+      artifact(zh ? "\u4EFB\u52A1\u7D22\u5F15" : "Task Index", "tasks.md", descriptions.taskIndex),
+      ...taskEntries.map(({ task, relativePath }) => artifact(`${zh ? "\u4EFB\u52A1" : "Task"} ${task.id}`, relativePath, descriptions.task)),
+      ...reviewPaths(input.change.profile, "reviews/readiness-review.md").map((file2) => artifact(zh ? "\u5C31\u7EEA\u8BC4\u5BA1" : "Readiness Review", file2, descriptions.readinessReview))
+    ],
+    sections: [
+      {
+        title: zh ? "\u5BA1\u9605\u95EE\u9898" : "Review Question",
+        items: [zh ? "\u662F\u5426\u6279\u51C6\u4EE5\u4E0B\u5B9E\u65BD\u8303\u56F4\u3001\u4EFB\u52A1\u8FB9\u754C\u548C\u9A8C\u8BC1\u65B9\u5F0F\u8FDB\u5165\u5F00\u53D1\uFF1F" : "Approve the following implementation scope, task boundaries, and verification approach?"]
+      },
+      {
+        title: zh ? "\u5B9E\u65BD\u7ED3\u8BBA\u4E0E\u8303\u56F4" : "Implementation Summary and Scope",
+        items: [extractSummary(planContent, ["\u76EE\u6807\u4E0E\u65B9\u6CD5", "Approach", "Goal and Approach"]) ?? none]
+      },
+      { title: zh ? "Task DAG" : "Task DAG", items: dagItems },
+      { title: zh ? "\u4EFB\u52A1\u76EE\u6807\u4E0E\u5173\u952E\u6587\u4EF6" : "Task Goals and Key Files", items: taskItems },
+      { title: zh ? "\u4F9D\u8D56\u4E0E\u63A5\u53E3\u5951\u7EA6" : "Dependencies and Interface Contracts", items: contractItems },
+      { title: zh ? "\u9A8C\u8BC1\u4E0E\u9A8C\u6536" : "Verification and Acceptance", items: verificationItems },
+      {
+        title: zh ? "\u98CE\u9669\u4E0E\u5F85\u51B3\u5B9A\u4E8B\u9879" : "Risks and Open Items",
+        items: [extractSummary(planContent, ["\u98CE\u9669\u4E0E\u5F85\u51B3\u5B9A\u4E8B\u9879", "Risks and Open Items", "\u98CE\u9669", "Risks"]) ?? none]
+      }
+    ]
+  };
+}
+function extractLabeledMarkdownValue(content, labels) {
+  if (!content)
+    return void 0;
+  for (const line of content.split(/\r?\n/)) {
+    const normalized = line.replace(/^\s*[-*+]\s*/, "").trim();
+    for (const label of labels) {
+      const match = new RegExp(`^${escapeRegExp(label)}\\s*[:\uFF1A]\\s*(.+)$`, "i").exec(normalized);
+      if (match?.[1])
+        return summarizeText(match[1]);
+    }
+  }
+  return void 0;
+}
+function extractSummary(content, titles) {
+  const section = extractOptionalMarkdownSection(content, titles);
+  return section ? summarizeText(section) : void 0;
+}
+function summarizeText(value, maxLength = 420) {
+  const normalized = value.replace(/<!--[\s\S]*?-->/g, " ").replace(/^#{1,6}\s+/gm, "").replace(/^[-*+]\s+/gm, "").replace(/^\s*\|/gm, "").replace(/\|\s*$/gm, "").replace(/\s*\|\s*/g, " | ").replace(/\s+/g, " ").trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+}
+function markdownHeadingTitle(content) {
+  return scanMarkdown(content).find((line) => line.heading)?.heading?.title.trim();
 }
 function strictReviewerPaths(relativePath) {
   const suffix = relativePath.endsWith(".md") ? relativePath.slice(0, -3) : relativePath;
@@ -32179,35 +33083,37 @@ function collectTaskAncestors(task, tasks) {
     if (!dependency || ancestors.has(taskId))
       return;
     ancestors.set(taskId, dependency);
-    for (const parent of dependency.dependencies)
+    for (const parent of [...dependency.dependencies, ...dependency.supersedes])
       visit(parent);
   };
-  for (const dependency of task.dependencies)
+  for (const dependency of [...task.dependencies, ...task.supersedes])
     visit(dependency);
   return [...ancestors.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 function renderDependencyFact(task) {
   const contracts = task.produces.length > 0 ? task.produces.map((contract) => `  - ${contract}`).join("\n") : "  - None declared.";
+  const inheritedAttempt = task.attempts.at(-1);
+  const delivery = task.commit_sha ? ["- Relationship: Completed Dependency", `- Delivered Commit: ${task.commit_sha}`] : inheritedAttempt ? [
+    "- Relationship: Inherited Suspended Baseline",
+    `- Attempt Base: ${inheritedAttempt.base_commit}`,
+    `- Attempt Head: ${inheritedAttempt.head_commit}`,
+    `- Archived Brief: ${inheritedAttempt.brief_path}`,
+    `- Archived Report: ${inheritedAttempt.report_path ?? "not recorded"}`
+  ] : ["- Relationship: Planned Dependency", "- Delivered Commit: not recorded"];
   return [
     `### ${task.id}`,
     `- Status: ${task.status}`,
-    `- Delivered Commit: ${task.commit_sha ?? "not recorded"}`,
+    ...delivery,
     `- Planned paths: ${task.allowed_paths.join(", ") || "none"}`,
     "- Produced contracts:",
     contracts
   ].join("\n");
 }
-function markdownHeading(line) {
-  const match = /^(#{1,6})\s+(\S.*)\s*$/.exec(line);
-  return match ? { level: match[1].length, title: match[2] } : void 0;
-}
 function extractMarkdownSectionById(content, id, kind, relativePath) {
   const lines = content.split(/\r?\n/);
+  const scanned = scanMarkdown(content);
   const idPattern = new RegExp(`^${escapeRegExp(id)}(?:\\b|\\s|:)`);
-  const start = lines.findIndex((line) => {
-    const heading = markdownHeading(line);
-    return heading !== void 0 && idPattern.test(heading.title);
-  });
+  const start = scanned.find((line) => line.heading !== void 0 && idPattern.test(line.heading.title))?.index ?? -1;
   if (start < 0) {
     throw new RockSpecError("AUTHORITY_SECTION_MISSING", `${kind} ${id} has no Markdown section`, {
       path: relativePath,
@@ -32215,10 +33121,10 @@ function extractMarkdownSectionById(content, id, kind, relativePath) {
       kind
     });
   }
-  const level = markdownHeading(lines[start]).level;
+  const level = scanned[start].heading.level;
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
-    const heading = markdownHeading(lines[index]);
+    const heading = scanned[index]?.heading;
     if (heading && heading.level <= level) {
       end = index;
       break;
@@ -32228,16 +33134,14 @@ function extractMarkdownSectionById(content, id, kind, relativePath) {
 }
 function extractOptionalMarkdownSection(content, titles) {
   const lines = content.split(/\r?\n/);
-  const start = lines.findIndex((line) => {
-    const heading = markdownHeading(line);
-    return heading !== void 0 && titles.includes(heading.title.trim());
-  });
+  const scanned = scanMarkdown(content);
+  const start = scanned.find((line) => line.heading !== void 0 && titles.includes(line.heading.title.trim()))?.index ?? -1;
   if (start < 0)
     return void 0;
-  const level = markdownHeading(lines[start]).level;
+  const level = scanned[start].heading.level;
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
-    const heading = markdownHeading(lines[index]);
+    const heading = scanned[index]?.heading;
     if (heading && heading.level <= level) {
       end = index;
       break;
@@ -32245,29 +33149,56 @@ function extractOptionalMarkdownSection(content, titles) {
   }
   return lines.slice(start + 1, end).join("\n").trim();
 }
-function projectRequirementMarkdown(content, requirementId, scenarioIds, relativePath) {
-  const requirementSection = extractMarkdownSectionById(content, requirementId, "Requirement", relativePath);
-  const lines = requirementSection.split(/\r?\n/);
-  const projected = [];
-  let include = true;
-  for (const line of lines) {
-    const heading = markdownHeading(line);
-    const scenarioMatch = heading?.level === 4 ? /^(S-\d{3,})\s+Scenario:/.exec(heading.title) : void 0;
-    if (scenarioMatch)
-      include = scenarioIds.has(scenarioMatch[1]);
-    if (include)
-      projected.push(line);
+var REQUIRED_DESIGN_DECISION_SECTIONS = [
+  ["\u76EE\u6807\u4E0E\u8986\u76D6\u8303\u56F4", "Goal and Coverage"],
+  ["\u67B6\u6784\u51B3\u7B56", "Architecture Decision"],
+  ["\u6A21\u5757\u4E0E\u804C\u8D23", "Modules and Responsibilities"],
+  ["\u63A5\u53E3\u4E0E\u6570\u636E\u6D41", "Interfaces and Data Flow"],
+  ["\u5931\u8D25\u4E0E\u8FB9\u754C\u884C\u4E3A", "Failure and Boundary Behavior"],
+  ["\u5B89\u5168\u4E0E\u9690\u79C1", "Security and Privacy"],
+  ["\u517C\u5BB9\u3001\u8FC1\u79FB\u4E0E\u56DE\u6EDA", "Compatibility, Migration, and Rollback"],
+  ["\u9A8C\u8BC1\u7B56\u7565", "Verification Strategy"],
+  ["\u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669", "Trade-offs and Residual Risks"]
+];
+function assertDesignStructure(content, decisionIds) {
+  const globalConstraints = extractOptionalMarkdownSection(content, ["\u5168\u5C40\u7EA6\u675F", "Global Constraints"]);
+  if (!globalConstraints) {
+    throw new RockSpecError("DESIGN_GLOBAL_CONSTRAINTS_MISSING", "Design must declare explicit Global Constraints", {
+      path: "design.md",
+      accepted_headings: ["\u5168\u5C40\u7EA6\u675F", "Global Constraints"]
+    });
   }
-  return projected.join("\n").trimEnd();
+  for (const titles of [
+    ["\u603B\u4F53\u65B9\u6848\u6BD4\u8F83", "Approach Comparison"],
+    ["\u672A\u89E3\u51B3\u98CE\u9669", "Unresolved Risks"]
+  ]) {
+    if (!extractOptionalMarkdownSection(content, titles)) {
+      throw new RockSpecError("DESIGN_SECTION_MISSING", `Design is missing required section ${titles[0]}`, {
+        path: "design.md",
+        accepted_headings: titles
+      });
+    }
+  }
+  for (const decisionId of decisionIds) {
+    const decision = extractMarkdownSectionById(content, decisionId, "Design Decision", "design.md");
+    const missing = REQUIRED_DESIGN_DECISION_SECTIONS.filter((titles) => !extractOptionalMarkdownSection(decision, [...titles])).map((titles) => titles[0]);
+    if (missing.length > 0) {
+      throw new RockSpecError("DESIGN_DECISION_INCOMPLETE", `Design Decision ${decisionId} is missing implementation detail sections`, {
+        path: "design.md",
+        decision_id: decisionId,
+        missing_sections: missing
+      });
+    }
+  }
 }
 async function renderAuthorityManifest(changeDir, references, projections) {
-  const rows = ["| Source | SHA-256 | Projection |", "|---|---|---|"];
+  const rows = ["| Source | SHA-256 | Projection / Coverage | Projection SHA-256 |", "|---|---|---|---|"];
   for (const relativePath of references) {
     const target = path3.join(changeDir, relativePath);
     if (!await exists(target))
       continue;
-    const ids = projections[relativePath];
-    rows.push(`| ${relativePath} | ${sha256(await readFile3(target))} | ${ids?.join(", ") || "index only"} |`);
+    const projection = projections[relativePath];
+    rows.push(`| ${relativePath} | ${sha256(await readFile3(target))} | ${projection?.ids.join(", ") || "index only"} | ${projection?.projectionHash ?? "-"} |`);
   }
   return rows.join("\n");
 }
@@ -32296,6 +33227,55 @@ function parseFrontmatter(content, relativePath) {
     });
   }
 }
+function artifactSchemaResult(relativePath, document) {
+  if (relativePath === "proposal.md")
+    return ProposalDefinitionSchema.safeParse(document);
+  if (relativePath === "design.md")
+    return DesignDefinitionSchema.safeParse(document);
+  if (relativePath === "plan.md")
+    return PlanDefinitionSchema.safeParse(document);
+  if (relativePath === "prototype/brief.md")
+    return PrototypeBriefDefinitionSchema.safeParse(document);
+  if (/^tasks\/T-\d{3,}\.md$/.test(relativePath))
+    return TaskDefinitionSchema.safeParse(document);
+  if (/^runtime\/tasks\/T-\d{3,}\/implementer-report\.md$/.test(relativePath)) {
+    return ImplementerReportDocumentSchema.safeParse(document);
+  }
+  if (/^reviews\/(requirements|readiness)-review(?:-reviewer-[12])?\.md$/.test(relativePath)) {
+    return StageReviewDocumentSchema.safeParse(document);
+  }
+  if (/^reviews\/(?:delivery-review(?:-reviewer-[12])?|tasks\/T-\d{3,}-review(?:-reviewer-[12])?)\.md$/.test(relativePath)) {
+    return ReviewDocumentSchema.safeParse(document);
+  }
+  if (relativePath === "testing/test-report.md")
+    return AcceptanceDocumentSchema.safeParse(document);
+  if (relativePath === "testing/uat-report.md")
+    return UatDocumentSchema.safeParse(document);
+  if (relativePath === "knowledge-delta.md")
+    return KnowledgeDeltaDocumentSchema.safeParse(document);
+  if (relativePath === "reviews/knowledge-review.md")
+    return KnowledgeReviewDocumentSchema.safeParse(document);
+  if (/^revisions\/RV-\d{3,}\/reviews\/(spec|design|implementation)-reconciliation-review\.md$/.test(relativePath)) {
+    return ReconciliationReviewDocumentSchema.safeParse(document);
+  }
+  return null;
+}
+function validationIssue(relativePath, issue2) {
+  const record2 = typeof issue2 === "object" && issue2 !== null ? issue2 : {};
+  const issuePath = Array.isArray(record2.path) ? record2.path.map(String) : [];
+  const values = Array.isArray(record2.values) ? record2.values.filter((value) => typeof value === "string") : void 0;
+  const expected = typeof record2.expected === "string" ? record2.expected : void 0;
+  const input = record2.input;
+  const received = input === void 0 ? void 0 : typeof input === "string" ? input : JSON.stringify(input);
+  return {
+    code: typeof record2.code === "string" ? record2.code : "invalid_artifact",
+    message: typeof record2.message === "string" ? record2.message : "\u4EA7\u7269\u5B57\u6BB5\u4E0D\u7B26\u5408 Schema",
+    paths: [relativePath, ...issuePath],
+    ...expected ? { expected } : {},
+    ...received ? { received } : {},
+    ...values && values.length > 0 ? { allowed: values } : {}
+  };
+}
 function parseTaskDefinition(content, relativePath) {
   const result = TaskDefinitionSchema.safeParse(parseFrontmatter(content, relativePath));
   if (!result.success) {
@@ -32306,7 +33286,22 @@ function parseTaskDefinition(content, relativePath) {
   }
   return result.data;
 }
+function parseImplementerReport(content, relativePath) {
+  const result = ImplementerReportDocumentSchema.safeParse(parseFrontmatter(content, relativePath));
+  if (!result.success) {
+    throw new RockSpecError("INVALID_IMPLEMENTER_REPORT", `${relativePath} has invalid Implementer report metadata`, {
+      path: relativePath,
+      issues: result.error.issues
+    });
+  }
+  return result.data;
+}
 function sameTaskDefinition(task, definition) {
+  if (task.adopted_commit !== void 0 || definition.adopted_commit !== void 0) {
+    if (!task.adopted_commit || !definition.adopted_commit || !task.adopted_commit.startsWith(definition.adopted_commit)) {
+      return false;
+    }
+  }
   return JSON.stringify({
     title: task.title,
     dependencies: task.dependencies,
@@ -32316,6 +33311,7 @@ function sameTaskDefinition(task, definition) {
     decision_ids: task.decision_ids,
     finding_ids: task.finding_ids,
     acceptance_criteria: task.acceptance_criteria,
+    validation_commands: task.validation_commands,
     consumes: task.consumes,
     produces: task.produces,
     allowed_paths: task.allowed_paths
@@ -32328,6 +33324,7 @@ function sameTaskDefinition(task, definition) {
     decision_ids: definition.decision_ids,
     finding_ids: definition.finding_ids,
     acceptance_criteria: definition.acceptance_criteria,
+    validation_commands: definition.validation_commands,
     consumes: definition.consumes,
     produces: definition.produces,
     allowed_paths: definition.allowed_paths
@@ -32652,6 +33649,7 @@ function applyFeedbackRevisionInvalidation(change, target) {
   resetUat(change);
   change.knowledge_evolution = { schema_version: 1, status: "pending", protocol_version: 1, updates: [] };
   delete change.finished_at;
+  delete change.finish_disposition;
   delete change.delivery_head;
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
@@ -32767,8 +33765,17 @@ function normalizeExecutionUsage(usage) {
   }
   return Object.keys(normalized).length > 0 ? normalized : void 0;
 }
-function briefTemplate(change) {
-  return `# ${change.title}
+function briefTemplate(change, language = "zh-CN") {
+  return language === "zh-CN" ? `# ${change.title}
+
+## \u8303\u56F4
+
+TODO
+
+## \u9A8C\u8BC1
+
+TODO
+` : `# ${change.title}
 
 ## Scope
 
@@ -32779,14 +33786,18 @@ TODO
 TODO
 `;
 }
-function specTemplate(change) {
+function proposalTemplate(language) {
+  return language === "zh-CN" ? "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# \u9700\u6C42\u63D0\u6848\n\n## \u539F\u56E0\u4E0E\u4EF7\u503C\n\nTODO\n\n## \u884C\u4E3A\u53D8\u5316\n\nTODO\n\n## \u8303\u56F4\n\nTODO\n\n## \u975E\u76EE\u6807\n\n\u65E0\n" : "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# Proposal\n\n## Why\n\nTODO\n\n## What\n\nTODO\n\n## Scope\n\nTODO\n\n## Non-goals\n\nNone\n";
+}
+function specTemplate(change, language = "zh-CN") {
+  const statement = language === "zh-CN" ? "\u7CFB\u7EDF MUST TODO\u3002" : "The system MUST TODO.";
   return `# ${change.title}
 
 ## ADDED Requirements
 
 ### R-001 Requirement: TODO
 
-The system MUST TODO.
+${statement}
 
 #### S-001 Scenario: TODO
 
@@ -32795,7 +33806,17 @@ The system MUST TODO.
 - THEN TODO
 `;
 }
-function taskTemplate(id) {
+function designTemplate(language) {
+  if (language === "en-US") {
+    return "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context and Repository Facts\n\nTODO\n\n## Global Constraints\n\nTODO\n\n## Approach Comparison\n\nTODO\n\n## Decisions\n\n### D-001 TODO\n\n#### Goal and Coverage\n\nTODO\n\n#### Architecture Decision\n\n- Decision: TODO\n- Rationale: TODO\n- Impact: TODO\n\n#### Modules and Responsibilities\n\nTODO\n\n#### Interfaces and Data Flow\n\nTODO\n\n#### Failure and Boundary Behavior\n\nTODO\n\n#### Security and Privacy\n\nTODO\n\n#### Compatibility, Migration, and Rollback\n\nTODO\n\n#### Verification Strategy\n\nTODO\n\n#### Trade-offs and Residual Risks\n\nTODO\n\n## Unresolved Risks\n\nNone\n\n## Open Decisions\n\nNone\n";
+  }
+  return "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# \u6280\u672F\u8BBE\u8BA1\n\n## \u4E0A\u4E0B\u6587\u4E0E\u4ED3\u5E93\u4E8B\u5B9E\n\nTODO\n\n## \u5168\u5C40\u7EA6\u675F\n\nTODO\n\n## \u603B\u4F53\u65B9\u6848\u6BD4\u8F83\n\nTODO\n\n## \u51B3\u7B56\n\n### D-001 TODO\n\n#### \u76EE\u6807\u4E0E\u8986\u76D6\u8303\u56F4\n\nTODO\n\n#### \u67B6\u6784\u51B3\u7B56\n\n- \u51B3\u7B56\uFF1ATODO\n- \u7406\u7531\uFF1ATODO\n- \u5F71\u54CD\uFF1ATODO\n\n#### \u6A21\u5757\u4E0E\u804C\u8D23\n\nTODO\n\n#### \u63A5\u53E3\u4E0E\u6570\u636E\u6D41\n\nTODO\n\n#### \u5931\u8D25\u4E0E\u8FB9\u754C\u884C\u4E3A\n\nTODO\n\n#### \u5B89\u5168\u4E0E\u9690\u79C1\n\nTODO\n\n#### \u517C\u5BB9\u3001\u8FC1\u79FB\u4E0E\u56DE\u6EDA\n\nTODO\n\n#### \u9A8C\u8BC1\u7B56\u7565\n\nTODO\n\n#### \u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669\n\nTODO\n\n## \u672A\u89E3\u51B3\u98CE\u9669\n\n\u65E0\n\n## \u5F85\u51B3\u5B9A\u4E8B\u9879\n\n\u65E0\n";
+}
+function planTemplate(language) {
+  return language === "zh-CN" ? "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# \u5B9E\u65BD\u8BA1\u5212\n\n## \u76EE\u6807\u4E0E\u65B9\u6CD5\n\nTODO\n\n## \u5168\u5C40\u7EA6\u675F\n\nTODO\n\n## \u6587\u4EF6\u804C\u8D23\u56FE\n\nTODO\n\n## \u8986\u76D6\u77E9\u9635\n\nTODO\n\n## Task \u56FE\n\n- T-001\n\n## \u63A5\u53E3\u4E0E\u8DE8 Task \u7EA6\u675F\n\nTODO\n\n## \u9A8C\u8BC1\u7B56\u7565\n\nTODO\n" : "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Implementation Plan\n\n## Goal and Approach\n\nTODO\n\n## Global Constraints\n\nTODO\n\n## File Responsibility Map\n\nTODO\n\n## Coverage Matrix\n\nTODO\n\n## Task DAG\n\n- T-001\n\n## Cross-task Interface Contracts\n\nTODO\n\n## Verification Strategy\n\nTODO\n";
+}
+function taskTemplate(id, language = "zh-CN") {
+  const headings = language === "zh-CN" ? ["\u76EE\u6807", "\u8FFD\u8E2A\u5173\u7CFB", "\u73AF\u5883\u4E0E\u524D\u7F6E\u6761\u4EF6", "\u6587\u4EF6\u8303\u56F4", "\u63A5\u53E3\u5951\u7EA6", "\u975E\u76EE\u6807\u4E0E\u7981\u6B62\u6539\u52A8", "\u9A8C\u6536\u6807\u51C6", "TDD \u4E0E\u9A8C\u8BC1", "\u5B8C\u6210\u5951\u7EA6"] : ["Goal", "Traceability", "Environment and Prerequisites", "File Scope", "Interface Contracts", "Non-goals and Forbidden Changes", "Acceptance Criteria", "TDD and Verification", "Completion Contract"];
   return `---
 schema_version: 1
 id: ${id}
@@ -32808,6 +33829,8 @@ decision_ids: [D-001]
 finding_ids: []
 acceptance_criteria:
   - TODO
+validation_commands:
+  - TODO
 consumes: []
 produces: []
 allowed_paths:
@@ -32816,26 +33839,46 @@ allowed_paths:
 
 # ${id}
 
-## Goal
+## ${headings[0]}
 
 TODO
 
-## Traceability
+## ${headings[1]}
 
 - R-001
 - S-001
 - D-001
 
-## Acceptance Criteria
+## ${headings[2]}
 
 TODO
 
-## Verification
+## ${headings[3]}
+
+TODO
+
+## ${headings[4]}
+
+TODO
+
+## ${headings[5]}
+
+TODO
+
+## ${headings[6]}
+
+TODO
+
+## ${headings[7]}
+
+TODO
+
+## ${headings[8]}
 
 TODO
 `;
 }
-function reviewTemplate(title) {
+function reviewTemplate(title, language = "zh-CN") {
   return `---
 schema_version: 1
 verdict: BLOCKED
@@ -32847,12 +33890,12 @@ findings: []
 
 Verdict: BLOCKED
 
-## Findings
+## ${language === "zh-CN" ? "\u8BC4\u5BA1\u53D1\u73B0" : "Findings"}
 
 TODO
 `;
 }
-function codeReviewTemplate(title) {
+function codeReviewTemplate(title, language = "zh-CN") {
   return `---
 schema_version: 1
 verdict: BLOCKED
@@ -32870,16 +33913,16 @@ findings: []
 
 Verdict: BLOCKED
 
-## Four-axis assessment
+## ${language === "zh-CN" ? "\u56DB\u8F74\u8BC4\u4F30" : "Four-axis Assessment"}
 
 TODO
 
-## Findings
+## ${language === "zh-CN" ? "\u8BC4\u5BA1\u53D1\u73B0" : "Findings"}
 
 TODO
 `;
 }
-function acceptanceReviewTemplate() {
+function acceptanceReviewTemplate(language = "zh-CN") {
   return `---
 schema_version: 1
 verdict: BLOCKED
@@ -32890,16 +33933,16 @@ ui_evidence: []
 findings: []
 ---
 
-# Acceptance Test Report
+# ${language === "zh-CN" ? "\u9A8C\u6536\u6D4B\u8BD5\u62A5\u544A" : "Acceptance Test Report"}
 
 Verdict: BLOCKED
 
-## Findings
+## ${language === "zh-CN" ? "\u8BC4\u5BA1\u53D1\u73B0" : "Findings"}
 
 TODO
 `;
 }
-function uatReportTemplate() {
+function uatReportTemplate(language = "zh-CN") {
   return `---
 schema_version: 1
 verdict: CONFIRMED
@@ -32909,7 +33952,7 @@ scenario_ids: [S-001]
 notes: TODO
 ---
 
-# User Acceptance
+# ${language === "zh-CN" ? "\u7528\u6237\u9A8C\u6536" : "User Acceptance"}
 
 TODO
 `;
@@ -32964,7 +34007,20 @@ TODO
 `;
 }
 function implementerReportTemplate(taskId, executionId, baseCommit, briefPath, briefHash) {
-  return `# ${taskId} Implementer Report
+  const metadata = (0, import_yaml2.stringify)({
+    schema_version: 1,
+    task_id: taskId,
+    execution_id: executionId,
+    base_commit: baseCommit,
+    brief_path: briefPath,
+    brief_hash: briefHash,
+    outcome: "implemented"
+  }, { lineWidth: 0 }).trimEnd();
+  return `---
+${metadata}
+---
+
+# ${taskId} Implementer Report
 
 - Execution ID: ${executionId}
 - Base Commit: ${baseCommit}
@@ -32993,7 +34049,7 @@ TODO
 // packages/installer/dist/index.js
 import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { cp as cp2, lstat, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, readlink, realpath as realpath2, rename as rename3, rm as rm3, symlink, writeFile } from "node:fs/promises";
+import { cp as cp2, lstat, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, readlink, realpath as realpath3, rename as rename3, rm as rm3, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path4 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33141,7 +34197,7 @@ async function listInstalledProviders(cwd = process.cwd()) {
 async function resolveProjectRoot(cwd) {
   try {
     const { stdout: stdout2 } = await execFileAsync3("git", ["rev-parse", "--show-toplevel"], { cwd });
-    return await realpath2(stdout2.trim());
+    return await realpath3(stdout2.trim());
   } catch (error51) {
     throw new InstallerError("GIT_ROOT_REQUIRED", "RockSpec installation requires a Git repository", {
       cwd,
@@ -33160,7 +34216,7 @@ async function resolveSourceRoot(explicit) {
     let current = path4.resolve(candidate);
     while (true) {
       if (await exists2(path4.join(current, "distribution", "install-manifest.yaml")) && await exists2(path4.join(current, "skills"))) {
-        return await realpath2(current);
+        return await realpath3(current);
       }
       const parent = path4.dirname(current);
       if (parent === current)
@@ -33520,7 +34576,7 @@ async function commitInstall(projectRoot, manifest, hosts, capabilities, skills,
 async function validateSkill(skillRoot, expectedName) {
   if (!await exists2(skillRoot))
     throw new InstallerError("SKILL_SOURCE_MISSING", `Skill source ${expectedName} does not exist`);
-  const canonical = await realpath2(skillRoot);
+  const canonical = await realpath3(skillRoot);
   const skillFile = path4.join(canonical, "SKILL.md");
   if (!await exists2(skillFile))
     throw new InstallerError("SKILL_INVALID", `${expectedName} has no SKILL.md`);
@@ -33532,7 +34588,7 @@ async function validateSkill(skillRoot, expectedName) {
   for (const file2 of await walk(canonical)) {
     const info = await lstat(file2);
     if (info.isSymbolicLink()) {
-      const resolved = await realpath2(file2);
+      const resolved = await realpath3(file2);
       if (resolved !== canonical && !resolved.startsWith(`${canonical}${path4.sep}`)) {
         throw new InstallerError("SKILL_SYMLINK_ESCAPE", `${expectedName} contains a symlink outside its root`, {
           path: path4.relative(canonical, file2)
@@ -33625,7 +34681,7 @@ var {
 
 // packages/cli/src/output.ts
 var CLI_SCHEMA_VERSION = 1;
-var STATUS_VIEWS = ["summary", "tasks", "recovery", "hashes", "full"];
+var STATUS_VIEWS = ["summary", "resume", "tasks", "recovery", "hashes", "full"];
 function successEnvelope(command, data) {
   return { schema_version: CLI_SCHEMA_VERSION, ok: true, command, data };
 }
@@ -33680,6 +34736,45 @@ function projectStatus(status, view) {
     blocked_by: status.blocked_by,
     recovery: status.recovery
   };
+  if (view === "resume") {
+    const openExecutions = status.change.execution.registry.filter((execution) => !execution.completed_at).map((execution) => ({
+      id: execution.id,
+      role: execution.role,
+      action: execution.action,
+      started_at: execution.started_at,
+      context_package_path: execution.context_package_path
+    }));
+    const openFindings = Object.entries(status.change.reviews).flatMap(
+      ([reviewId, review]) => review.findings.filter((finding) => finding.status === "open").map((finding) => ({
+        review_id: reviewId,
+        id: finding.id,
+        severity: finding.severity,
+        owner_domain: finding.owner_domain,
+        route_to: finding.route_to,
+        description: finding.description
+      }))
+    );
+    return {
+      ...common,
+      workspace: status.change.workspace,
+      commits: {
+        base: status.change.base_commit,
+        delivery: status.change.delivery_head,
+        verified: status.change.verification.commit
+      },
+      approvals: Object.fromEntries(Object.entries(status.change.approvals).map(([gate, approval]) => [
+        gate,
+        approval ? { approved_at: approval.approved_at, mode: approval.mode } : null
+      ])),
+      active_task: status.change.execution.active_task,
+      remaining_tasks: Object.values(status.change.tasks).filter((task) => !["completed", "superseded"].includes(task.status)).sort((left, right) => left.id.localeCompare(right.id)).map((task) => ({ id: task.id, title: task.title, status: task.status, dependencies: task.dependencies })),
+      open_executions: openExecutions,
+      open_findings: openFindings,
+      artifacts: Object.fromEntries(Object.entries(status.change.artifacts).map(([name, artifact]) => [name, artifact.path])),
+      finish_disposition: status.change.finish_disposition ?? null,
+      resume_note: "\u4EE5\u672C\u5FEB\u7167\u6062\u590D Engine \u5DF2\u6301\u4E45\u5316\u72B6\u6001\uFF1B\u53EA\u9700\u989D\u5916\u8865\u5145\u672A\u5199\u5165\u4EA7\u7269\u7684\u7528\u6237\u53E3\u5934\u7EA6\u675F\u548C\u51B3\u7B56\u610F\u56FE\u3002"
+    };
+  }
   if (view === "tasks") {
     return {
       ...common,
@@ -33691,6 +34786,7 @@ function projectStatus(status, view) {
         dependencies: task.dependencies,
         supersedes: task.supersedes,
         finding_ids: task.finding_ids,
+        adopted_commit: task.adopted_commit,
         base_commit: task.base_commit,
         commit_sha: task.commit_sha
       }))
@@ -33796,6 +34892,84 @@ function formatHuman(data) {
   if (!isRecord(data)) {
     return JSON.stringify(data, null, 2);
   }
+  const approvalSummary = isRecord(data.review_summary) ? data.review_summary : void 0;
+  if (approvalSummary) {
+    const zh = stringValue(approvalSummary.language) !== "en-US";
+    const lines2 = [];
+    lines2.push(`\u3010${stringValue(approvalSummary.title) ?? (zh ? "\u5BA1\u6279" : "Approval")}\u3011`);
+    const sections = Array.isArray(approvalSummary.sections) ? approvalSummary.sections : [];
+    for (const section of sections) {
+      if (!isRecord(section)) continue;
+      lines2.push("", `${stringValue(section.title) ?? (zh ? "\u6458\u8981" : "Summary")}${zh ? "\uFF1A" : ":"}`);
+      for (const item of Array.isArray(section.items) ? section.items : []) {
+        if (typeof item !== "string") continue;
+        const itemLines = item.split(/\r?\n/).filter((line) => line.trim().length > 0);
+        if (itemLines.length === 0) continue;
+        lines2.push(`- ${itemLines[0]}`);
+        for (const line of itemLines.slice(1)) lines2.push(`  ${line}`);
+      }
+    }
+    lines2.push("", zh ? "\u6B63\u5F0F\u8BC4\u5BA1\u6750\u6599" : "Formal Review Materials");
+    const artifactRoot = stringValue(approvalSummary.artifact_root);
+    if (artifactRoot) {
+      lines2.push(`${zh ? "\u76EE\u5F55" : "Directory"}${zh ? "\uFF1A" : ":"}`, `  ${artifactRoot}/`);
+    }
+    const artifacts = Array.isArray(approvalSummary.artifacts) ? approvalSummary.artifacts : [];
+    for (const [index, artifact] of artifacts.entries()) {
+      if (!isRecord(artifact)) continue;
+      const label = stringValue(artifact.label);
+      const artifactPath = stringValue(artifact.relative_path) ?? stringValue(artifact.path);
+      const description = stringValue(artifact.description);
+      if (!label || !artifactPath) continue;
+      lines2.push("", `${index + 1}. ${label}`);
+      lines2.push(`   ${zh ? "\u6587\u4EF6" : "File"}${zh ? "\uFF1A" : ":"}${artifactPath}`);
+      if (description) lines2.push(`   ${zh ? "\u8BF4\u660E" : "Description"}${zh ? "\uFF1A" : ":"}${description}`);
+    }
+    const prompt = stringValue(approvalSummary.approval_prompt);
+    if (prompt) lines2.push("", prompt);
+    const hash2 = stringValue(data.hash);
+    const receiptNote = stringValue(approvalSummary.machine_receipt_note);
+    if (hash2) lines2.push("", `${zh ? "\u673A\u5668\u51ED\u8BC1" : "Machine Receipt"}${zh ? "\uFF1A" : ":"}${hash2}${receiptNote ? `\uFF08${receiptNote}\uFF09` : ""}`);
+    const packagePath = stringValue(data.path);
+    if (packagePath) lines2.push(`${zh ? "\u51ED\u8BC1\u5305" : "Receipt Package"}${zh ? "\uFF1A" : ":"}${packagePath}`);
+    return lines2.join("\n");
+  }
+  if (data.view === "resume") {
+    const lines2 = [
+      `Change\uFF1A${stringValue(data.change_id) ?? "-"}`,
+      `\u72B6\u6001\uFF1A${stringValue(data.current_state) ?? "-"}`
+    ];
+    const next2 = isRecord(data.recommended_next) ? data.recommended_next : void 0;
+    if (next2) {
+      const action = stringValue(next2.action);
+      const reason = stringValue(next2.reason);
+      if (action) lines2.push(`\u4E0B\u4E00\u6B65\uFF1A${action}${reason ? `\uFF08${reason}\uFF09` : ""}`);
+    }
+    const workspace = isRecord(data.workspace) ? data.workspace : void 0;
+    if (workspace) lines2.push(`\u5DE5\u4F5C\u533A\uFF1A${stringValue(workspace.mode) ?? "-"} / ${stringValue(workspace.branch) ?? "detached"}`);
+    const commits = isRecord(data.commits) ? data.commits : void 0;
+    if (commits) {
+      lines2.push(`\u63D0\u4EA4\uFF1Abase=${stringValue(commits.base) ?? "-"} delivery=${stringValue(commits.delivery) ?? "-"} verified=${stringValue(commits.verified) ?? "-"}`);
+    }
+    appendResumeItems(lines2, "\u5269\u4F59 Task", data.remaining_tasks, (item) => {
+      const id2 = stringValue(item.id) ?? "-";
+      return `${id2} ${stringValue(item.title) ?? ""} [${stringValue(item.status) ?? "unknown"}]`.trim();
+    });
+    appendResumeItems(lines2, "\u5F00\u653E Finding", data.open_findings, (item) => `${stringValue(item.id) ?? "-"} ${stringValue(item.description) ?? ""} -> ${stringValue(item.route_to) ?? "-"}`.trim());
+    appendResumeItems(lines2, "\u672A\u5B8C\u6210 Execution", data.open_executions, (item) => `${stringValue(item.id) ?? "-"} ${stringValue(item.role) ?? "-"} / ${stringValue(item.action) ?? "-"}`);
+    const disposition2 = isRecord(data.finish_disposition) ? data.finish_disposition : void 0;
+    if (disposition2) {
+      lines2.push("", "\u6536\u5C3E\u5904\u7F6E\uFF1A", `- ${stringValue(disposition2.choice) ?? "-"} / ${stringValue(disposition2.status) ?? "-"}`);
+      const pending = stringValue(disposition2.pending_action);
+      if (pending) lines2.push(`  ${pending}`);
+    }
+    const note = stringValue(data.resume_note);
+    if (note) lines2.push("", note);
+    return lines2.join("\n");
+  }
+  if (typeof data.artifact === "string" && data.valid === true) {
+    return `${data.artifact} \u6821\u9A8C\u901A\u8FC7`;
+  }
   const lines = [];
   const change = isRecord(data.change) ? data.change : data;
   const id = stringValue(change.id) ?? stringValue(data.change_id);
@@ -33830,9 +35004,92 @@ function formatHuman(data) {
     if (typeof item === "string") lines.push(`Blocked: ${item}`);
     else if (isRecord(item)) lines.push(`Blocked: ${stringValue(item.message) ?? JSON.stringify(item)}`);
   }
+  const semanticWarnings = Array.isArray(data.semantic_warnings) ? data.semantic_warnings : [];
+  if (semanticWarnings.length > 0) {
+    lines.push("", "\u8BED\u4E49\u63D0\u793A\uFF08\u4E0D\u963B\u65AD\uFF09\uFF1A");
+    for (const item of semanticWarnings) {
+      if (!isRecord(item)) continue;
+      lines.push(`- ${stringValue(item.target) ?? "\u77E5\u8BC6\u5019\u9009"}\uFF1A${stringValue(item.message) ?? "\u53EF\u80FD\u6539\u53D8\u4E49\u52A1\u5F3A\u5EA6\uFF0C\u8BF7\u6838\u5BF9 Authority \u5206\u7C7B"}`);
+    }
+  }
+  const disposition = isRecord(change.finish_disposition) ? change.finish_disposition : void 0;
+  if (disposition) {
+    const choice = stringValue(disposition.choice);
+    const dispositionStatus = stringValue(disposition.status);
+    if (choice) lines.push(`\u5904\u7F6E\u9009\u62E9\uFF1A${choice}`);
+    if (dispositionStatus) lines.push(`\u5904\u7F6E\u72B6\u6001\uFF1A${dispositionStatus}`);
+    const pendingAction = stringValue(disposition.pending_action);
+    if (pendingAction) lines.push(`\u5F85\u6267\u884C\uFF1A${pendingAction}`);
+  }
   if (lines.length > 0) return lines.join("\n");
   if (typeof data.message === "string") return data.message;
   return JSON.stringify(data, null, 2);
+}
+function formatHumanFailure(failure) {
+  const lines = [`RockSpec ${failure.error.code}: ${failure.error.message}`];
+  const details = isRecord(failure.error.details) ? failure.error.details : void 0;
+  const renderable = collectValidationItems(details);
+  if (renderable.length > 0) {
+    lines.push("");
+    for (const item of renderable) {
+      const location = item.paths.length > 0 ? item.paths.join(" -> ") : "\u4EA7\u7269";
+      lines.push(`- ${location}`);
+      lines.push(`  \u95EE\u9898\uFF1A${validationMessage(item.code, item.message)}`);
+      if (item.expected) lines.push(`  \u671F\u671B\uFF1A${item.expected}`);
+      if (item.received) lines.push(`  \u5F53\u524D\u503C\uFF1A${item.received}`);
+      if (item.allowed.length > 0) lines.push(`  \u53EF\u9009\u503C\uFF1A${item.allowed.join("\u3001")}`);
+    }
+  } else if (failure.error.details !== null) {
+    lines.push(JSON.stringify(failure.error.details, null, 2));
+  }
+  if (failure.error.recovery_command) lines.push(`\u6062\u590D\u547D\u4EE4\uFF1A${failure.error.recovery_command}`);
+  return lines.join("\n");
+}
+function collectValidationItems(details) {
+  if (!details) return [];
+  if (Array.isArray(details.errors)) {
+    return details.errors.filter(isRecord).map((item) => ({
+      code: stringValue(item.code),
+      message: stringValue(item.message),
+      paths: Array.isArray(item.paths) ? item.paths.filter((value) => typeof value === "string") : [],
+      expected: stringValue(item.expected),
+      received: stringValue(item.received),
+      allowed: Array.isArray(item.allowed) ? item.allowed.filter((value) => typeof value === "string") : []
+    }));
+  }
+  if (Array.isArray(details.issues)) {
+    const basePath = stringValue(details.path);
+    return details.issues.filter(isRecord).map((issue2) => normalizeZodIssue(issue2, basePath));
+  }
+  return [];
+}
+function normalizeZodIssue(issue2, basePath) {
+  const issuePath = Array.isArray(issue2.path) ? issue2.path.map(String) : [];
+  const allowed = Array.isArray(issue2.values) ? issue2.values.filter((value) => typeof value === "string") : [];
+  const input = issue2.input;
+  const received = input === void 0 ? void 0 : typeof input === "string" ? input : JSON.stringify(input);
+  return {
+    code: stringValue(issue2.code),
+    message: stringValue(issue2.message),
+    paths: [...basePath ? [basePath] : [], ...issuePath],
+    expected: stringValue(issue2.expected),
+    received,
+    allowed
+  };
+}
+function validationMessage(code, fallback) {
+  if (code === "invalid_type") return "\u5B57\u6BB5\u7C7B\u578B\u4E0D\u6B63\u786E";
+  if (code === "invalid_value") return "\u5B57\u6BB5\u503C\u4E0D\u5728\u5141\u8BB8\u8303\u56F4\u5185";
+  if (code === "too_small") return "\u5185\u5BB9\u6570\u91CF\u6216\u957F\u5EA6\u4E0D\u8DB3";
+  if (code === "unrecognized_keys") return "\u5305\u542B\u672A\u5B9A\u4E49\u5B57\u6BB5";
+  return fallback ?? "\u4EA7\u7269\u5B57\u6BB5\u4E0D\u7B26\u5408 Schema";
+}
+function appendResumeItems(lines, title, value, render) {
+  if (!Array.isArray(value) || value.length === 0) return;
+  lines.push("", `${title}\uFF1A`);
+  for (const item of value) {
+    if (isRecord(item)) lines.push(`- ${render(item)}`);
+  }
 }
 function asErrorRecord(error51) {
   if (isRecord(error51)) return error51;
@@ -34041,16 +35298,8 @@ function createProgram(dependencies = {}) {
         stderr.write(`${JSON.stringify(failure, null, 2)}
 `);
       } else {
-        stderr.write(`RockSpec ${failure.error.code}: ${failure.error.message}
+        stderr.write(`${formatHumanFailure(failure)}
 `);
-        if (failure.error.details !== null) {
-          stderr.write(`${JSON.stringify(failure.error.details, null, 2)}
-`);
-        }
-        if (failure.error.recovery_command) {
-          stderr.write(`Recovery: ${failure.error.recovery_command}
-`);
-        }
       }
       setExitCode(errorExitCode(error51));
     }
@@ -34240,7 +35489,7 @@ function createProgram(dependencies = {}) {
       return engine.prepareApproval({ gate, ...changeId ? { changeId } : {} });
     });
   });
-  program2.command("approve").description("record a hash-bound user approval").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").option("--by <identity>", "approver identity", "user").requiredOption("--package <sha256>", "hash returned by approval package").action(async (artifactId, changeId, options, command) => {
+  program2.command("approve").description("record a hash-bound user approval").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").option("--by <identity>", "approver identity", "user").requiredOption("--package <sha256>", "machine receipt returned by approval package; supplied by the Agent").action(async (artifactId, changeId, options, command) => {
     await execute("approve", command, (engine) => {
       if (!isApprovalGate(artifactId)) {
         throw Object.assign(new Error(`Unknown approval artifact: ${artifactId}`), {
@@ -34323,9 +35572,13 @@ function createProgram(dependencies = {}) {
       });
     });
   });
-  program2.command("validate").description("validate a change and its current gate").argument("[change-id]").option("--strict", "treat warnings as errors", false).action(async (changeId, options, command) => {
+  program2.command("validate").description("validate a change and its current gate").argument("[change-id]").option("--artifact <path>", "dry-run a Change-relative artifact against its schema").option("--strict", "treat warnings as errors", false).action(async (changeId, options, command) => {
     await execute("validate", command, async (engine) => requireValid(
-      await engine.validate({ ...changeId ? { changeId } : {}, strict: options.strict }),
+      await engine.validate({
+        ...changeId ? { changeId } : {},
+        ...options.artifact ? { artifactPath: options.artifact } : {},
+        strict: options.strict
+      }),
       "VALIDATION_FAILED"
     ));
   });
@@ -34485,8 +35738,14 @@ function createProgram(dependencies = {}) {
   program2.command("verify").argument("[change-id]").action(async (changeId, _options, command) => {
     await execute("verify", command, (engine) => engine.verify({ ...changeId ? { changeId } : {} }));
   });
-  program2.command("finish").argument("[change-id]").addOption(new Option("--disposition <choice>").choices(["local_merge", "push", "keep"]).default("keep")).action(async (changeId, options, command) => {
-    await execute("finish", command, (engine) => engine.finish({ disposition: options.disposition, ...changeId ? { changeId } : {} }));
+  program2.command("finish").argument("[change-id]").addOption(new Option("--disposition <choice>").choices(["local_merge", "push", "keep"]).default("keep")).option("--executed", "confirm that the recorded external disposition was executed", false).option("--result-ref <ref>", "remote or local target ref produced by the disposition").option("--result-commit <sha>", "commit observed at the disposition target").action(async (changeId, options, command) => {
+    await execute("finish", command, (engine) => engine.finish({
+      disposition: options.disposition,
+      executed: options.executed,
+      ...options.resultRef ? { resultRef: options.resultRef } : {},
+      ...options.resultCommit ? { resultCommit: options.resultCommit } : {},
+      ...changeId ? { changeId } : {}
+    }));
   });
   program2.command("archive").argument("[change-id]").action(async (changeId, _options, command) => {
     await execute("archive", command, (engine) => engine.archive({ ...changeId ? { changeId } : {} }));

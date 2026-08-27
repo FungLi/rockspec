@@ -6,13 +6,13 @@ outcome: no_change
 updates: []
 ---
 
-# Knowledge Delta
+# 知识变更
 
-## Assessment
+## 评估
 
 说明本次 Change 是否形成了跨 Change 可复用的稳定知识，以及排除一次性实现细节的依据。
 
-## Proposed Evolution
+## 建议演进
 
 没有可沉淀内容时说明 `no_change` 原因。有更新时，将 `outcome` 改为 `proposed`，并在 Frontmatter 中为每个候选文件记录：
 

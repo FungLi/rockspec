@@ -5,6 +5,10 @@ description: 用于 Final CR 通过后的验证、收尾和归档；执行最终
 
 # RockSpec 收尾
 
+## 产物语言
+
+读取 `.rockspec/config.yaml` 的 `artifact_language`；缺省按 `zh-CN`。交付报告、归档说明和终端摘要使用配置语言，Schema Key、ID、CLI/Action、Verdict、Hash 和 Commit 标识保持英文。
+
 只产出一个结果：经过验证的完成决策；仅受治理 Change 可以归档。
 
 ## CLI 入口
@@ -23,9 +27,10 @@ Attached 模式把本文的 `rockspec ...` 视为逻辑命令：先从绑定 Wor
 2. 按风险运行新鲜的测试、构建、Lint、类型检查及项目专用检查。诚实记录所有命令、工作目录、退出码、跳过项和 Commit Hash。
 3. Attached 模式提交 `change.verify`。Engine 未进入 `READY_TO_FINISH` 时停止。
 4. Engine 推荐 `knowledge.evolve` 时调用 `$rockspec-evolve`。收尾 Skill 只负责调度，不自行提炼或直接改写知识基线。
-5. 提供平台无关的分支处置选项，不假设 GitHub PR 集成。仅根据用户选择，通过 `rockspec finish` 执行 `local_merge`、`push` 或 `keep`。
-6. 只有在知识演进已记录为 `no_change`/`approved`、Finish 已记录且 Spec Delta 可无冲突合并后才归档。归档事务安装已评审知识候选并保留双向凭证、Hash、审批、事件、评审和证据。
-7. Change 使用 Worktree 时调用 `$rockspec-worktree` 执行处置后的保留或清理。`keep` 原样保留；冲突、验证失败、脏目录或归属不明时保留现场。只有用户的 Finish 选择明确授权且安全检查通过时才能移除 Worktree。
+5. 提供平台无关的分支处置选项，不假设 GitHub PR 集成。等待选择前在会话区展示最终交付摘要：已交付范围、最终 Commit、验证与 Review 结果、偏差/已知问题、知识演进状态，以及 `local_merge`、`push`、`keep` 各自会改变什么、保留什么和主要风险；用户需要时再打开正式报告。摘要采用柔性结构，不因展示缺项增加流程门禁。
+6. 用户选择 `keep` 时运行 `rockspec finish <change-id> --disposition keep`，Engine 立即记录完成。选择 `push` 或 `local_merge` 时，先运行对应 `rockspec finish ... --disposition <choice>`，此时只持久化 `pending_external_action`，不得声称已经推送或合并；再调用 `$rockspec-worktree` 执行获授权的 Git 操作和验证。成功后使用准确目标 Ref 与观测 Commit 运行 `rockspec finish ... --disposition <choice> --executed --result-ref <ref> --result-commit <sha>`；失败时保留 pending 状态和现场，不伪造确认。
+7. 只有在知识演进已记录为 `no_change`/`approved`、Finish disposition 为 `completed` 且 Spec Delta 可无冲突合并后才归档。归档事务安装已评审知识候选并保留双向凭证、Hash、审批、事件、评审和证据。
+8. Change 使用 Worktree 时由 `$rockspec-worktree` 按已完成处置保留或清理。`keep` 原样保留；冲突、验证失败、脏目录或归属不明时保留现场。只有用户的 Finish 选择明确授权且安全检查通过时才能移除 Worktree。
 
 多个存在依赖关系且均已待收尾的 Change 可以在一次人工操作中处理，但 Engine 必须按依赖顺序逐个完成 A、B 的 Finish 和 Archive，并分别生成证据、审计事件和知识演进凭证。上游成功而下游失败时不得回滚上游；不得用批量 HEAD 或合并快照替代独立 Change 边界。
 

@@ -38,6 +38,7 @@ completion:
     - "非 PASS 至少有一个 Open Finding；PASS 不包含 Open Critical/Important Finding。"
     - "修复轮报告携带上一轮全部 Findings，保持 ID 并更新状态；round 与 Engine Review Attempt 一致。"
     - "Strict 聚合保留两份报告和全部 Finding。"
+    - "historical_attribution 模式只评审固定单提交 Diff，并核对当前 HEAD 有覆盖全部 Task Scenario 的新鲜 executed Evidence。"
 outcomes:
   pass: ["task.execute", "acceptance.validate"]
   changes_required: ["task.execute", "revise"]

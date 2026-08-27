@@ -14,7 +14,7 @@ open_questions:
     status: resolved
 ---
 
-# Proposal：{{title}}
+# 需求提案：{{title}}
 
 ## 原因与价值
 

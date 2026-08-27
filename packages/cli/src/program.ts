@@ -34,6 +34,7 @@ import {
   errorExitCode,
   failureEnvelope,
   formatHuman,
+  formatHumanFailure,
   isFullStatusResult,
   projectStatus,
   successEnvelope,
@@ -207,13 +208,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       if (options.json) {
         stderr.write(`${JSON.stringify(failure, null, 2)}\n`);
       } else {
-        stderr.write(`RockSpec ${failure.error.code}: ${failure.error.message}\n`);
-        if (failure.error.details !== null) {
-          stderr.write(`${JSON.stringify(failure.error.details, null, 2)}\n`);
-        }
-        if (failure.error.recovery_command) {
-          stderr.write(`Recovery: ${failure.error.recovery_command}\n`);
-        }
+        stderr.write(`${formatHumanFailure(failure)}\n`);
       }
       setExitCode(errorExitCode(error));
     }
@@ -588,7 +583,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .argument("<artifact-id>", "spec, design, or implementation")
     .argument("[change-id]")
     .option("--by <identity>", "approver identity", "user")
-    .requiredOption("--package <sha256>", "hash returned by approval package")
+    .requiredOption("--package <sha256>", "machine receipt returned by approval package; supplied by the Agent")
     .action(async (artifactId: string, changeId: string | undefined, options: { by: string; package: string }, command: Command) => {
       await execute("approve", command, (engine) => {
         if (!isApprovalGate(artifactId)) {
@@ -737,10 +732,15 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .command("validate")
     .description("validate a change and its current gate")
     .argument("[change-id]")
+    .option("--artifact <path>", "dry-run a Change-relative artifact against its schema")
     .option("--strict", "treat warnings as errors", false)
-    .action(async (changeId: string | undefined, options: { strict: boolean }, command: Command) => {
+    .action(async (changeId: string | undefined, options: { strict: boolean; artifact?: string }, command: Command) => {
       await execute("validate", command, async (engine) => requireValid(
-        await engine.validate({ ...(changeId ? { changeId } : {}), strict: options.strict }),
+        await engine.validate({
+          ...(changeId ? { changeId } : {}),
+          ...(options.artifact ? { artifactPath: options.artifact } : {}),
+          strict: options.strict,
+        }),
         "VALIDATION_FAILED",
       ));
     });
@@ -1010,8 +1010,22 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .command("finish")
     .argument("[change-id]")
     .addOption(new Option("--disposition <choice>").choices(["local_merge", "push", "keep"]).default("keep"))
-    .action(async (changeId: string | undefined, options: { disposition: "local_merge" | "push" | "keep" }, command: Command) => {
-      await execute("finish", command, (engine) => engine.finish({ disposition: options.disposition, ...(changeId ? { changeId } : {}) }));
+    .option("--executed", "confirm that the recorded external disposition was executed", false)
+    .option("--result-ref <ref>", "remote or local target ref produced by the disposition")
+    .option("--result-commit <sha>", "commit observed at the disposition target")
+    .action(async (changeId: string | undefined, options: {
+      disposition: "local_merge" | "push" | "keep";
+      executed: boolean;
+      resultRef?: string;
+      resultCommit?: string;
+    }, command: Command) => {
+      await execute("finish", command, (engine) => engine.finish({
+        disposition: options.disposition,
+        executed: options.executed,
+        ...(options.resultRef ? { resultRef: options.resultRef } : {}),
+        ...(options.resultCommit ? { resultCommit: options.resultCommit } : {}),
+        ...(changeId ? { changeId } : {}),
+      }));
     });
 
   program.command("archive").argument("[change-id]").action(async (changeId: string | undefined, _options: unknown, command: Command) => {

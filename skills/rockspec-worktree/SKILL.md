@@ -33,6 +33,6 @@ description: 用于并行需求、隔离开发、恢复 Change 或清理工作�
 
 ## 收尾
 
-在 `$rockspec-finish` 已完成用户选择后处理 Worktree：`keep` 原样保留；`push` 不删除分支；本地合并必须串行更新目标分支并运行合并后验证。只有 Worktree 干净、归属唯一且处置成功时才可以按用户明确选择移除。任一冲突或验证失败都保留分支和 Worktree。
+在 `$rockspec-finish` 已记录用户选择后处理 Worktree：`keep` 原样保留；`push` 将冻结 `delivery_head` 推送到明确远端 Ref 并核验远端 Commit；本地合并必须串行更新明确目标 Ref、合并冻结提交并运行合并后验证。把实际 Ref 与 Commit 返回给 `$rockspec-finish` 完成两阶段确认；任一冲突、远端不一致或验证失败都保留 pending 状态、分支和 Worktree，不回填成功。处置确认完成后，只有 Worktree 干净、归属唯一且用户选择授权时才可移除；`push` 默认不删除分支。
 
 从 [workspace-receipt.yaml](assets/workspace-receipt.yaml) 记录非绝对路径的工作区证据。报告 Change ID、模式、Provider、分支、目标基线、Worktree 路径、Setup/基线结果和下一 Skill。

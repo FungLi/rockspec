@@ -373,6 +373,7 @@ export const ExecutionRecordSchema = z.object({
   parent_execution_id: z.string().uuid().optional(),
   context_package_path: z.string().min(1).optional(),
   context_package_hash: Sha256Schema.optional(),
+  context_package_verified: z.boolean().optional(),
   usage: z.object({
     input_tokens: z.number().int().nonnegative().optional(),
     cached_input_tokens: z.number().int().nonnegative().optional(),
@@ -380,6 +381,12 @@ export const ExecutionRecordSchema = z.object({
     reasoning_tokens: z.number().int().nonnegative().optional(),
   }).strict().optional(),
 }).strict().superRefine((execution, context) => {
+  if ((execution.context_package_path === undefined) !== (execution.context_package_hash === undefined)) {
+    context.addIssue({ code: "custom", path: ["context_package_path"], message: "Context package path and hash must be provided together" });
+  }
+  if (execution.context_package_verified && execution.context_package_path === undefined) {
+    context.addIssue({ code: "custom", path: ["context_package_verified"], message: "Verified context requires a bound package" });
+  }
   if (execution.outcome !== undefined && execution.completed_at === undefined) {
     context.addIssue({
       code: "custom",
@@ -517,6 +524,23 @@ export const ApprovalPackageSchema = z.object({
     decision_ids: z.array(z.string().regex(/^D-\d{3,}$/)),
     task_ids: z.array(z.string().regex(/^T-\d{3,}$/)),
   }).strict(),
+  review_summary: z.object({
+    language: z.enum(["zh-CN", "en-US"]),
+    title: z.string().trim().min(1),
+    approval_prompt: z.string().trim().min(1),
+    machine_receipt_note: z.string().trim().min(1),
+    artifact_root: z.string().trim().min(1).optional(),
+    artifacts: z.array(z.object({
+      label: z.string().trim().min(1),
+      path: z.string().trim().min(1),
+      relative_path: z.string().trim().min(1).optional(),
+      description: z.string().trim().min(1).optional(),
+    }).strict()).min(1),
+    sections: z.array(z.object({
+      title: z.string().trim().min(1),
+      items: z.array(z.string().trim().min(1)).min(1),
+    }).strict()).min(1),
+  }).strict().optional(),
 }).strict();
 
 export type ApprovalPackage = z.infer<typeof ApprovalPackageSchema>;
@@ -590,7 +614,9 @@ export const TaskDefinitionSchema = z
     scenario_ids: z.array(z.string().regex(/^S-\d{3,}$/)).min(1),
     decision_ids: z.array(z.string().regex(/^D-\d{3,}$/)).min(1),
     finding_ids: z.array(z.string().regex(/^F-\d{3,}$/)).default([]),
+    adopted_commit: GitCommitSchema.optional(),
     acceptance_criteria: z.array(z.string().trim().min(1)).min(1),
+    validation_commands: z.array(z.string().trim().min(1)).default([]),
     consumes: z.array(InterfaceContractSchema).default([]),
     produces: z.array(InterfaceContractSchema).default([]),
     allowed_paths: z.array(RepositoryRelativePathSchema).min(1),
@@ -618,7 +644,7 @@ export const TaskDefinitionSchema = z
         message: "A Task cannot supersede itself",
       });
     }
-    for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"] as const) {
+    for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "validation_commands", "consumes", "produces"] as const) {
       if (new Set(task[field]).size !== task[field].length) {
         context.addIssue({
           code: "custom",
@@ -630,6 +656,54 @@ export const TaskDefinitionSchema = z
   });
 
 export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
+
+export const ImplementerBlockerSchema = z
+  .object({
+    kind: z.enum(["contract_conflict", "authority_conflict"]),
+    source_refs: z.array(z.string().trim().min(1)).min(1),
+    summary: z.string().trim().min(1),
+    recommended_route: z.enum(["plan.create", "requirements.clarify", "design.technical"]),
+  })
+  .strict()
+  .superRefine((blocker, context) => {
+    if (blocker.kind === "contract_conflict" && blocker.recommended_route !== "plan.create") {
+      context.addIssue({
+        code: "custom",
+        path: ["recommended_route"],
+        message: "A contract conflict must route to plan.create",
+      });
+    }
+    if (blocker.kind === "authority_conflict" && blocker.recommended_route === "plan.create") {
+      context.addIssue({
+        code: "custom",
+        path: ["recommended_route"],
+        message: "An authority conflict must route to requirements.clarify or design.technical",
+      });
+    }
+  });
+
+export const ImplementerReportDocumentSchema = z
+  .object({
+    schema_version: z.literal(1),
+    task_id: z.string().regex(/^T-\d{3,}$/),
+    execution_id: z.string().min(1),
+    base_commit: GitCommitSchema,
+    brief_path: RepositoryRelativePathSchema,
+    brief_hash: Sha256Schema,
+    outcome: z.enum(["implemented", "blocked"]),
+    blocker: ImplementerBlockerSchema.optional(),
+  })
+  .strict()
+  .superRefine((report, context) => {
+    if (report.outcome === "blocked" && report.blocker === undefined) {
+      context.addIssue({ code: "custom", path: ["blocker"], message: "A blocked report requires a structured blocker" });
+    }
+    if (report.outcome === "implemented" && report.blocker !== undefined) {
+      context.addIssue({ code: "custom", path: ["blocker"], message: "An implemented report cannot declare a blocker" });
+    }
+  });
+
+export type ImplementerReportDocument = z.infer<typeof ImplementerReportDocumentSchema>;
 
 export const TaskAttemptSchema = z
   .object({
@@ -645,7 +719,7 @@ export const TaskAttemptSchema = z
     review_path: z.string().min(1).optional(),
     review_hash: Sha256Schema.optional(),
     review_subject: ReviewSubjectSchema.optional(),
-    review_package_mode: z.enum(["product", "scope_blocked"]).optional(),
+    review_package_mode: z.enum(["product", "scope_blocked", "historical_attribution"]).optional(),
     review_attempts: z.number().int().nonnegative(),
     started_at: TimestampSchema.optional(),
     suspended_at: TimestampSchema,
@@ -665,7 +739,9 @@ export const TaskRecordSchema = z
     scenario_ids: z.array(z.string().regex(/^S-\d{3,}$/)).default([]),
     decision_ids: z.array(z.string().regex(/^D-\d{3,}$/)).default([]),
     finding_ids: z.array(z.string().regex(/^F-\d{3,}$/)).default([]),
+    adopted_commit: GitCommitSchema.optional(),
     acceptance_criteria: z.array(z.string().min(1)).default([]),
+    validation_commands: z.array(z.string().min(1)).default([]),
     consumes: z.array(InterfaceContractSchema).default([]),
     produces: z.array(InterfaceContractSchema).default([]),
     allowed_paths: z.array(RepositoryRelativePathSchema).default([]),
@@ -677,7 +753,7 @@ export const TaskRecordSchema = z
     report_path: z.string().min(1).optional(),
     report_hash: Sha256Schema.optional(),
     review_subject: ReviewSubjectSchema.optional(),
-    review_package_mode: z.enum(["product", "scope_blocked"]).optional(),
+    review_package_mode: z.enum(["product", "scope_blocked", "historical_attribution"]).optional(),
     review_attempts: z.number().int().nonnegative().default(0),
     attempts: z.array(TaskAttemptSchema).default([]),
     started_at: TimestampSchema.optional(),
@@ -1205,10 +1281,11 @@ export const KnowledgeEvolutionSchema = z
     if (["approved", "applied"].includes(evolution.status) && evolution.updates.length === 0) {
       context.addIssue({ code: "custom", path: ["updates"], message: "Knowledge updates are required" });
     }
-    if (["approved", "applied"].includes(evolution.status) && !evolution.review) {
-      context.addIssue({ code: "custom", path: ["review"], message: "Knowledge updates require independent review" });
+    const hasNormativeUpdates = evolution.updates.some((update) => update.authority === "normative");
+    if (["approved", "applied"].includes(evolution.status) && hasNormativeUpdates && !evolution.review) {
+      context.addIssue({ code: "custom", path: ["review"], message: "Normative knowledge updates require independent review" });
     }
-    if (evolution.updates.some((update) => update.authority === "normative") && !evolution.approval) {
+    if (hasNormativeUpdates && !evolution.approval) {
       context.addIssue({ code: "custom", path: ["approval"], message: "Normative knowledge updates require human approval" });
     }
     if (evolution.status === "applied" && !evolution.applied_at) {
@@ -1283,6 +1360,28 @@ export const ChangeSnapshotSchema = z
       updates: [],
     }),
     completed_actions: z.array(ActionIdSchema).default([]),
+    finish_disposition: z.object({
+      choice: z.enum(["local_merge", "push", "keep"]),
+      status: z.enum(["pending_external_action", "completed"]),
+      recorded_at: TimestampSchema,
+      pending_action: z.string().min(1).nullable(),
+      result_ref: z.string().min(1).optional(),
+      result_commit: GitCommitSchema.optional(),
+      completed_at: TimestampSchema.optional(),
+    }).strict().superRefine((disposition, context) => {
+      if (disposition.status === "completed" && !disposition.completed_at) {
+        context.addIssue({ code: "custom", path: ["completed_at"], message: "A completed disposition must record its completion time" });
+      }
+      if (disposition.status === "completed" && disposition.pending_action !== null) {
+        context.addIssue({ code: "custom", path: ["pending_action"], message: "A completed disposition cannot retain a pending action" });
+      }
+      if (disposition.status === "pending_external_action" && !disposition.pending_action) {
+        context.addIssue({ code: "custom", path: ["pending_action"], message: "A pending disposition must describe the external action" });
+      }
+      if (disposition.choice === "keep" && disposition.status !== "completed") {
+        context.addIssue({ code: "custom", path: ["status"], message: "keep does not require an external action" });
+      }
+    }).optional(),
     finished_at: TimestampSchema.optional(),
     delivery_head: GitCommitSchema.optional(),
     based_on_change: ChangeIdSchema.optional(),
@@ -1322,6 +1421,13 @@ export const ChangeSnapshotSchema = z
         code: "custom",
         path: ["archived_at"],
         message: "An archived change must record archived_at",
+      });
+    }
+    if (snapshot.finished_at !== undefined && snapshot.finish_disposition?.status === "pending_external_action") {
+      context.addIssue({
+        code: "custom",
+        path: ["finished_at"],
+        message: "A Change cannot be finished while its external disposition is pending",
       });
     }
     if (snapshot.revisions.filter((revision) => revision.status === "open").length > 1) {
@@ -1367,6 +1473,7 @@ export const ConfigSchema = z
   .object({
     schema_version: z.literal(1).default(1),
     default_profile: WorkflowProfileSchema.default("standard"),
+    artifact_language: z.enum(["zh-CN", "en-US"]).default("zh-CN"),
     capabilities: z.record(z.string().min(1), CapabilityBindingSchema).default({}),
     workspace: WorkspaceConfigSchema.default({
       mode: "auto",

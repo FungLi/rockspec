@@ -1,4 +1,4 @@
-# {{capability}} Spec Delta
+# {{capability}} 规格变更
 
 ## ADDED Requirements
 

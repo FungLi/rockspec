@@ -31,7 +31,7 @@
 | `findings` | Finding severity、category、owner_domain、route_to 和最终状态 |
 | `escaped_defects` | Archive 后确认与该 Change 相关的缺陷数及严重度 |
 
-确认成本必须与质量结果一起评估：减少章节停点不能删除完整产物、独立 Review、Hash Approval、Evidence 或 Final CR；同一 Authority 决策被换一种措辞再次询问应计为重复停点，而不是治理收益。
+确认成本必须与质量结果一起评估：减少章节停点不能删除完整产物、适用的独立 Review、Hash Approval、Evidence 或 Final CR；同一 Authority 决策被换一种措辞再次询问应计为重复停点，而不是治理收益。纯 `derived` 知识整理采用 Author 自检和 Engine 确定性校验，不属于需要独立 Review 的 Authority 变化。
 
 ## Gate 收益判断
 

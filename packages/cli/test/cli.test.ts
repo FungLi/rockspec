@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -87,6 +88,13 @@ async function writeArtifact(
   await writeFile(path.join(root, ".rockspec", "changes", changeId, relativePath), content);
 }
 
+async function writeImplementedReport(root: string, changeId: string, relativePath: string, body: string): Promise<void> {
+  const current = await readFile(path.join(root, ".rockspec", "changes", changeId, relativePath), "utf8");
+  const frontmatterEnd = current.indexOf("\n---\n", 4);
+  if (!current.startsWith("---\n") || frontmatterEnd < 0) throw new Error(`Missing generated report metadata in ${relativePath}`);
+  await writeArtifact(root, changeId, relativePath, `${current.slice(0, frontmatterEnd + 5)}\n# Implementer Report\n\n${body}\n`);
+}
+
 async function approvedSpecHash(root: string, changeId: string): Promise<string> {
   const snapshot = parse(await readFile(
     path.join(root, ".rockspec", "changes", changeId, "change.yaml"),
@@ -106,7 +114,15 @@ async function writeCodeReview(
 ): Promise<void> {
   const action = relativePath.includes("delivery") ? "delivery.review" : "task.review";
   const role = relativePath.includes("delivery") ? "delivery_reviewer" : "task_reviewer";
-  const reviewerExecutionId = await startExecutionCli(root, changeId, action, role);
+  const taskId = /^reviews\/tasks\/(T-\d{3,})-review\.md$/.exec(relativePath)?.[1];
+  const packagePath = action === "delivery.review"
+    ? `runtime/reviews/delivery-${subject.base_commit.slice(0, 7)}..${subject.head_commit.slice(0, 7)}.diff`
+    : `runtime/reviews/task-${taskId}-${subject.base_commit.slice(0, 7)}..${subject.head_commit.slice(0, 7)}.diff`;
+  const packageContent = await readFile(path.join(root, ".rockspec", "changes", changeId, packagePath));
+  const reviewerExecutionId = await startExecutionCli(root, changeId, action, role, {
+    path: packagePath,
+    hash: `sha256:${createHash("sha256").update(packageContent).digest("hex")}`,
+  });
   await writeArtifact(
     root,
     changeId,
@@ -115,8 +131,17 @@ async function writeCodeReview(
   );
 }
 
-async function startExecutionCli(root: string, changeId: string, action: string, role: string): Promise<string> {
-  const result = await run(root, ["execution", "start", action, changeId, "--role", role]);
+async function startExecutionCli(
+  root: string,
+  changeId: string,
+  action: string,
+  role: string,
+  context?: { path: string; hash: string },
+): Promise<string> {
+  const result = await run(root, [
+    "execution", "start", action, changeId, "--role", role,
+    ...(context ? ["--context-package", context.path, "--context-hash", context.hash] : []),
+  ]);
   expect(result.exitCode, result.stderr).toBe(0);
   return ((result.json?.data as { started_execution: { id: string } }).started_execution.id);
 }
@@ -192,6 +217,18 @@ describe("rockspec CLI", () => {
       },
     });
     expect((summary.json?.data as Record<string, unknown>).evidence).toBeUndefined();
+
+    const resume = await run(root, ["status", "compact-status", "--view", "resume"]);
+    expect(resume.json).toMatchObject({
+      ok: true,
+      data: {
+        view: "resume",
+        change_id: "compact-status",
+        remaining_tasks: [],
+        open_executions: [],
+        resume_note: expect.stringContaining("Engine 已持久化状态"),
+      },
+    });
 
     const full = await run(root, ["status", "compact-status", "--full"]);
     expect(full.json).toMatchObject({
@@ -610,7 +647,7 @@ describe("rockspec CLI", () => {
       root,
       id,
       "design.md",
-      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nExport through the existing public service boundary.\n\n## Decisions\n\n### D-001\n\nUse a deterministic JSON response.\n`,
+      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nExport through the existing public service boundary.\n\n## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse the existing service instead of adding a parallel export stack.\n\n## Decisions\n\n### D-001 Deterministic export\n\n#### 目标与覆盖范围\n\nCover R-001 and S-001 only.\n\n#### 架构决策\n\nUse a deterministic JSON response.\n\n#### 模块与职责\n\nThe existing export service owns serialization.\n\n#### 接口与数据流\n\nThe request flows through the public export service to JSON serialization.\n\n#### 失败与边界行为\n\nInvalid profile data returns the existing validation error.\n\n#### 安全与隐私\n\nDo not log profile data.\n\n#### 兼容、迁移与回滚\n\nPreserve the public API; rollback reverts the implementation commit.\n\n#### 验证策略\n\nRun focused export and regression tests.\n\n#### 取舍与剩余风险\n\nPrefer compatibility; residual risk is None.\n\n## 未解决风险\n\nNone.\n`,
     );
     await run(root, ["action", "complete", "design.technical", id]);
     expect((await approveCli(root, id, "design")).json).toMatchObject({
@@ -643,7 +680,7 @@ describe("rockspec CLI", () => {
         valid: true,
         change_id: id,
         task_count: 1,
-        review_modes: ["product", "scope_blocked"],
+        review_modes: ["product", "scope_blocked", "historical_attribution"],
         installation: { valid: true, project_root: root },
       },
     });
@@ -654,17 +691,17 @@ describe("rockspec CLI", () => {
       },
     });
 
-    await run(root, ["task", "start", "T-001", id]);
+    expect((await run(root, ["task", "start", "T-001", id])).exitCode).toBe(0);
     await writeFile(path.join(root, "profile-export.ts"), "export const profileExport = true;\n");
     await writeArtifact(root, id, "reviews/tasks/T-001-review.md", "# Review\n\nVerdict: PASS\n");
     await execFileAsync("git", ["add", "."], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat(profile): [T-001] add profile export"], { cwd: root });
     const taskCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
-    await writeArtifact(
+    await writeImplementedReport(
       root,
       id,
       "runtime/tasks/T-001/implementer-report.md",
-      "# Implementer Report\n\nImplemented and verified profile export.\n",
+      "Implemented and verified profile export.",
     );
     await run(root, [
       "check", "run", "--change", id, "--task", "T-001", "--",

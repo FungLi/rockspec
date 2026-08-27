@@ -92,6 +92,9 @@ export interface BlockReason {
   code: string;
   message: string;
   paths?: string[];
+  expected?: string;
+  received?: string;
+  allowed?: string[];
 }
 
 export interface StatusResult {
@@ -108,6 +111,7 @@ export interface StatusResult {
 export interface ValidationResult {
   valid: boolean;
   gate?: string;
+  artifact?: string;
   errors: BlockReason[];
   warnings: BlockReason[];
   status: StatusResult;
@@ -126,11 +130,12 @@ export interface ImplementationPreflightResult {
     status: "passed";
     detail: string;
   }>;
-  review_modes: ["product", "scope_blocked"];
+  review_modes: ["product", "scope_blocked", "historical_attribution"];
 }
 
 export interface ValidateInput extends ChangeInput {
   gate?: string;
+  artifactPath?: string;
   strict?: boolean;
 }
 
@@ -203,6 +208,15 @@ export interface ApprovalPackageResult {
     scenario_ids: string[];
     decision_ids: string[];
     task_ids: string[];
+  };
+  review_summary: {
+    language: "zh-CN" | "en-US";
+    title: string;
+    approval_prompt: string;
+    machine_receipt_note: string;
+    artifact_root: string;
+    artifacts: Array<{ label: string; path: string; relative_path: string; description: string }>;
+    sections: Array<{ title: string; items: string[] }>;
   };
 }
 
@@ -363,7 +377,7 @@ export interface ReviewPackageInput extends ChangeInput {
 export interface ReviewPackageResult {
   kind: "task" | "delivery";
   task_id?: string;
-  mode?: "product" | "scope_blocked";
+  mode?: "product" | "scope_blocked" | "historical_attribution";
   scope?: {
     planned_paths: string[];
     changed_paths: string[];
@@ -383,8 +397,16 @@ export interface KnowledgePackageResult {
   delta_hash?: string;
   baseline_hashes: Record<string, string | null>;
   candidate_hashes: Record<string, string>;
+  review_required: boolean;
   review_path?: string;
   requires_human_approval: boolean;
+  semantic_warnings: Array<{
+    code: "POSSIBLE_NORMATIVE_MODAL_CHANGE";
+    target: string;
+    message: string;
+    before_markers: string[];
+    after_markers: string[];
+  }>;
 }
 
 export interface RunCheckInput extends ChangeInput {
@@ -412,6 +434,9 @@ export interface RunCheckResult extends StatusResult {
 
 export interface FinishInput extends ChangeInput {
   disposition?: "local_merge" | "push" | "keep";
+  executed?: boolean;
+  resultRef?: string;
+  resultCommit?: string;
 }
 
 export interface ArchiveResult extends StatusResult {

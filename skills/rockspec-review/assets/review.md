@@ -27,7 +27,7 @@ findings: []
 | Code Standards | {{result}} | {{evidence}} |
 | Test Quality | {{result}} | {{evidence}} |
 
-## Findings
+## 评审发现
 
 `PASS` 可以使用 `findings: []`。`CHANGES_REQUIRED` 或 `BLOCKED` 必须把至少一个 Open Finding 写入 Frontmatter；以下是单项结构，不能只写在正文：
 

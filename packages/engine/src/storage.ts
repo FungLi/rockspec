@@ -44,6 +44,7 @@ export interface GitWorkspaceContext {
 export const DEFAULT_CONFIG: RockSpecConfig = {
   schema_version: 1,
   default_profile: "standard",
+  artifact_language: "zh-CN",
   max_review_rounds: 3,
   max_reconciliation_rounds: 2,
   environment_preflight: [],
