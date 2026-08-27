@@ -19,20 +19,26 @@ description: RockSpec 主会话 PM 编排器；控制循环读 Worklist 选下�
 
 ```
 loop:
-  ledger = rockspec status --view worklist     # 从 Ledger 拉全景，不靠记忆
-  item = 选无依赖阻塞的下一项                     # depends_on 闭合即可选；顺序你判断，非引擎强制
-  if 无可选项:
-    if 全部 passed 且 Finish 不变式满足:
+  board = rockspec status --view board          # 从 Ledger 拉看板，不靠记忆
+  # 「下一张可拉取的卡」由看板确定性给出（status==pending 且依赖全 done），
+  # 你不自行推理依赖是否满足——直接取 board.next_pullable。
+  pullable = board.next_pullable                 # 可能多张，无依赖冲突可并行拉取
+  if 存在 in_progress / review 中的卡:
+    等待其生产者 / 制衡者结论登记后再拉新卡（也可与 pullable 并行推进）
+  if pullable 为空 且 无 in_progress/review:
+    if 全部卡在 Done:
         rockspec finish <change-id> → present_disposition_to_user()   # 交付处置交给人
     else:
-        向用户陈列 blockers
+        向用户陈列 blocked 列（等返工 / 等人裁决）
     break
 
-  switch item.status:
-    pending  -> 首次生产：按角色选调度模式（见下）
-    making   -> 等待生产者结论登记；登记后 status 转 checking
-    checking -> dispatch(checker) 为隔离子 agent，独立上下文，冻结产物快照
-    blocked  -> 走隔离返工（见下）
+  for card in pullable:                          # 拉取可开工的卡
+    dispatch 该卡的 maker（首次 BA/SA 走 inline，见下）
+
+  switch 各卡状态:
+    review   -> dispatch(checker) 为隔离子 agent，独立上下文，冻结产物快照
+    blocked(rework)    -> 走隔离返工（见下）
+    blocked(escalated) -> 升级用户裁决
     passed   -> 标记 done，continue
 ```
 

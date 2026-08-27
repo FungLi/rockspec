@@ -25,6 +25,10 @@ import {
   verifyCheckerBinding,
   type FinishCheckResult,
 } from "./conclusions.js";
+import { projectBoard } from "./board.js";
+import { renderBoardMarkdown } from "./board-render.js";
+import { writeFile } from "node:fs/promises";
+import type { Board } from "./types.js";
 import type {
   ArtifactKind,
   ChangeConfig,
@@ -75,6 +79,7 @@ export class Ledger {
         data: item as unknown as Record<string, unknown>,
       });
     }
+    await this.syncBoard(changeId);
     return meta;
   }
 
@@ -82,6 +87,22 @@ export class Ledger {
     const meta = await readMeta(this.repoRoot, changeId);
     const events = await readEvents(this.repoRoot, changeId);
     return projectWorklist({ meta, events });
+  }
+
+  /** 看板投影（Worklist 的列式视图，只读）。 */
+  async board(changeId: string): Promise<Board> {
+    return projectBoard(await this.worklist(changeId));
+  }
+
+  /**
+   * 重新生成 board.md（单向派生的只读镜像）。
+   * 从事件流重新投影覆盖写，永远与真相一致；任何手动编辑都会被覆盖。
+   * 所有写操作末尾调用它。
+   */
+  private async syncBoard(changeId: string): Promise<void> {
+    const board = await this.board(changeId);
+    const file = path.join(changeDir(this.repoRoot, changeId), "board.md");
+    await writeFile(file, renderBoardMarkdown(board), "utf8");
   }
 
   private async requireItem(changeId: string, artifactId: string): Promise<WorklistItem> {
@@ -102,6 +123,7 @@ export class Ledger {
       artifact_id: artifactId,
       data: { mode, attempts: item.attempts },
     });
+    await this.syncBoard(changeId);
     return { mode };
   }
 
@@ -114,14 +136,36 @@ export class Ledger {
       artifact_id: conclusion.artifact_id,
       data: { conclusion: conclusion as unknown as Record<string, unknown> },
     });
+    // SA 拆出的 code Task 动态注册进看板（多 Task 支持）
+    if (conclusion.registers && conclusion.registers.length > 0) {
+      const existing = new Set((await this.worklist(changeId)).items.map((i) => i.artifact_id));
+      for (const task of conclusion.registers) {
+        if (existing.has(task.artifact_id)) continue;
+        const item: Omit<WorklistItem, "status" | "attempts"> = {
+          artifact_id: task.artifact_id,
+          kind: "code",
+          phase: "apply",
+          maker_role: "dev",
+          checker_role: "cr",
+          depends_on: task.depends_on,
+        };
+        await appendEvent(this.repoRoot, changeId, {
+          type: "item.registered",
+          artifact_id: task.artifact_id,
+          data: item as unknown as Record<string, unknown>,
+        });
+      }
+    }
     if (conclusion.blockers.length > 0) {
       await appendEvent(this.repoRoot, changeId, {
         type: "item.escalated",
         artifact_id: conclusion.artifact_id,
         data: { blockers: conclusion.blockers },
       });
+      await this.syncBoard(changeId);
       return { escalated: true };
     }
+    await this.syncBoard(changeId);
     return { escalated: false };
   }
 
@@ -135,6 +179,7 @@ export class Ledger {
       artifact_id: artifactId,
       data: { mark: mark as unknown as Record<string, unknown> },
     });
+    await this.syncBoard(changeId);
     return mark;
   }
 
@@ -170,6 +215,7 @@ export class Ledger {
         data: { problem_owner: conclusion.problem_owner, findings: conclusion.findings },
       });
     }
+    await this.syncBoard(changeId);
     return { verdict: conclusion.verdict };
   }
 
@@ -197,6 +243,7 @@ export class Ledger {
     meta.finished_at = new Date().toISOString();
     await writeMeta(this.repoRoot, meta);
     await appendEvent(this.repoRoot, changeId, { type: "change.finished" });
+    await this.syncBoard(changeId);
   }
 
   async archive(changeId: string): Promise<void> {
@@ -208,6 +255,7 @@ export class Ledger {
     meta.archived_at = new Date().toISOString();
     await writeMeta(this.repoRoot, meta);
     await appendEvent(this.repoRoot, changeId, { type: "change.archived" });
+    await this.syncBoard(changeId);
   }
 
   async list(): Promise<string[]> {

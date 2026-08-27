@@ -97,12 +97,25 @@ verdict_ref: <conclusion-id>     # 制衡者结论登记后写入
 - **APPLY（实施期）**：Dev → CR → TE。阶段内按 `problem_owner` 路由。
 - **跨 PROPOSE↔APPLY 边界的问题只能升级给人**，不能自动回退。RR PASS + 人确认后才进入 APPLY。
 
+## 看板（Board）
+
+看板是 Worklist 的列式投影——**事件流的只读镜子，不是第二份真相**。卡的流转只由带证据的事件驱动，任何人（含 PM）都不能手动移卡。
+
+- **五列**：`Backlog`(pending) → `In Progress`(making) → `Review`(made/checking) → `Done`(passed)；外加 `Blocked`。
+- **Blocked 分两子区**：`等返工`(REJECT，owner 回 maker) 与 `等人裁决`(escalated，owner=人)。
+- **owner 由列推导**：In Progress→maker、Review→checker、Blocked(rework)→maker、Blocked(escalated)→人、Backlog/Done→无。
+- **nextPullable（确定性）**：可拉取的卡 = `status==pending 且 depends_on 全部 done`。PM **拉取这个集合里的卡**开工，而非自行推理依赖是否满足；集合可含多张（无依赖冲突则并行）。
+- **进 Done 的唯一条件** = 单卡版 Finish 不变式：制衡 PASS + hook clean + subject_hash 匹配。
+- **board.md**：每个写命令后由 Ledger 从事件流单向重生成 `.rockspec/changes/<id>/board.md`（给人看的只读镜像，手编会被覆盖）。
+
 ## CLI 子命令集（rockspec）
 
 | 命令 | 用途 | 主要调用者 |
 |---|---|---|
 | `rockspec status --view worklist` | 拉工作清单全景 | PM |
 | `rockspec status --view resume` | 跨压缩续接投影 | PM |
+| `rockspec status --view board` | 看板泳道视图（含 nextPullable、关键链） | PM |
+| `rockspec board <change-id>` | 打印看板并提示 board.md 位置 | 人 / PM |
 | `rockspec brief <role> --artifact <id>` | Ledger 冻结投影生成 dispatch brief（PM 不手写 brief） | PM |
 | `rockspec check <artifact>` | 跑确定性检测集，写 hook mark | 生产者 hook 自动触发 |
 | `rockspec mark <artifact>` | 读产物当前 mark 状态（clean/dirty） | 制衡者 |
