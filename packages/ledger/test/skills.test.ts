@@ -1,4 +1,4 @@
-// 校验 rs2-* skill 齐备且 frontmatter 合法。
+// 校验 rockspec-* skill 齐备且 frontmatter 合法。
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -9,14 +9,14 @@ import { parse } from "yaml";
 const repoRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 const RS2_SKILLS = [
-  "rs2-pm",
-  "rs2-ba",
-  "rs2-sa",
-  "rs2-rr",
-  "rs2-dev",
-  "rs2-cr",
-  "rs2-te",
-  "rs2-glossary",
+  "rockspec-pm",
+  "rockspec-ba",
+  "rockspec-sa",
+  "rockspec-rr",
+  "rockspec-dev",
+  "rockspec-cr",
+  "rockspec-te",
+  "rockspec-glossary",
 ];
 
 function frontmatter(md: string): { name?: string; description?: string } {
@@ -24,7 +24,7 @@ function frontmatter(md: string): { name?: string; description?: string } {
   return m ? (parse(m[1]!) as { name?: string; description?: string }) : {};
 }
 
-describe("rs2 skills", () => {
+describe("rockspec skills", () => {
   it("发布全部 7 角色 + 词汇表 skill", () => {
     for (const skill of RS2_SKILLS) {
       expect(existsSync(path.join(repoRoot, "skills", skill, "SKILL.md"))).toBe(true);
@@ -42,14 +42,14 @@ describe("rs2 skills", () => {
   });
 
   it("制衡者 skill 声明「先读 hook mark 脏则直接打回」", async () => {
-    for (const skill of ["rs2-rr", "rs2-cr", "rs2-te"]) {
+    for (const skill of ["rockspec-rr", "rockspec-cr", "rockspec-te"]) {
       const md = await readFile(path.join(repoRoot, "skills", skill, "SKILL.md"), "utf8");
       expect(md).toMatch(/hook mark|Hook mark|hook 标记/);
     }
   });
 
   it("PM skill 声明双模式切换与三铁律", async () => {
-    const md = await readFile(path.join(repoRoot, "skills", "rs2-pm", "SKILL.md"), "utf8");
+    const md = await readFile(path.join(repoRoot, "skills", "rockspec-pm", "SKILL.md"), "utf8");
     expect(md).toMatch(/inline/);
     expect(md).toMatch(/折叠|fold/);
   });

@@ -20,14 +20,14 @@ RockSpec 是面向编码 agent 的**受治理变更交付**框架。主会话扮
 
 ```text
 packages/ledger/     # @rockspec/ledger —— 自包含的 Ledger + Hook + CLI
-skills/rs2-pm/       # PM 编排器
-skills/rs2-ba/       # 业务分析师（需求）
-skills/rs2-sa/       # 方案架构师（设计 + Task）
-skills/rs2-rr/       # 就绪评审员（PROPOSE 出口硬校验）
-skills/rs2-dev/      # 开发（TDD）
-skills/rs2-cr/       # 代码审查
-skills/rs2-te/       # 测试（4 类验收）
-skills/rs2-glossary/ # 结论协议 / Hook mark / Finish 不变式 词汇表
+skills/rockspec-pm/       # PM 编排器
+skills/rockspec-ba/       # 业务分析师（需求）
+skills/rockspec-sa/       # 方案架构师（设计 + Task）
+skills/rockspec-rr/       # 就绪评审员（PROPOSE 出口硬校验）
+skills/rockspec-dev/      # 开发（TDD）
+skills/rockspec-cr/       # 代码审查
+skills/rockspec-te/       # 测试（4 类验收）
+skills/rockspec-glossary/ # 结论协议 / Hook mark / Finish 不变式 词汇表
 ```
 
 `@rockspec/ledger` 只依赖 `yaml` / `zod` / `commander`，无其他内部包依赖。
@@ -72,13 +72,13 @@ pnpm rockspec archive my-change
 
 全局选项：`--json`（结构化输出）、`--repo <path>`（指定仓库根，默认当前目录）。
 
-Change 状态存于目标仓库的 `.rockspec2/changes/<id>/`：`change.yaml`（元数据）+ `events.ndjson`（仅追加事件日志）+ 各产物文件。
+Change 状态存于目标仓库的 `.rockspec/changes/<id>/`：`change.yaml`（元数据）+ `events.ndjson`（仅追加事件日志）+ 各产物文件。
 
 ## 结论协议（要点）
 
-生产者与制衡者各产出一个结构化结论。制衡者结论的 `subject_hash` 必须等于当前产物 hash，否则 Ledger 拒绝登记。完整字段见 `skills/rs2-glossary/SKILL.md`。
+生产者与制衡者各产出一个结构化结论。制衡者结论的 `subject_hash` 必须等于当前产物 hash，否则 Ledger 拒绝登记。完整字段见 `skills/rockspec-glossary/SKILL.md`。
 
 ## 状态
 
-- 已实现：Ledger（事件日志 + 投影）、Hook 层、结论协议、subject_hash 绑定、Finish 不变式、放漂三级、`rockspec2`→`rockspec` CLI 全链路、7 角色 + 词汇表 skill。
+- 已实现：Ledger（事件日志 + 投影）、Hook 层、结论协议、subject_hash 绑定、Finish 不变式、放漂三级、`rockspec`→`rockspec` CLI 全链路、7 角色 + 词汇表 skill。
 - 已知边界（见执行计划文档）：model tier 强制门待接 host adapter；code 证据检测待接 git；Ledger 多进程锁；skill 的 host 分发集成。
