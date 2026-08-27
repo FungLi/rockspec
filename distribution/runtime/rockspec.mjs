@@ -10789,11 +10789,14 @@ var require_commander = __commonJS({
   }
 });
 
+// packages/cli/src/program.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+
 // packages/engine/dist/engine.js
 var import_yaml2 = __toESM(require_dist(), 1);
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { execFile as execFile2 } from "node:child_process";
-import { cp, mkdir as mkdir2, readFile as readFile3, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { cp, mkdir as mkdir2, readFile as readFile3, realpath as realpath2, rename as rename2, rm as rm2 } from "node:fs/promises";
 import path3 from "node:path";
 import { promisify as promisify2 } from "node:util";
 
@@ -25324,6 +25327,7 @@ var WORKFLOW_STATES = [
   "READY",
   "IMPLEMENTING",
   "ACCEPTANCE_VALIDATING",
+  "UAT_PENDING",
   "FINAL_REVIEW",
   "VERIFYING",
   "READY_TO_FINISH",
@@ -25344,6 +25348,7 @@ var ACTION_IDS = [
   "task.execute",
   "task.review",
   "acceptance.validate",
+  "acceptance.uat",
   "delivery.review",
   "change.verify",
   "knowledge.evolve",
@@ -25353,6 +25358,22 @@ var REVISION_TARGETS = ["requirements", "design", "prototype", "plan"];
 var REVISION_STATUSES = ["open", "reconciled"];
 var REVISION_MODES = ["pre_implementation", "implementation_recovery", "feedback_reopen"];
 var FEEDBACK_INTERACTION_MODES = ["reconcile", "compact", "full"];
+var UAT_POLICIES = ["required", "optional", "not_applicable"];
+var EXECUTION_ROLES = [
+  "requirements_author",
+  "requirements_reviewer",
+  "design_author",
+  "planner",
+  "readiness_reviewer",
+  "task_implementer",
+  "task_reviewer",
+  "acceptance_engineer",
+  "delivery_reviewer",
+  "revision_author",
+  "reconciliation_reviewer",
+  "knowledge_author",
+  "knowledge_reviewer"
+];
 var REVISION_KINDS = ["upstream", "remediation"];
 var REVIEW_VERDICTS = ["PASS", "CHANGES_REQUIRED", "BLOCKED"];
 var RESERVED_CHANGE_IDS = [
@@ -25485,6 +25506,33 @@ var InstallLockSchema = external_exports.object({
   managed_paths: external_exports.array(ManagedInstallPathSchema)
 }).strict();
 
+// packages/protocol/dist/markdown.js
+function parseMarkdownHeading(line) {
+  const match = /^ {0,3}(#{1,6})\s+(\S.*)\s*$/.exec(line);
+  return match ? { level: match[1].length, title: match[2] } : void 0;
+}
+function scanMarkdown(markdown) {
+  const lines = markdown.split(/\r?\n/);
+  let fence;
+  return lines.map((text, index) => {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(text);
+    const wasInFence = fence !== void 0;
+    if (!fence && marker) {
+      fence = { marker: marker[1][0], length: marker[1].length };
+    } else if (fence && marker && marker[1][0] === fence.marker && marker[1].length >= fence.length && marker[2].trim() === "") {
+      fence = void 0;
+    }
+    const inFence = wasInFence || marker !== null;
+    return {
+      index,
+      number: index + 1,
+      text,
+      inFence,
+      ...!inFence && parseMarkdownHeading(text) ? { heading: parseMarkdownHeading(text) } : {}
+    };
+  });
+}
+
 // packages/protocol/dist/profile.js
 var CHANGE_KINDS = [
   "copy",
@@ -25585,6 +25633,8 @@ var RevisionGatePolicySchema = external_exports.enum(["preserve", "auto", "human
 var AuthorityImpactSchema = external_exports.enum(AUTHORITY_IMPACTS);
 var RevisionClassificationSchema = external_exports.enum(REVISION_CLASSIFICATIONS);
 var FeedbackInteractionModeSchema = external_exports.enum(FEEDBACK_INTERACTION_MODES);
+var UatPolicySchema = external_exports.enum(UAT_POLICIES);
+var ExecutionRoleSchema = external_exports.enum(EXECUTION_ROLES);
 var RevisionTriggerSchema = external_exports.object({
   review_id: external_exports.string().min(1),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).min(1),
@@ -25628,7 +25678,9 @@ var ApprovalSchema = external_exports.object({
   approved_at: TimestampSchema,
   mode: ApprovalModeSchema.default("human"),
   revision_id: external_exports.string().regex(/^RV-\d{3,}$/).optional(),
-  authority_basis_hash: Sha256Schema.optional()
+  authority_basis_hash: Sha256Schema.optional(),
+  package_path: external_exports.string().min(1).optional(),
+  package_hash: Sha256Schema.optional()
 }).strict().superRefine((approval, context) => {
   if (approval.mode === "auto" && (!approval.revision_id || !approval.authority_basis_hash)) {
     context.addIssue({
@@ -25821,9 +25873,72 @@ var PrototypeSchema = external_exports.object({
     });
   }
 });
+var TriageDecisionSchema = external_exports.object({
+  kind: ChangeKindSchema,
+  risk_tags: external_exports.array(external_exports.string().trim().min(1)).default([]),
+  minimum_profile: WorkflowProfileSchema,
+  reasons: external_exports.array(external_exports.string().trim().min(1)).min(1)
+}).strict();
+var UatStateSchema = external_exports.object({
+  policy: UatPolicySchema,
+  status: external_exports.enum(["pending", "confirmed", "not_required"]),
+  report_path: external_exports.string().min(1).optional(),
+  report_hash: Sha256Schema.optional(),
+  commit: GitCommitSchema.optional(),
+  confirmed_at: TimestampSchema.optional()
+}).strict().superRefine((uat, context) => {
+  if (uat.policy === "required" && uat.status === "not_required") {
+    context.addIssue({ code: "custom", path: ["status"], message: "Required UAT cannot be marked not_required" });
+  }
+  if (uat.status === "confirmed" && (!uat.report_path || !uat.report_hash || !uat.commit || !uat.confirmed_at)) {
+    context.addIssue({ code: "custom", path: ["status"], message: "Confirmed UAT must bind its report, Commit, and time" });
+  }
+});
+var ExecutionRecordSchema = external_exports.object({
+  id: external_exports.string().uuid(),
+  role: ExecutionRoleSchema,
+  action: external_exports.string().regex(/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/),
+  started_at: TimestampSchema,
+  completed_at: TimestampSchema.optional(),
+  outcome: external_exports.enum(["success", "error", "cancelled"]).optional(),
+  model_tier: external_exports.enum(["fast", "balanced", "deep"]).optional(),
+  host_model: external_exports.string().trim().min(1).optional(),
+  parent_execution_id: external_exports.string().uuid().optional(),
+  context_package_path: external_exports.string().min(1).optional(),
+  context_package_hash: Sha256Schema.optional(),
+  context_package_verified: external_exports.boolean().optional(),
+  usage: external_exports.object({
+    input_tokens: external_exports.number().int().nonnegative().optional(),
+    cached_input_tokens: external_exports.number().int().nonnegative().optional(),
+    output_tokens: external_exports.number().int().nonnegative().optional(),
+    reasoning_tokens: external_exports.number().int().nonnegative().optional()
+  }).strict().optional()
+}).strict().superRefine((execution, context) => {
+  if (execution.context_package_path === void 0 !== (execution.context_package_hash === void 0)) {
+    context.addIssue({ code: "custom", path: ["context_package_path"], message: "Context package path and hash must be provided together" });
+  }
+  if (execution.context_package_verified && execution.context_package_path === void 0) {
+    context.addIssue({ code: "custom", path: ["context_package_verified"], message: "Verified context requires a bound package" });
+  }
+  if (execution.outcome !== void 0 && execution.completed_at === void 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["completed_at"],
+      message: "Execution outcome requires a completion time"
+    });
+  }
+  if (execution.completed_at && execution.completed_at < execution.started_at) {
+    context.addIssue({
+      code: "custom",
+      path: ["completed_at"],
+      message: "Execution completion cannot precede its start"
+    });
+  }
+});
 var ExecutionSchema = external_exports.object({
   active_task: external_exports.string().regex(/^T-\d{3,}$/).nullable(),
-  active_execution: external_exports.string().min(1).nullable()
+  active_execution: external_exports.string().min(1).nullable(),
+  registry: external_exports.array(ExecutionRecordSchema).default([])
 }).strict().superRefine((execution, context) => {
   if (execution.active_task === null !== (execution.active_execution === null)) {
     context.addIssue({
@@ -25832,12 +25947,21 @@ var ExecutionSchema = external_exports.object({
       message: "active_task and active_execution must both be set or both be null"
     });
   }
+  const ids = execution.registry.map((record2) => record2.id);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: "custom", path: ["registry"], message: "Execution IDs must be unique" });
+  }
 });
 var RepositoryRelativePathSchema = external_exports.string().min(1).refine((value) => !pathLikeAbsolute(value) && !value.includes("\\") && !value.split("/").includes("..") && value !== ".rockspec" && !value.startsWith(".rockspec/"), "Expected a normalized repository-relative product path outside .rockspec");
 var ReviewSubjectSchema = external_exports.object({
   base_commit: GitCommitSchema,
   head_commit: GitCommitSchema,
   diff_hash: Sha256Schema
+}).strict();
+var ScopeAssessmentSchema = external_exports.object({
+  path: RepositoryRelativePathSchema,
+  disposition: external_exports.enum(["justified", "unrelated"]),
+  rationale: external_exports.string().trim().min(1)
 }).strict();
 var InterfaceContractSchema = external_exports.string().trim().min(1).max(500);
 var PlanDefinitionSchema = external_exports.object({
@@ -25852,6 +25976,67 @@ var PlanDefinitionSchema = external_exports.object({
     });
   }
 });
+var AssumptionSchema = external_exports.object({
+  id: external_exports.string().regex(/^A-\d{3,}$/),
+  description: external_exports.string().trim().min(1),
+  basis: external_exports.string().trim().min(1),
+  impact_if_wrong: external_exports.string().trim().min(1)
+}).strict();
+var OpenQuestionSchema = external_exports.object({
+  id: external_exports.string().regex(/^Q-\d{3,}$/),
+  question: external_exports.string().trim().min(1),
+  impact: external_exports.string().trim().min(1),
+  status: external_exports.enum(["blocking", "non_blocking", "resolved"])
+}).strict();
+var ProposalDefinitionSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  non_goals: external_exports.array(external_exports.string().trim().min(1)).default([]),
+  assumptions: external_exports.array(AssumptionSchema).default([]),
+  open_questions: external_exports.array(OpenQuestionSchema).default([])
+}).strict().superRefine((proposal, context) => {
+  for (const field of ["assumptions", "open_questions"]) {
+    const ids = proposal[field].map((item) => item.id);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({ code: "custom", path: [field], message: `Proposal ${field} IDs must be unique` });
+    }
+  }
+  if (proposal.open_questions.some((question) => question.status === "blocking")) {
+    context.addIssue({ code: "custom", path: ["open_questions"], message: "Blocking Proposal questions must be resolved before Spec Review" });
+  }
+});
+var ApprovalPackageSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  gate: ApprovalGateSchema,
+  generated_at: TimestampSchema,
+  artifact_hashes: external_exports.record(external_exports.string().min(1), Sha256Schema),
+  aggregate_hash: Sha256Schema,
+  summary: external_exports.object({
+    non_goals: external_exports.array(external_exports.string()),
+    assumptions: external_exports.array(AssumptionSchema),
+    open_questions: external_exports.array(OpenQuestionSchema),
+    requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)),
+    scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)),
+    decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)),
+    task_ids: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/))
+  }).strict(),
+  review_summary: external_exports.object({
+    language: external_exports.enum(["zh-CN", "en-US"]),
+    title: external_exports.string().trim().min(1),
+    approval_prompt: external_exports.string().trim().min(1),
+    machine_receipt_note: external_exports.string().trim().min(1),
+    artifact_root: external_exports.string().trim().min(1).optional(),
+    artifacts: external_exports.array(external_exports.object({
+      label: external_exports.string().trim().min(1),
+      path: external_exports.string().trim().min(1),
+      relative_path: external_exports.string().trim().min(1).optional(),
+      description: external_exports.string().trim().min(1).optional()
+    }).strict()).min(1),
+    sections: external_exports.array(external_exports.object({
+      title: external_exports.string().trim().min(1),
+      items: external_exports.array(external_exports.string().trim().min(1)).min(1)
+    }).strict()).min(1)
+  }).strict().optional()
+}).strict();
 var DesignDecisionCoverageSchema = external_exports.object({
   id: external_exports.string().regex(/^D-\d{3,}$/),
   requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)).min(1),
@@ -25902,8 +26087,11 @@ var TaskDefinitionSchema = external_exports.object({
   supersedes: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/)).default([]),
   requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)).min(1),
   scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).min(1),
+  decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)).min(1),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).default([]),
+  adopted_commit: GitCommitSchema.optional(),
   acceptance_criteria: external_exports.array(external_exports.string().trim().min(1)).min(1),
+  validation_commands: external_exports.array(external_exports.string().trim().min(1)).default([]),
   consumes: external_exports.array(InterfaceContractSchema).default([]),
   produces: external_exports.array(InterfaceContractSchema).default([]),
   allowed_paths: external_exports.array(RepositoryRelativePathSchema).min(1)
@@ -25929,7 +26117,7 @@ var TaskDefinitionSchema = external_exports.object({
       message: "A Task cannot supersede itself"
     });
   }
-  for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "finding_ids", "acceptance_criteria", "consumes", "produces"]) {
+  for (const field of ["dependencies", "supersedes", "requirement_ids", "scenario_ids", "decision_ids", "finding_ids", "acceptance_criteria", "validation_commands", "consumes", "produces"]) {
     if (new Set(task[field]).size !== task[field].length) {
       context.addIssue({
         code: "custom",
@@ -25937,6 +26125,44 @@ var TaskDefinitionSchema = external_exports.object({
         message: `Task ${field} values must be unique`
       });
     }
+  }
+});
+var ImplementerBlockerSchema = external_exports.object({
+  kind: external_exports.enum(["contract_conflict", "authority_conflict"]),
+  source_refs: external_exports.array(external_exports.string().trim().min(1)).min(1),
+  summary: external_exports.string().trim().min(1),
+  recommended_route: external_exports.enum(["plan.create", "requirements.clarify", "design.technical"])
+}).strict().superRefine((blocker, context) => {
+  if (blocker.kind === "contract_conflict" && blocker.recommended_route !== "plan.create") {
+    context.addIssue({
+      code: "custom",
+      path: ["recommended_route"],
+      message: "A contract conflict must route to plan.create"
+    });
+  }
+  if (blocker.kind === "authority_conflict" && blocker.recommended_route === "plan.create") {
+    context.addIssue({
+      code: "custom",
+      path: ["recommended_route"],
+      message: "An authority conflict must route to requirements.clarify or design.technical"
+    });
+  }
+});
+var ImplementerReportDocumentSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  task_id: external_exports.string().regex(/^T-\d{3,}$/),
+  execution_id: external_exports.string().min(1),
+  base_commit: GitCommitSchema,
+  brief_path: RepositoryRelativePathSchema,
+  brief_hash: Sha256Schema,
+  outcome: external_exports.enum(["implemented", "blocked"]),
+  blocker: ImplementerBlockerSchema.optional()
+}).strict().superRefine((report, context) => {
+  if (report.outcome === "blocked" && report.blocker === void 0) {
+    context.addIssue({ code: "custom", path: ["blocker"], message: "A blocked report requires a structured blocker" });
+  }
+  if (report.outcome === "implemented" && report.blocker !== void 0) {
+    context.addIssue({ code: "custom", path: ["blocker"], message: "An implemented report cannot declare a blocker" });
   }
 });
 var TaskAttemptSchema = external_exports.object({
@@ -25952,7 +26178,7 @@ var TaskAttemptSchema = external_exports.object({
   review_path: external_exports.string().min(1).optional(),
   review_hash: Sha256Schema.optional(),
   review_subject: ReviewSubjectSchema.optional(),
-  review_package_mode: external_exports.enum(["product", "scope_blocked"]).optional(),
+  review_package_mode: external_exports.enum(["product", "scope_blocked", "historical_attribution"]).optional(),
   review_attempts: external_exports.number().int().nonnegative(),
   started_at: TimestampSchema.optional(),
   suspended_at: TimestampSchema
@@ -25965,8 +26191,11 @@ var TaskRecordSchema = external_exports.object({
   supersedes: external_exports.array(external_exports.string().regex(/^T-\d{3,}$/)).default([]),
   requirement_ids: external_exports.array(external_exports.string().regex(/^R-\d{3,}$/)).default([]),
   scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).default([]),
+  decision_ids: external_exports.array(external_exports.string().regex(/^D-\d{3,}$/)).default([]),
   finding_ids: external_exports.array(external_exports.string().regex(/^F-\d{3,}$/)).default([]),
+  adopted_commit: GitCommitSchema.optional(),
   acceptance_criteria: external_exports.array(external_exports.string().min(1)).default([]),
+  validation_commands: external_exports.array(external_exports.string().min(1)).default([]),
   consumes: external_exports.array(InterfaceContractSchema).default([]),
   produces: external_exports.array(InterfaceContractSchema).default([]),
   allowed_paths: external_exports.array(RepositoryRelativePathSchema).default([]),
@@ -25978,7 +26207,7 @@ var TaskRecordSchema = external_exports.object({
   report_path: external_exports.string().min(1).optional(),
   report_hash: Sha256Schema.optional(),
   review_subject: ReviewSubjectSchema.optional(),
-  review_package_mode: external_exports.enum(["product", "scope_blocked"]).optional(),
+  review_package_mode: external_exports.enum(["product", "scope_blocked", "historical_attribution"]).optional(),
   review_attempts: external_exports.number().int().nonnegative().default(0),
   attempts: external_exports.array(TaskAttemptSchema).default([]),
   started_at: TimestampSchema.optional(),
@@ -26110,6 +26339,7 @@ var ReviewDocumentSchema = external_exports.object({
   reviewer_execution_id: external_exports.string().min(1).refine((value) => !/^(?:TODO|UNKNOWN)$/i.test(value), "Review must identify the actual reviewer execution"),
   subject: ReviewSubjectSchema,
   round: external_exports.number().int().nonnegative().default(0),
+  scope_assessment: external_exports.array(ScopeAssessmentSchema).default([]),
   findings: external_exports.array(FindingSchema).default([])
 }).strict().superRefine((review, context) => {
   if (review.verdict === "PASS" && review.findings.some((finding) => finding.status === "open" && (finding.severity === "critical" || finding.severity === "important"))) {
@@ -26118,6 +26348,9 @@ var ReviewDocumentSchema = external_exports.object({
       path: ["verdict"],
       message: "PASS cannot contain open critical or important findings"
     });
+  }
+  if (review.verdict === "PASS" && review.scope_assessment.some((item) => item.disposition === "unrelated")) {
+    context.addIssue({ code: "custom", path: ["scope_assessment"], message: "PASS cannot accept an unrelated expanded path" });
   }
   if (review.verdict !== "PASS" && !review.findings.some((finding) => finding.status === "open")) {
     context.addIssue({
@@ -26148,11 +26381,22 @@ var StageReviewDocumentSchema = external_exports.object({
     });
   }
 });
+var ScenarioCoverageSchema = external_exports.object({
+  scenario_id: external_exports.string().regex(/^S-\d{3,}$/),
+  test_ids: external_exports.array(external_exports.string().trim().min(1)).min(1),
+  evidence_ids: external_exports.array(external_exports.string().regex(/^E-\d{3,}$/)).min(1)
+}).strict();
+var UiEvidenceCoverageSchema = external_exports.object({
+  dimension: external_exports.enum(["responsive", "accessibility", "interaction"]),
+  evidence_ids: external_exports.array(external_exports.string().regex(/^E-\d{3,}$/)).min(1)
+}).strict();
 var AcceptanceDocumentSchema = external_exports.object({
   schema_version: external_exports.literal(1),
   verdict: ReviewVerdictSchema,
   reviewer_execution_id: external_exports.string().min(1).refine((value) => !/^(?:TODO|UNKNOWN)$/i.test(value), "Acceptance must identify the actual reviewer execution"),
   commit: GitCommitSchema,
+  scenario_coverage: external_exports.array(ScenarioCoverageSchema).default([]),
+  ui_evidence: external_exports.array(UiEvidenceCoverageSchema).default([]),
   findings: external_exports.array(FindingSchema).default([])
 }).strict().superRefine((report, context) => {
   if (report.verdict === "PASS" && report.findings.some((finding) => finding.status === "open")) {
@@ -26161,7 +26405,23 @@ var AcceptanceDocumentSchema = external_exports.object({
   if (report.verdict !== "PASS" && !report.findings.some((finding) => finding.status === "open")) {
     context.addIssue({ code: "custom", path: ["findings"], message: "A non-PASS Acceptance must contain an Open Finding" });
   }
+  const scenarioIds = report.scenario_coverage.map((item) => item.scenario_id);
+  if (new Set(scenarioIds).size !== scenarioIds.length) {
+    context.addIssue({ code: "custom", path: ["scenario_coverage"], message: "Acceptance Scenario coverage must be unique" });
+  }
+  const dimensions = report.ui_evidence.map((item) => item.dimension);
+  if (new Set(dimensions).size !== dimensions.length) {
+    context.addIssue({ code: "custom", path: ["ui_evidence"], message: "UI evidence dimensions must be unique" });
+  }
 });
+var UatDocumentSchema = external_exports.object({
+  schema_version: external_exports.literal(1),
+  verdict: external_exports.literal("CONFIRMED"),
+  confirmed_by: external_exports.string().trim().min(1),
+  commit: GitCommitSchema,
+  scenario_ids: external_exports.array(external_exports.string().regex(/^S-\d{3,}$/)).min(1),
+  notes: external_exports.string().trim().min(1)
+}).strict();
 var ReviewSchema = external_exports.object({
   id: external_exports.string().min(1).optional(),
   kind: external_exports.enum(["requirements", "readiness", "task", "acceptance", "delivery"]).optional(),
@@ -26335,10 +26595,11 @@ var KnowledgeEvolutionSchema = external_exports.object({
   if (["approved", "applied"].includes(evolution.status) && evolution.updates.length === 0) {
     context.addIssue({ code: "custom", path: ["updates"], message: "Knowledge updates are required" });
   }
-  if (["approved", "applied"].includes(evolution.status) && !evolution.review) {
-    context.addIssue({ code: "custom", path: ["review"], message: "Knowledge updates require independent review" });
+  const hasNormativeUpdates = evolution.updates.some((update) => update.authority === "normative");
+  if (["approved", "applied"].includes(evolution.status) && hasNormativeUpdates && !evolution.review) {
+    context.addIssue({ code: "custom", path: ["review"], message: "Normative knowledge updates require independent review" });
   }
-  if (evolution.updates.some((update) => update.authority === "normative") && !evolution.approval) {
+  if (hasNormativeUpdates && !evolution.approval) {
     context.addIssue({ code: "custom", path: ["approval"], message: "Normative knowledge updates require human approval" });
   }
   if (evolution.status === "applied" && !evolution.applied_at) {
@@ -26372,6 +26633,7 @@ var ChangeSnapshotSchema = external_exports.object({
   id: ChangeIdSchema,
   title: external_exports.string().min(1),
   profile: WorkflowProfileSchema,
+  triage: TriageDecisionSchema.optional(),
   state: ChangeStateSchema,
   base_ref: external_exports.string().min(1).nullable(),
   base_commit: GitCommitSchema.nullable(),
@@ -26384,6 +26646,7 @@ var ChangeSnapshotSchema = external_exports.object({
   revisions: external_exports.array(RevisionSchema).default([]),
   feedback_batches: external_exports.array(FeedbackBatchSchema).default([]),
   prototype: PrototypeSchema,
+  uat: UatStateSchema.default({ policy: "not_applicable", status: "not_required" }),
   execution: ExecutionSchema,
   tasks: external_exports.record(external_exports.string().regex(/^T-\d{3,}$/), TaskRecordSchema),
   evidence: external_exports.array(EvidenceSchema).default([]),
@@ -26396,6 +26659,28 @@ var ChangeSnapshotSchema = external_exports.object({
     updates: []
   }),
   completed_actions: external_exports.array(ActionIdSchema).default([]),
+  finish_disposition: external_exports.object({
+    choice: external_exports.enum(["local_merge", "push", "keep"]),
+    status: external_exports.enum(["pending_external_action", "completed"]),
+    recorded_at: TimestampSchema,
+    pending_action: external_exports.string().min(1).nullable(),
+    result_ref: external_exports.string().min(1).optional(),
+    result_commit: GitCommitSchema.optional(),
+    completed_at: TimestampSchema.optional()
+  }).strict().superRefine((disposition, context) => {
+    if (disposition.status === "completed" && !disposition.completed_at) {
+      context.addIssue({ code: "custom", path: ["completed_at"], message: "A completed disposition must record its completion time" });
+    }
+    if (disposition.status === "completed" && disposition.pending_action !== null) {
+      context.addIssue({ code: "custom", path: ["pending_action"], message: "A completed disposition cannot retain a pending action" });
+    }
+    if (disposition.status === "pending_external_action" && !disposition.pending_action) {
+      context.addIssue({ code: "custom", path: ["pending_action"], message: "A pending disposition must describe the external action" });
+    }
+    if (disposition.choice === "keep" && disposition.status !== "completed") {
+      context.addIssue({ code: "custom", path: ["status"], message: "keep does not require an external action" });
+    }
+  }).optional(),
   finished_at: TimestampSchema.optional(),
   delivery_head: GitCommitSchema.optional(),
   based_on_change: ChangeIdSchema.optional(),
@@ -26432,6 +26717,13 @@ var ChangeSnapshotSchema = external_exports.object({
       message: "An archived change must record archived_at"
     });
   }
+  if (snapshot.finished_at !== void 0 && snapshot.finish_disposition?.status === "pending_external_action") {
+    context.addIssue({
+      code: "custom",
+      path: ["finished_at"],
+      message: "A Change cannot be finished while its external disposition is pending"
+    });
+  }
   if (snapshot.revisions.filter((revision) => revision.status === "open").length > 1) {
     context.addIssue({ code: "custom", path: ["revisions"], message: "Only one Revision may be open at a time" });
   }
@@ -26439,6 +26731,13 @@ var ChangeSnapshotSchema = external_exports.object({
 var CapabilityBindingSchema = external_exports.object({
   provider: external_exports.string().min(1),
   distribution: external_exports.enum(["bundled", "installed", "host"]).default("installed")
+}).strict();
+var EnvironmentPreflightCheckSchema = external_exports.object({
+  id: external_exports.string().regex(/^[a-z][a-z0-9._-]*$/),
+  kind: external_exports.enum(["database", "browser", "credential", "custom"]),
+  command: external_exports.string().trim().min(1),
+  args: external_exports.array(external_exports.string()).default([]),
+  required: external_exports.boolean().default(true)
 }).strict();
 var WorkspaceConfigSchema = external_exports.object({
   mode: external_exports.enum(["auto", "current", "worktree"]).default("auto"),
@@ -26449,6 +26748,7 @@ var WorkspaceConfigSchema = external_exports.object({
 var ConfigSchema = external_exports.object({
   schema_version: external_exports.literal(1).default(1),
   default_profile: WorkflowProfileSchema.default("standard"),
+  artifact_language: external_exports.enum(["zh-CN", "en-US"]).default("zh-CN"),
   capabilities: external_exports.record(external_exports.string().min(1), CapabilityBindingSchema).default({}),
   workspace: WorkspaceConfigSchema.default({
     mode: "auto",
@@ -26456,8 +26756,9 @@ var ConfigSchema = external_exports.object({
     branch_prefix: "rockspec/",
     auto_create: false
   }),
-  max_review_rounds: external_exports.number().int().min(1).max(10).optional(),
-  max_reconciliation_rounds: external_exports.number().int().min(1).max(5).default(2)
+  max_review_rounds: external_exports.number().int().min(1).max(10).default(3),
+  max_reconciliation_rounds: external_exports.number().int().min(1).max(5).default(2),
+  environment_preflight: external_exports.array(EnvironmentPreflightCheckSchema).default([])
 }).strict();
 function parseChangeSnapshot(input) {
   return parseProtocol(ChangeSnapshotSchema, input, "change snapshot");
@@ -26489,6 +26790,7 @@ var SpecDocumentSchema = external_exports.object({
 }).strict();
 function validateSpec(markdown) {
   const lines = markdown.split(/\r?\n/);
+  const scanned = scanMarkdown(markdown);
   const issues = [];
   const drafts = [];
   let operation;
@@ -26516,6 +26818,8 @@ function validateSpec(markdown) {
   };
   lines.forEach((line, index) => {
     const lineNumber = index + 1;
+    if (scanned[index]?.inFence)
+      return;
     const operationMatch = /^##\s+(ADDED|MODIFIED|REMOVED|RENAMED) Requirements\s*$/.exec(line);
     if (operationMatch !== null) {
       flushRequirement();
@@ -26642,6 +26946,39 @@ function validateSpec(markdown) {
   }
   return { valid: true, data: schemaResult.data, issues: [] };
 }
+function parseSpec(markdown) {
+  const result = validateSpec(markdown);
+  if (result.valid)
+    return result.data;
+  throw new ProtocolValidationError("Invalid RockSpec spec", result.issues);
+}
+function parseSpecSource(markdown) {
+  const document = parseSpec(markdown);
+  const lines = markdown.split(/\r?\n/);
+  const scanned = scanMarkdown(markdown);
+  const requirementStarts = scanned.filter((line) => line.heading?.level === 3 && /^R-\d{3,}\s+Requirement:/.test(line.heading.title)).map((line) => ({ id: /^((?:R)-\d{3,})/.exec(line.heading.title)[1], startLine: line.index }));
+  const requirements = document.requirements.map((requirement) => {
+    const located = requirementStarts.find((candidate) => candidate.id === requirement.id);
+    if (!located)
+      throw new ProtocolValidationError(`Missing source span for ${requirement.id}`, []);
+    const endLine = scanned.find((line) => line.index > located.startLine && line.heading && line.heading.level <= 3)?.index ?? lines.length;
+    const scenarioStarts = scanned.filter((line) => line.index > located.startLine && line.index < endLine && line.heading?.level === 4).map((line) => ({ id: /^(S-\d{3,})\s+Scenario:/.exec(line.heading.title)?.[1], startLine: line.index })).filter((item) => Boolean(item.id));
+    const scenarios = requirement.scenarios.map((scenario) => {
+      const scenarioStart = scenarioStarts.find((candidate) => candidate.id === scenario.id);
+      if (!scenarioStart)
+        throw new ProtocolValidationError(`Missing source span for ${scenario.id}`, []);
+      const next = scenarioStarts.find((candidate) => candidate.startLine > scenarioStart.startLine);
+      return { id: scenario.id, span: { startLine: scenarioStart.startLine, endLine: next?.startLine ?? endLine } };
+    });
+    return {
+      id: requirement.id,
+      span: { startLine: located.startLine, endLine },
+      preambleSpan: { startLine: located.startLine, endLine: scenarios[0]?.span.startLine ?? endLine },
+      scenarios
+    };
+  });
+  return { document, lines, requirements };
+}
 
 // packages/protocol/dist/validators.js
 var TaskCommitSchema = external_exports.object({
@@ -26682,7 +27019,7 @@ var RockSpecError = class extends Error {
 };
 
 // packages/engine/dist/hashing.js
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { readFile as readFile2 } from "node:fs/promises";
 import path2 from "node:path";
 
@@ -26692,12 +27029,15 @@ import { execFile } from "node:child_process";
 import { access, appendFile, mkdir, open, readFile, realpath, readdir, rename, rm, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 var execFileAsync = promisify(execFile);
 var DEFAULT_CONFIG = {
   schema_version: 1,
   default_profile: "standard",
+  artifact_language: "zh-CN",
+  max_review_rounds: 3,
   max_reconciliation_rounds: 2,
+  environment_preflight: [],
   workspace: {
     mode: "auto",
     directory: ".worktrees",
@@ -27022,12 +27362,72 @@ async function readConfig(rocksRoot) {
   }
   return parseConfigText(await readFile(source, "utf8"), source);
 }
+function digest(content) {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+function snapshotText(change) {
+  return (0, import_yaml.stringify)(parseChangeSnapshot(change), { lineWidth: 0 });
+}
+async function recoverStateTransaction(changeDir) {
+  const journalPath = path.join(changeDir, "runtime", "state-transaction.yaml");
+  if (!await exists(journalPath))
+    return;
+  const raw = (0, import_yaml.parse)(await readFile(journalPath, "utf8"));
+  if (raw.schema_version !== 1 || !raw.after_hash || !raw.after_snapshot || !raw.event) {
+    throw new RockSpecError("STATE_TRANSACTION_INVALID", "Pending state transaction journal is invalid", { path: journalPath });
+  }
+  const after = parseChangeSnapshot(raw.after_snapshot);
+  const afterContent = (0, import_yaml.stringify)(after, { lineWidth: 0 });
+  if (digest(afterContent) !== raw.after_hash) {
+    throw new RockSpecError("STATE_TRANSACTION_INVALID", "Pending state transaction snapshot hash is invalid", { path: journalPath });
+  }
+  const statePath = path.join(changeDir, "change.yaml");
+  const currentContent = await exists(statePath) ? await readFile(statePath, "utf8") : null;
+  const currentHash = currentContent === null ? null : digest(currentContent);
+  if (currentHash !== raw.before_hash && currentHash !== raw.after_hash) {
+    throw new RockSpecError("STATE_TRANSACTION_DIVERGED", "Change state diverged while a transaction was pending", {
+      current_hash: currentHash,
+      before_hash: raw.before_hash ?? null,
+      after_hash: raw.after_hash
+    });
+  }
+  if (currentHash !== raw.after_hash)
+    await atomicWrite(statePath, afterContent);
+  const eventsPath = path.join(changeDir, "events.ndjson");
+  const events = await exists(eventsPath) ? (await readFile(eventsPath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+  const sameSequence = events.find((event) => event.sequence === raw.event.sequence);
+  if (sameSequence && JSON.stringify(sameSequence) !== JSON.stringify(raw.event)) {
+    throw new RockSpecError("STATE_TRANSACTION_DIVERGED", "Event sequence conflicts with a pending state transaction", {
+      sequence: raw.event.sequence
+    });
+  }
+  if (!sameSequence)
+    await appendEvent(changeDir, raw.event);
+  await rm(journalPath, { force: true });
+}
 async function readChange(changeDir) {
+  await recoverStateTransaction(changeDir);
   const source = path.join(changeDir, "change.yaml");
   if (!await exists(source)) {
     throw new RockSpecError("CHANGE_NOT_FOUND", "The change snapshot does not exist", { source });
   }
   return parseChangeText(await readFile(source, "utf8"), source);
+}
+async function commitChangeMutation(changeDir, _before, after, event) {
+  const statePath = path.join(changeDir, "change.yaml");
+  const beforeContent = await exists(statePath) ? await readFile(statePath, "utf8") : null;
+  const afterContent = snapshotText(after);
+  const journalPath = path.join(changeDir, "runtime", "state-transaction.yaml");
+  await atomicWrite(journalPath, (0, import_yaml.stringify)({
+    schema_version: 1,
+    before_hash: beforeContent === null ? null : digest(beforeContent),
+    after_hash: digest(afterContent),
+    after_snapshot: parseChangeSnapshot(after),
+    event
+  }, { lineWidth: 0 }));
+  await atomicWrite(statePath, afterContent);
+  await appendEvent(changeDir, event);
+  await rm(journalPath, { force: true });
 }
 async function writeChange(changeDir, change) {
   let parsed;
@@ -27055,6 +27455,179 @@ async function eventCount(changeDir) {
       return 0;
     throw error51;
   }
+}
+async function appendRuntimeTelemetry(cwd, record2) {
+  const { rocksRoot } = await resolveRepository(cwd);
+  if (!await exists(rocksRoot))
+    return;
+  const telemetryRoot = path.join(rocksRoot, "telemetry");
+  await mkdir(telemetryRoot, { recursive: true });
+  await appendFile(path.join(telemetryRoot, "commands.ndjson"), `${JSON.stringify(record2)}
+`, "utf8");
+}
+async function summarizeRuntimeTelemetry(cwd, changeId) {
+  const { root, rocksRoot } = await resolveRepository(cwd);
+  const telemetryPath = path.join(rocksRoot, "telemetry", "commands.ndjson");
+  const sourcePath = path.relative(root, telemetryPath);
+  let records = [];
+  if (await exists(telemetryPath)) {
+    const lines = (await readFile(telemetryPath, "utf8")).split("\n").filter(Boolean);
+    records = lines.flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return parsed.schema_version === 1 && typeof parsed.command === "string" && typeof parsed.duration_ms === "number" && (parsed.result === "success" || parsed.result === "error") ? [parsed] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+  if (changeId)
+    records = records.filter((record2) => record2.change_id === changeId);
+  const byCommand = {};
+  const byErrorCode = {};
+  for (const record2 of records) {
+    const aggregate = byCommand[record2.command] ?? {
+      count: 0,
+      success_count: 0,
+      error_count: 0,
+      duration_ms: 0,
+      response_bytes: 0
+    };
+    aggregate.count += 1;
+    aggregate.duration_ms += record2.duration_ms;
+    aggregate.response_bytes += record2.response_bytes;
+    if (record2.result === "success")
+      aggregate.success_count += 1;
+    else
+      aggregate.error_count += 1;
+    byCommand[record2.command] = aggregate;
+    if (record2.error_code)
+      byErrorCode[record2.error_code] = (byErrorCode[record2.error_code] ?? 0) + 1;
+  }
+  const agentExecutions = {
+    total_count: 0,
+    completed_count: 0,
+    incomplete_count: 0,
+    total_duration_ms: 0,
+    by_role: {}
+  };
+  const humanApprovalWait = {
+    count: 0,
+    total_duration_ms: 0,
+    by_gate: {}
+  };
+  const tokenUsage = {
+    execution_count: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    by_role: {}
+  };
+  if (changeId) {
+    const activePath = path.join(rocksRoot, "changes", changeId);
+    const changeDir = await exists(activePath) ? activePath : await findArchivedChange(rocksRoot, changeId);
+    if (changeDir) {
+      const change = await readChange(changeDir);
+      for (const execution of change.execution.registry) {
+        const aggregate = agentExecutions.by_role[execution.role] ?? {
+          count: 0,
+          completed_count: 0,
+          success_count: 0,
+          error_count: 0,
+          cancelled_count: 0,
+          unknown_count: 0,
+          duration_ms: 0
+        };
+        const usage = execution.usage ?? {};
+        const tokenAggregate = tokenUsage.by_role[execution.role] ?? {
+          execution_count: 0,
+          input_tokens: 0,
+          cached_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0
+        };
+        tokenAggregate.execution_count += 1;
+        tokenAggregate.input_tokens += usage.input_tokens ?? 0;
+        tokenAggregate.cached_input_tokens += usage.cached_input_tokens ?? 0;
+        tokenAggregate.output_tokens += usage.output_tokens ?? 0;
+        tokenAggregate.reasoning_tokens += usage.reasoning_tokens ?? 0;
+        tokenUsage.execution_count += 1;
+        tokenUsage.input_tokens += usage.input_tokens ?? 0;
+        tokenUsage.cached_input_tokens += usage.cached_input_tokens ?? 0;
+        tokenUsage.output_tokens += usage.output_tokens ?? 0;
+        tokenUsage.reasoning_tokens += usage.reasoning_tokens ?? 0;
+        tokenUsage.by_role[execution.role] = tokenAggregate;
+        aggregate.count += 1;
+        agentExecutions.total_count += 1;
+        if (execution.completed_at) {
+          const duration3 = Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at));
+          aggregate.completed_count += 1;
+          aggregate.duration_ms += duration3;
+          if (execution.outcome === "success")
+            aggregate.success_count += 1;
+          else if (execution.outcome === "error")
+            aggregate.error_count += 1;
+          else if (execution.outcome === "cancelled")
+            aggregate.cancelled_count += 1;
+          else
+            aggregate.unknown_count += 1;
+          agentExecutions.completed_count += 1;
+          agentExecutions.total_duration_ms += duration3;
+        }
+        agentExecutions.by_role[execution.role] = aggregate;
+      }
+      agentExecutions.incomplete_count = agentExecutions.total_count - agentExecutions.completed_count;
+      agentExecutions.by_role = Object.fromEntries(Object.entries(agentExecutions.by_role).sort(([left], [right]) => left.localeCompare(right)));
+      tokenUsage.by_role = Object.fromEntries(Object.entries(tokenUsage.by_role).sort(([left], [right]) => left.localeCompare(right)));
+      const eventsPath = path.join(changeDir, "events.ndjson");
+      if (await exists(eventsPath)) {
+        const pending = /* @__PURE__ */ new Map();
+        for (const line of (await readFile(eventsPath, "utf8")).split("\n").filter(Boolean)) {
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const prepared = /^approval\.(spec|design|implementation)\.package\.prepared$/.exec(event.event);
+          if (prepared?.[1])
+            pending.set(prepared[1], Date.parse(event.occurred_at));
+          const recorded = /^approval\.(spec|design|implementation)\.recorded$/.exec(event.event);
+          if (!recorded?.[1])
+            continue;
+          const startedAt = pending.get(recorded[1]);
+          if (startedAt === void 0)
+            continue;
+          const duration3 = Math.max(0, Date.parse(event.occurred_at) - startedAt);
+          const aggregate = humanApprovalWait.by_gate[recorded[1]] ?? { count: 0, duration_ms: 0 };
+          aggregate.count += 1;
+          aggregate.duration_ms += duration3;
+          humanApprovalWait.by_gate[recorded[1]] = aggregate;
+          humanApprovalWait.count += 1;
+          humanApprovalWait.total_duration_ms += duration3;
+          pending.delete(recorded[1]);
+        }
+      }
+    }
+  }
+  return {
+    schema_version: 1,
+    source_path: sourcePath,
+    ...changeId ? { change_id: changeId } : {},
+    record_count: records.length,
+    success_count: records.filter((record2) => record2.result === "success").length,
+    error_count: records.filter((record2) => record2.result === "error").length,
+    internal_error_count: records.filter((record2) => record2.internal_error).length,
+    total_duration_ms: records.reduce((total, record2) => total + record2.duration_ms, 0),
+    first_started_at: records[0]?.started_at ?? null,
+    last_finished_at: records.at(-1)?.finished_at ?? null,
+    by_command: Object.fromEntries(Object.entries(byCommand).sort(([left], [right]) => left.localeCompare(right))),
+    by_error_code: Object.fromEntries(Object.entries(byErrorCode).sort(([left], [right]) => left.localeCompare(right))),
+    agent_executions: agentExecutions,
+    human_approval_wait: humanApprovalWait,
+    token_usage: tokenUsage
+  };
 }
 async function activeChangeIds(rocksRoot) {
   const directory = path.join(rocksRoot, "changes");
@@ -27114,7 +27687,7 @@ async function walkFiles(directory) {
 
 // packages/engine/dist/hashing.js
 function sha256(content) {
-  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+  return `sha256:${createHash2("sha256").update(content).digest("hex")}`;
 }
 async function hashPaths(changeDir, relativePaths) {
   const paths = /* @__PURE__ */ new Set();
@@ -27176,6 +27749,7 @@ var ACTION_PROFILES = {
   "task.execute": ["lite", "standard", "strict"],
   "task.review": ["standard", "strict"],
   "acceptance.validate": ["standard", "strict"],
+  "acceptance.uat": ["standard", "strict"],
   "delivery.review": ["standard", "strict"],
   "change.verify": ["lite", "standard", "strict"],
   "knowledge.evolve": ["lite", "standard", "strict"],
@@ -27202,6 +27776,7 @@ var ENTRY_SKILL_BY_ACTION = {
   "task.execute": "rockspec-implement",
   "task.review": "rockspec-review",
   "acceptance.validate": "rockspec-acceptance",
+  "acceptance.uat": "rockspec-acceptance",
   "delivery.review": "rockspec-review",
   "change.verify": "rockspec-finish",
   "knowledge.evolve": "rockspec-evolve",
@@ -27316,7 +27891,7 @@ function recoveryDirective(change) {
     const classifications = [...new Set(open2.map((finding) => finding.classification))].sort();
     const authorityDelta = open2.some((finding) => finding.authority_impact === "changed") ? "changed" : open2.some((finding) => finding.authority_impact === "unknown") ? "unknown" : "unchanged";
     const autoClassifications = /* @__PURE__ */ new Set(["consistency_fix", "derived_gap", "implementation_fix"]);
-    const approvalPolicy = authorityDelta === "unchanged" && open2.every((finding) => finding.severity !== "critical" && autoClassifications.has(finding.classification)) ? "auto" : "human";
+    const approvalPolicy = authorityDelta === "unchanged" && open2.every((finding) => autoClassifications.has(finding.classification)) ? "auto" : "human";
     return {
       kind: "revision",
       review_id: reviewId,
@@ -27511,6 +28086,12 @@ function workflowAdvice(change, blocked, recovery = null) {
         alternatives: [],
         allowed: ["acceptance.validate", "validate"]
       };
+    case "UAT_PENDING":
+      return {
+        recommended: recommendation("acceptance.uat", "Confirm the accepted Scenarios through the configured user acceptance policy"),
+        alternatives: [],
+        allowed: ["acceptance.uat", "validate"]
+      };
     case "FINAL_REVIEW":
       return {
         recommended: recommendation("delivery.review", "Review the final code and all TE assets"),
@@ -27533,7 +28114,7 @@ function workflowAdvice(change, blocked, recovery = null) {
       }
       if (!change.finished_at) {
         return {
-          recommended: recommendation("finish", "Choose a platform-independent branch disposition"),
+          recommended: recommendation("finish", change.finish_disposition?.status === "pending_external_action" ? "Execute the recorded external disposition and confirm its target Ref and Commit" : "Choose a platform-independent branch disposition"),
           alternatives: [],
           allowed: ["finish", "validate"]
         };
@@ -27567,6 +28148,7 @@ function assertActionAllowed(change, action) {
     "task.execute": ["READY", "IMPLEMENTING"],
     "task.review": ["IMPLEMENTING"],
     "acceptance.validate": ["ACCEPTANCE_VALIDATING"],
+    "acceptance.uat": ["UAT_PENDING"],
     "delivery.review": ["FINAL_REVIEW"],
     "change.verify": ["IMPLEMENTING", "VERIFYING"],
     "knowledge.evolve": ["READY_TO_FINISH"],
@@ -27616,7 +28198,13 @@ var RockSpecEngine = class {
   async newChange(input) {
     validateChangeId(input.id);
     const context = await this.context();
-    const profile = input.profile ?? context.config.default_profile;
+    const kind = input.kind ?? "feature";
+    const triage = triageProfile({
+      kind,
+      requestedProfile: input.profile ?? context.config.default_profile,
+      riskTags: input.riskTags ?? []
+    });
+    const profile = triage.profile;
     const changeDir = path3.join(context.rocksRoot, "changes", input.id);
     const now = this.timestamp();
     let snapshot;
@@ -27691,6 +28279,12 @@ var RockSpecEngine = class {
         id: input.id,
         title: input.title ?? titleFromId(input.id),
         profile,
+        triage: {
+          kind,
+          risk_tags: [...new Set(input.riskTags ?? [])].sort(),
+          minimum_profile: triage.minimumProfile,
+          reasons: triage.reasons
+        },
         state: "SCOPING",
         base_ref: baseRef,
         base_commit: baseCommit,
@@ -27712,7 +28306,11 @@ var RockSpecEngine = class {
           provider: binding.provider,
           status: input.prototypeRequired ? "pending" : "not_required"
         },
-        execution: { active_task: null, active_execution: null },
+        uat: {
+          policy: input.uatPolicy ?? (input.prototypeRequired ? "required" : "optional"),
+          status: input.uatPolicy === "required" || !input.uatPolicy && input.prototypeRequired ? "pending" : "not_required"
+        },
+        execution: { active_task: null, active_execution: null, registry: [] },
         tasks: {},
         evidence: [],
         reviews: {},
@@ -27725,10 +28323,9 @@ var RockSpecEngine = class {
       try {
         await mkdir2(path3.dirname(changeDir), { recursive: true });
         await mkdir2(changeDir, { recursive: false });
-        await this.ensureTemplates(changeDir, createdSnapshot);
+        await this.ensureTemplates(changeDir, createdSnapshot, context.config.artifact_language);
         await this.refreshArtifacts(changeDir, createdSnapshot);
-        await writeChange(changeDir, createdSnapshot);
-        await appendEvent(changeDir, {
+        await commitChangeMutation(changeDir, null, createdSnapshot, {
           schema_version: 1,
           sequence: 1,
           event: "change.created",
@@ -27738,7 +28335,10 @@ var RockSpecEngine = class {
           current_state: "SCOPING",
           data: {
             profile,
+            kind,
+            risk_tags: input.riskTags ?? [],
             prototype_required: createdSnapshot.prototype.required,
+            uat_policy: createdSnapshot.uat.policy,
             workspace: createdSnapshot.workspace
           }
         });
@@ -27764,6 +28364,14 @@ var RockSpecEngine = class {
       throw new RockSpecError("IMPLEMENTATION_PREFLIGHT_STATE", `Implementation preflight is not legal while the Change is ${change.state}`, { state: change.state, expected_states: ["READINESS_REVIEW", "READY", "IMPLEMENTING"] });
     }
     await this.assertWorkspaceBinding(context, change);
+    const environment = await this.runEnvironmentPreflight(context, change.id);
+    if (!environment.valid) {
+      throw new RockSpecError("ENVIRONMENT_PREFLIGHT_FAILED", "Required environment preflight checks did not pass", {
+        change_id: change.id,
+        checks: environment.checks,
+        recommended_next: { action: "preflight.environment", entry_skill: "rockspec-change" }
+      });
+    }
     if (change.state === "READINESS_REVIEW") {
       await this.assertApprovalPrerequisites(changeDir, change, "implementation");
     } else {
@@ -27794,13 +28402,224 @@ var RockSpecEngine = class {
         { id: "readiness", status: "passed", detail: "Readiness Review is PASS and covers the current Plan" },
         { id: "task_graph", status: "passed", detail: "Task dependencies and supersession form a runnable graph" },
         { id: "recovery", status: "passed", detail: "No unresolved Finding recovery blocks implementation" },
-        { id: "review_modes", status: "passed", detail: "Product and zero-Diff scope-blocked Task Review paths are available" }
+        { id: "review_modes", status: "passed", detail: "Product, historical-attribution, and zero-Diff scope-blocked Task Review paths are available" },
+        ...environment.checks.length > 0 ? [{ id: "environment", status: "passed", detail: "Configured database, browser, credential, and custom probes passed" }] : []
       ],
-      review_modes: ["product", "scope_blocked"]
+      review_modes: ["product", "scope_blocked", "historical_attribution"]
     };
+  }
+  async preflightAcceptance(input = {}) {
+    const context = await this.context();
+    const located = await this.locateChange(context, input.changeId);
+    const { change, changeDir } = located;
+    if (!["ACCEPTANCE_VALIDATING", "FINAL_REVIEW"].includes(change.state)) {
+      throw new RockSpecError("ACCEPTANCE_PREFLIGHT_STATE", `Acceptance preflight is not legal while the Change is ${change.state}`, {
+        state: change.state
+      });
+    }
+    await this.assertWorkspaceBinding(context, change);
+    await this.assertNoUncommittedProductChanges(context.root);
+    const currentCommit = await git(context.root, ["rev-parse", "HEAD"]);
+    const acceptanceExecution = [...change.execution.registry].reverse().find((execution) => execution.role === "acceptance_engineer" && execution.action === "acceptance.validate");
+    if (!acceptanceExecution) {
+      throw new RockSpecError("ACCEPTANCE_PREFLIGHT_EXECUTION_MISSING", "Register an Acceptance execution before preparing the report", {
+        recommended_next: { action: "execution.start", role: "acceptance_engineer", command: `rockspec execution start acceptance.validate ${change.id} --role acceptance_engineer --model-tier balanced` }
+      });
+    }
+    await requireArtifacts(changeDir, ["testing/test-plan.md", "testing/test-report.md"]);
+    const review = await this.loadAcceptanceReview(changeDir, change, currentCommit, Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution)));
+    return {
+      ...await this.statusFor(context, changeDir, change),
+      valid: true,
+      checks: [
+        { id: "state", status: "passed", detail: `Change is ${change.state}` },
+        { id: "execution", status: "passed", detail: `Acceptance execution ${acceptanceExecution.id} is registered` },
+        { id: "report", status: "passed", detail: `Acceptance report binds commit ${currentCommit}` },
+        { id: "scenarios", status: "passed", detail: `Acceptance verdict ${review.verdict} has valid Scenario coverage` },
+        { id: "evidence", status: "passed", detail: "All referenced executed evidence and artifacts are present and fresh" }
+      ]
+    };
+  }
+  async preflightEnvironment(input = {}) {
+    const context = await this.context();
+    const located = await this.locateChange(context, input.changeId);
+    const checks = await this.runEnvironmentPreflight(context, located.change.id);
+    return { ...await this.statusFor(context, located.changeDir, located.change), ...checks };
   }
   async continue(input = {}) {
     return this.getStatus(input);
+  }
+  async startExecution(input) {
+    assertExecutionRoleAction(input.role, input.action);
+    let started;
+    const result = await this.mutate(input.changeId, "execution.started", async (change, changeDir, context) => {
+      if (input.role === "knowledge_reviewer" && input.action === "knowledge.evolve.review") {
+        const proposal = await this.loadKnowledgeProposal(context, changeDir, change);
+        if (!proposal.delta.updates.some((update) => update.authority === "normative")) {
+          throw new RockSpecError("KNOWLEDGE_REVIEW_NOT_REQUIRED", "Independent Knowledge Review is only required for normative updates", { authorities: [...new Set(proposal.delta.updates.map((update) => update.authority))] });
+        }
+      }
+      const active = input.role === "acceptance_engineer" ? change.execution.registry.find((record2) => record2.role === input.role && record2.action === input.action && !record2.completed_at) : void 0;
+      if (active) {
+        throw new RockSpecError("EXECUTION_ALREADY_ACTIVE", `An active ${input.role} execution already exists for ${input.action}`, {
+          change_id: change.id,
+          execution_id: active.id,
+          role: active.role,
+          action: active.action,
+          recommended_next: {
+            action: "execution.complete",
+            command: `rockspec execution complete ${active.id} ${change.id} --outcome success`
+          }
+        });
+      }
+      if (input.parentExecutionId && !change.execution.registry.some((record2) => record2.id === input.parentExecutionId)) {
+        throw new RockSpecError("EXECUTION_PARENT_NOT_FOUND", "Parent execution is not registered in this Change", {
+          parent_execution_id: input.parentExecutionId
+        });
+      }
+      if ((input.role === "task_reviewer" || input.role === "delivery_reviewer") && !input.contextPackagePath) {
+        throw new RockSpecError("REVIEW_CONTEXT_REQUIRED", "Code Reviewer \u542F\u52A8\u65F6\u5FC5\u987B\u7ED1\u5B9A Engine \u751F\u6210\u7684\u51BB\u7ED3 Review Package", { role: input.role, action: input.action });
+      }
+      if (input.contextPackagePath === void 0 !== (input.contextPackageHash === void 0)) {
+        throw new RockSpecError("CONTEXT_PACKAGE_BINDING_INCOMPLETE", "Context package path and hash must be supplied together");
+      }
+      if (input.contextPackagePath && input.contextPackageHash) {
+        const absolute = path3.resolve(changeDir, input.contextPackagePath);
+        const relative = path3.relative(changeDir, absolute);
+        if (relative.startsWith("..") || path3.isAbsolute(relative) || !await exists(absolute)) {
+          throw new RockSpecError("CONTEXT_PACKAGE_NOT_FOUND", "Context package must be an existing file inside the Change", {
+            path: input.contextPackagePath
+          });
+        }
+        const resolvedChangeDir = await realpath2(changeDir);
+        const resolvedPackage = await realpath2(absolute);
+        const resolvedRelative = path3.relative(resolvedChangeDir, resolvedPackage);
+        if (resolvedRelative.startsWith("..") || path3.isAbsolute(resolvedRelative)) {
+          throw new RockSpecError("CONTEXT_PACKAGE_NOT_FOUND", "Context package symlinks must remain inside the Change", {
+            path: input.contextPackagePath
+          });
+        }
+        const actualHash = sha256(await readFile3(absolute));
+        if (actualHash !== input.contextPackageHash) {
+          throw new RockSpecError("CONTEXT_PACKAGE_HASH_MISMATCH", "Context package hash does not match its contents", {
+            path: input.contextPackagePath,
+            supplied_hash: input.contextPackageHash,
+            actual_hash: actualHash
+          });
+        }
+        const expectedPrefix = input.role === "task_reviewer" ? "runtime/reviews/task-" : input.role === "delivery_reviewer" ? "runtime/reviews/delivery-" : void 0;
+        if (expectedPrefix && !input.contextPackagePath.startsWith(expectedPrefix)) {
+          throw new RockSpecError("CONTEXT_PACKAGE_ROLE_MISMATCH", "Context package is not valid for the requested Reviewer role", {
+            role: input.role,
+            path: input.contextPackagePath,
+            expected_prefix: expectedPrefix
+          });
+        }
+        if (input.role === "task_reviewer") {
+          const taskId = change.execution.active_task;
+          const task = taskId ? change.tasks[taskId] : void 0;
+          if (!taskId || !task?.base_commit) {
+            throw new RockSpecError("REVIEW_CONTEXT_NOT_PREPARED", "Task Reviewer context requires an active Task with a frozen base");
+          }
+          const reviewHead = task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]);
+          const expectedPath = `runtime/reviews/task-${taskId}-${task.base_commit.slice(0, 7)}..${reviewHead.slice(0, 7)}.diff`;
+          if (input.contextPackagePath !== expectedPath) {
+            throw new RockSpecError("CONTEXT_PACKAGE_ROLE_MISMATCH", "Task Reviewer must bind the current Engine-generated Review Package", {
+              role: input.role,
+              path: input.contextPackagePath,
+              expected_path: expectedPath
+            });
+          }
+        }
+        if (input.role === "delivery_reviewer") {
+          if (!change.base_commit) {
+            throw new RockSpecError("REVIEW_CONTEXT_NOT_PREPARED", "Delivery Reviewer context requires a frozen Change base");
+          }
+          const head = await git(context.root, ["rev-parse", "HEAD"]);
+          const expectedPath = `runtime/reviews/delivery-${change.base_commit.slice(0, 7)}..${head.slice(0, 7)}.diff`;
+          if (input.contextPackagePath !== expectedPath) {
+            throw new RockSpecError("CONTEXT_PACKAGE_ROLE_MISMATCH", "Delivery Reviewer must bind the current Engine-generated Review Package", {
+              role: input.role,
+              path: input.contextPackagePath,
+              expected_path: expectedPath
+            });
+          }
+        }
+      }
+      const id = randomUUID2();
+      change.execution.registry.push({
+        id,
+        role: input.role,
+        action: input.action,
+        started_at: this.timestamp(),
+        ...input.modelTier ? { model_tier: input.modelTier } : {},
+        ...input.hostModel ? { host_model: input.hostModel } : {},
+        ...input.parentExecutionId ? { parent_execution_id: input.parentExecutionId } : {},
+        ...input.contextPackagePath ? { context_package_path: input.contextPackagePath } : {},
+        ...input.contextPackageHash ? { context_package_hash: input.contextPackageHash } : {},
+        ...input.contextPackagePath ? { context_package_verified: true } : {}
+      });
+      started = { id, role: input.role, action: input.action };
+      return { execution_id: id, role: input.role, action: input.action };
+    });
+    if (!started)
+      throw new RockSpecError("INTERNAL_ERROR", "Execution was not registered");
+    return { ...await this.statusFor(result.context, result.changeDir, result.change), started_execution: started };
+  }
+  async completeExecution(input) {
+    const usage = normalizeExecutionUsage(input.usage);
+    let completed;
+    const result = await this.mutate(input.changeId, "execution.completed", async (change) => {
+      const execution = change.execution.registry.find((record2) => record2.id === input.executionId);
+      if (!execution) {
+        throw new RockSpecError("EXECUTION_NOT_REGISTERED", "Execution is not registered in this Change", {
+          change_id: change.id,
+          execution_id: input.executionId
+        });
+      }
+      const outcome = input.outcome ?? "success";
+      if (execution.completed_at) {
+        if (execution.outcome && execution.outcome !== outcome) {
+          throw new RockSpecError("EXECUTION_OUTCOME_MISMATCH", "Completed execution cannot be assigned a different outcome", {
+            change_id: change.id,
+            execution_id: execution.id,
+            recorded_outcome: execution.outcome,
+            supplied_outcome: outcome
+          });
+        }
+        if (usage && execution.usage && JSON.stringify(execution.usage) !== JSON.stringify(usage)) {
+          throw new RockSpecError("EXECUTION_USAGE_MISMATCH", "Completed execution cannot be assigned different token usage", {
+            execution_id: execution.id,
+            recorded_usage: execution.usage,
+            supplied_usage: usage
+          });
+        }
+        if (usage && !execution.usage)
+          execution.usage = usage;
+        execution.outcome ??= outcome;
+        completed = {
+          id: execution.id,
+          outcome,
+          duration_ms: Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at)),
+          already_completed: true
+        };
+        return completed;
+      }
+      execution.completed_at = this.timestamp();
+      execution.outcome = outcome;
+      if (usage)
+        execution.usage = usage;
+      completed = {
+        id: execution.id,
+        outcome,
+        duration_ms: Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at)),
+        already_completed: false
+      };
+      return completed;
+    });
+    if (!completed)
+      throw new RockSpecError("INTERNAL_ERROR", "Execution completion was not recorded");
+    return { ...await this.statusFor(result.context, result.changeDir, result.change), completed_execution: completed };
   }
   async completeAction(input) {
     if (input.action === "change.promote") {
@@ -27813,6 +28632,8 @@ var RockSpecEngine = class {
       return this.verify(input);
     if (input.action === "change.archive")
       return this.archive(input);
+    if (input.action === "acceptance.uat")
+      return this.completeUat(input);
     const result = await this.mutate(input.changeId, `action.${input.action}.completed`, async (change, changeDir, context) => {
       try {
         assertActionAllowed(change, input.action);
@@ -27836,10 +28657,11 @@ var RockSpecEngine = class {
         case "requirements.clarify":
           await requireArtifacts(changeDir, ["proposal.md", "specs"]);
           await this.assertMaterialized(changeDir, ["proposal.md", "specs"], true);
+          await this.assertProposalReady(changeDir);
           change.state = "SPEC_REVIEW";
           break;
         case "requirements.review":
-          change.reviews.requirements = await this.loadStageReview(changeDir, change.profile, "reviews/requirements-review.md", "requirements", input.verdict);
+          change.reviews.requirements = await this.loadStageReview(changeDir, change, change.profile, "reviews/requirements-review.md", "requirements", input.verdict);
           change.reviews.requirements.content_hash = (await hashPaths(changeDir, ["proposal.md", "specs"])).aggregate_hash;
           actionPassed = change.reviews.requirements.verdict === "PASS";
           break;
@@ -27876,11 +28698,11 @@ var RockSpecEngine = class {
         case "plan.create":
           await requireArtifacts(changeDir, ["plan.md", "tasks.md", "tasks"]);
           await this.assertMaterialized(changeDir, ["plan.md", "tasks.md", "tasks"]);
-          await this.syncTasks(changeDir, change);
+          await this.syncTasks(changeDir, change, context.root);
           change.state = "READINESS_REVIEW";
           break;
         case "readiness.review":
-          change.reviews.readiness = await this.loadStageReview(changeDir, change.profile, "reviews/readiness-review.md", "readiness", input.verdict);
+          change.reviews.readiness = await this.loadStageReview(changeDir, change, change.profile, "reviews/readiness-review.md", "readiness", input.verdict);
           change.reviews.readiness.content_hash = (await hashPaths(changeDir, ["design.md", "plan.md", "tasks.md", "tasks"])).aggregate_hash;
           actionPassed = change.reviews.readiness.verdict === "PASS";
           break;
@@ -27896,18 +28718,22 @@ var RockSpecEngine = class {
           if (!task?.base_commit || !task.execution_id) {
             throw new RockSpecError("TASK_EXECUTION_INCOMPLETE", `Task ${taskId} has no bound execution`);
           }
-          if (task.review_attempts >= 3) {
-            throw new RockSpecError("REVIEW_ROUND_LIMIT", `Task ${taskId} exhausted its two fix reviews`, {
+          if (task.review_attempts >= context.config.max_review_rounds) {
+            throw new RockSpecError("REVIEW_ROUND_LIMIT", `Task ${taskId} exhausted its configured Review attempts`, {
               task_id: taskId,
-              review_attempts: task.review_attempts
+              review_attempts: task.review_attempts,
+              max_review_rounds: context.config.max_review_rounds
             });
           }
           if (task.review_package_mode === "scope_blocked") {
-            await this.assertTaskScopeBlockedState(context.root, task);
+            await this.assertTaskScopeBlockedState(context.root, changeDir, task);
+          } else if (task.adopted_commit) {
+            await this.assertHistoricalAttributionState(context.root, change, task);
           } else {
             await this.assertTaskProductState(context.root, task);
+            await this.assertTaskImplementedReport(changeDir, task);
           }
-          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), taskId, task.review_package_mode ?? "product", task.allowed_paths);
+          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]), taskId, task.review_package_mode ?? (task.adopted_commit ? "historical_attribution" : "product"), task.allowed_paths);
           if (task.review_subject && !sameReviewSubject(task.review_subject, reviewPackage.subject)) {
             throw new RockSpecError("STALE_REVIEW_PACKAGE", `Task ${taskId} changed after its Review Package was prepared`, {
               prepared: task.review_subject,
@@ -27915,7 +28741,7 @@ var RockSpecEngine = class {
             });
           }
           task.review_subject = reviewPackage.subject;
-          const taskReview = await this.loadCodeReview(changeDir, change.profile, `reviews/tasks/${taskId}-review.md`, reviewPackage.subject, [task.execution_id], input.verdict);
+          const taskReview = await this.loadCodeReview(changeDir, change, change.profile, `reviews/tasks/${taskId}-review.md`, reviewPackage.subject, [task.execution_id], reviewPackage.scope?.expanded_paths ?? [], input.verdict);
           if (task.review_package_mode === "scope_blocked" && taskReview.verdict === "PASS") {
             throw new RockSpecError("SCOPE_BLOCKED_REVIEW_PASS", "A scope-blocked Task Review must record a non-PASS Finding");
           }
@@ -27934,24 +28760,37 @@ var RockSpecEngine = class {
         case "acceptance.validate":
           await requireArtifacts(changeDir, ["testing/test-plan.md", "testing/test-report.md"]);
           await this.assertNoUncommittedProductChanges(context.root);
-          change.reviews.acceptance = await this.loadAcceptanceReview(changeDir, await git(context.root, ["rev-parse", "HEAD"]), Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution)), input.verdict);
+          change.reviews.acceptance = await this.loadAcceptanceReview(changeDir, change, await git(context.root, ["rev-parse", "HEAD"]), Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution)), input.verdict);
           actionPassed = change.reviews.acceptance.verdict === "PASS";
           if (actionPassed) {
             await this.assertFreshEvidence(context.root, change, { actionId: "acceptance.validate" }, true);
             if (change.prototype.required) {
               await this.assertPrototypeEvidence(context.root, change);
             }
-            change.state = "FINAL_REVIEW";
+            change.state = change.uat.policy === "required" ? "UAT_PENDING" : "FINAL_REVIEW";
           }
           break;
         case "delivery.review": {
           await this.assertNoUncommittedProductChanges(context.root);
           if (!change.base_commit)
             throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
-          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
+          const reviewPackage = await this.writeReviewPackage(context.root, changeDir, change, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
           const implementerExecutions = Object.values(change.tasks).map((task) => task.execution_id).filter((execution) => Boolean(execution));
-          change.reviews.delivery = await this.loadCodeReview(changeDir, change.profile, "reviews/delivery-review.md", reviewPackage.subject, implementerExecutions, input.verdict);
+          change.reviews.delivery = await this.loadCodeReview(changeDir, change, change.profile, "reviews/delivery-review.md", reviewPackage.subject, implementerExecutions, [], input.verdict);
           actionPassed = change.reviews.delivery.verdict === "PASS";
+          if (actionPassed) {
+            const unassigned = await this.findUnassignedProductCommits(context.root, change);
+            if (unassigned.length > 0) {
+              throw new RockSpecError("UNASSIGNED_PRODUCT_COMMIT_REVIEW_REQUIRED", "Delivery Review must record an Open Finding for every unassigned product or test Commit", {
+                change_id: change.id,
+                commits: unassigned,
+                recommended_next: {
+                  action: "delivery.review",
+                  instruction: "Update the Delivery Review with a Finding routed to plan.create, then resubmit it as CHANGES_REQUIRED"
+                }
+              });
+            }
+          }
           if (actionPassed)
             change.state = "VERIFYING";
           else if (recoveryDirective(change)?.kind === "action") {
@@ -27969,8 +28808,61 @@ var RockSpecEngine = class {
         change.completed_actions.push(input.action);
       if (actionPassed)
         clearFailedReconciliation(change, input.action);
+      if (input.action !== "task.execute")
+        this.completeActionExecutions(change, input.action);
       await this.refreshArtifacts(changeDir, change);
       return { action: input.action, passed: actionPassed };
+    });
+    return this.statusFor(result.context, result.changeDir, result.change);
+  }
+  async completeUat(input = {}) {
+    const result = await this.mutate(input.changeId, "action.acceptance.uat.completed", async (change, changeDir, context) => {
+      if (change.state !== "UAT_PENDING" || change.uat.policy !== "required") {
+        throw new RockSpecError("UAT_NOT_REQUIRED", "This Change is not waiting for required user acceptance", {
+          state: change.state,
+          policy: change.uat.policy
+        });
+      }
+      const relativePath = input.reportPath ?? "testing/uat-report.md";
+      const content = await readFile3(path3.join(changeDir, relativePath), "utf8").catch(() => null);
+      if (!content) {
+        throw new RockSpecError("UAT_REPORT_MISSING", "Required UAT needs a confirmation report", { path: relativePath });
+      }
+      await this.assertMaterialized(changeDir, [relativePath]);
+      let document;
+      try {
+        document = UatDocumentSchema.parse(parseFrontmatter(content, relativePath));
+      } catch (error51) {
+        throw new RockSpecError("UAT_REPORT_INVALID", "UAT report Frontmatter is invalid", {
+          path: relativePath,
+          error: error51 instanceof Error ? error51.message : String(error51)
+        });
+      }
+      const currentCommit = await git(context.root, ["rev-parse", "HEAD"]);
+      if (document.commit !== currentCommit) {
+        throw new RockSpecError("STALE_UAT", "UAT confirmation does not cover the current Commit", {
+          reported_commit: document.commit,
+          current_commit: currentCommit
+        });
+      }
+      const scenarios = (await this.loadSpecTraceability(changeDir)).scenarioRequirement;
+      const unknown2 = document.scenario_ids.filter((scenarioId) => !scenarios.has(scenarioId));
+      if (unknown2.length > 0) {
+        throw new RockSpecError("UAT_SCENARIO_NOT_FOUND", "UAT references unknown Scenarios", { scenario_ids: unknown2 });
+      }
+      change.uat = {
+        policy: "required",
+        status: "confirmed",
+        report_path: relativePath,
+        report_hash: sha256(content),
+        commit: currentCommit,
+        confirmed_at: this.timestamp()
+      };
+      if (!change.completed_actions.includes("acceptance.uat"))
+        change.completed_actions.push("acceptance.uat");
+      change.state = "FINAL_REVIEW";
+      await this.refreshArtifacts(changeDir, change);
+      return { report_path: relativePath, commit: currentCommit, scenario_ids: document.scenario_ids };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
   }
@@ -27978,14 +28870,46 @@ var RockSpecEngine = class {
     const result = await this.mutate(input.changeId, `approval.${input.gate}.recorded`, async (change, changeDir) => {
       this.assertApprovalState(change, input.gate);
       await this.assertApprovalPrerequisites(changeDir, change, input.gate);
+      const packagePath = `runtime/approvals/${input.gate}-package.yaml`;
+      const packageContent = await readFile3(path3.join(changeDir, packagePath), "utf8").catch(() => null);
+      if (!packageContent) {
+        throw new RockSpecError("APPROVAL_PACKAGE_MISSING", "Prepare and present the Approval Package before recording approval", {
+          gate: input.gate,
+          path: packagePath
+        });
+      }
+      const packageHash = sha256(packageContent);
+      if (packageHash !== input.packageHash) {
+        throw new RockSpecError("APPROVAL_PACKAGE_MISMATCH", "Approval does not bind the prepared package", {
+          gate: input.gate,
+          expected: packageHash,
+          supplied: input.packageHash
+        });
+      }
+      const parsedPackage = ApprovalPackageSchema.safeParse((0, import_yaml2.parse)(packageContent));
+      if (!parsedPackage.success || parsedPackage.data.gate !== input.gate) {
+        throw new RockSpecError("APPROVAL_PACKAGE_INVALID", "Approval Package is invalid or targets another Gate", {
+          gate: input.gate,
+          issues: parsedPackage.success ? [] : parsedPackage.error.issues
+        });
+      }
       const hashes = await hashPaths(changeDir, approvalPaths(input.gate, change.prototype.required));
+      if (hashes.aggregate_hash !== parsedPackage.data.aggregate_hash || JSON.stringify(hashes.artifact_hashes) !== JSON.stringify(parsedPackage.data.artifact_hashes)) {
+        throw new RockSpecError("STALE_APPROVAL_PACKAGE", "Gate artifacts changed after the Approval Package was prepared", {
+          gate: input.gate,
+          prepared: parsedPackage.data.aggregate_hash,
+          current: hashes.aggregate_hash
+        });
+      }
       const approval = {
         gate: input.gate,
         ...hashes,
         approved_by: input.approvedBy ?? "user",
         approved_at: this.timestamp(),
         mode: "human",
-        authority_basis_hash: hashes.aggregate_hash
+        authority_basis_hash: hashes.aggregate_hash,
+        package_path: packagePath,
+        package_hash: packageHash
       };
       change.approvals[input.gate] = approval;
       const activeRevision = change.revisions.find((revision) => revision.status === "open");
@@ -28002,6 +28926,61 @@ var RockSpecEngine = class {
       return { gate: input.gate, aggregate_hash: approval.aggregate_hash };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
+  }
+  async prepareApproval(input) {
+    let prepared;
+    await this.mutate(input.changeId, `approval.${input.gate}.package.prepared`, async (change, changeDir, context) => {
+      this.assertApprovalState(change, input.gate);
+      await this.assertApprovalPrerequisites(changeDir, change, input.gate);
+      const hashes = await hashPaths(changeDir, approvalPaths(input.gate, change.prototype.required));
+      const proposalContent = await readFile3(path3.join(changeDir, "proposal.md"), "utf8");
+      const proposal = ProposalDefinitionSchema.parse(parseFrontmatter(proposalContent, "proposal.md"));
+      const traceability = await this.loadSpecTraceability(changeDir);
+      const decisionIds = input.gate === "spec" ? [] : parseDesignDefinition(await readFile3(path3.join(changeDir, "design.md"), "utf8"), "design.md").decisions.map((decision) => decision.id).sort();
+      const taskIds = input.gate === "implementation" ? Object.keys(change.tasks).sort() : [];
+      const summary = {
+        non_goals: proposal.non_goals,
+        assumptions: proposal.assumptions,
+        open_questions: proposal.open_questions,
+        requirement_ids: [...traceability.requirementScenarios.keys()].sort(),
+        scenario_ids: [...traceability.scenarioRequirement.keys()].sort(),
+        decision_ids: decisionIds,
+        task_ids: taskIds
+      };
+      const reviewSummary = await buildApprovalReviewSummary({
+        gate: input.gate,
+        change,
+        changeDir,
+        repositoryRoot: context.root,
+        language: context.config.artifact_language,
+        specFiles: (await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort()
+      });
+      const document = ApprovalPackageSchema.parse({
+        schema_version: 1,
+        gate: input.gate,
+        generated_at: this.timestamp(),
+        ...hashes,
+        summary,
+        review_summary: reviewSummary
+      });
+      const content = (0, import_yaml2.stringify)(document, { lineWidth: 0 });
+      const relativePath = `runtime/approvals/${input.gate}-package.yaml`;
+      const packageHash = sha256(content);
+      await atomicWrite(path3.join(changeDir, relativePath), content);
+      prepared = {
+        schema_version: 1,
+        gate: input.gate,
+        path: relativePath,
+        hash: packageHash,
+        ...hashes,
+        summary,
+        review_summary: reviewSummary
+      };
+      return { gate: input.gate, path: relativePath, hash: packageHash };
+    });
+    if (!prepared)
+      throw new RockSpecError("INTERNAL_ERROR", "Approval Package was not prepared");
+    return prepared;
   }
   async prepareReconciliation(input) {
     let prepared;
@@ -28053,6 +29032,7 @@ var RockSpecEngine = class {
       }
       const content = await readFile3(absolutePath, "utf8");
       const review = parseReconciliationReviewDocument(content, relativePath);
+      this.assertRegisteredExecution(change, review.reviewer_execution_id, "reconciliation_reviewer", `reconcile.${input.gate}`);
       if (review.revision_id !== revision.id || review.gate !== input.gate || review.round !== revision.convergence_round) {
         throw new RockSpecError("RECONCILIATION_SUBJECT_MISMATCH", "Reconciliation Review targets the wrong Revision, Gate, or round", {
           expected: { revision_id: revision.id, gate: input.gate, round: revision.convergence_round },
@@ -28153,7 +29133,7 @@ var RockSpecEngine = class {
     return this.statusFor(result.context, result.changeDir, result.change);
   }
   async promote(input) {
-    const result = await this.mutate(input.changeId, "change.promoted", async (change, changeDir) => {
+    const result = await this.mutate(input.changeId, "change.promoted", async (change, changeDir, context) => {
       const ranks = { lite: 0, standard: 1, strict: 2 };
       if (ranks[input.profile] <= ranks[change.profile]) {
         throw new RockSpecError("INVALID_PROMOTION", "Profiles can only be promoted upward", {
@@ -28172,7 +29152,8 @@ var RockSpecEngine = class {
       change.approvals = {};
       change.reviews = {};
       change.verification = { status: "pending" };
-      await this.ensureTemplates(changeDir, change);
+      resetUat(change);
+      await this.ensureTemplates(changeDir, change, context.config.artifact_language);
       return { previous_profile: previousProfile, profile: input.profile };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
@@ -28223,23 +29204,27 @@ var RockSpecEngine = class {
             state: change.state
           });
         }
-        const findingIds = [...new Set(input.findingIds ?? [])].sort();
-        if (input.reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
+        const findingIds = input.consumeCurrentRecovery ? recovery.finding_ids : [...new Set(input.findingIds ?? [])].sort();
+        const reviewId = input.consumeCurrentRecovery ? recovery.review_id : input.reviewId;
+        if (reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
           throw new RockSpecError("RECOVERY_TRIGGER_MISMATCH", "Recovery must bind every Open Finding in the Engine recommendation", {
+            change_id: change.id,
             expected_review_id: recovery.review_id,
             expected_finding_ids: recovery.finding_ids,
-            provided_review_id: input.reviewId ?? null,
+            provided_review_id: reviewId ?? null,
             provided_finding_ids: findingIds
           });
         }
         if (source && source !== recovery.source) {
           throw new RockSpecError("RECOVERY_SOURCE_MISMATCH", "Recovery source does not match the triggering Review", {
+            change_id: change.id,
             expected: recovery.source,
             provided: source
           });
         }
         if (target && target !== recovery.target) {
           throw new RockSpecError("RECOVERY_TARGET_MISMATCH", "Recovery target must be the earliest responsible capability", {
+            change_id: change.id,
             expected: recovery.target,
             provided: target
           });
@@ -28271,10 +29256,12 @@ var RockSpecEngine = class {
       if (!source || !target)
         throw new RockSpecError("REVISION_ROUTE_REQUIRED", "Revision source and target are required");
       if (approvalPolicy === "auto" && !input.authorExecutionId?.trim()) {
-        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision requires --author-execution for Reviewer independence");
+        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision requires --author-execution for Reviewer independence", {
+          change_id: change.id
+        });
       }
       assertRevisionTargetAllowed(change, target);
-      const reason = input.reason.trim();
+      const reason = input.reason.trim() || (input.consumeCurrentRecovery && trigger ? recoveryRevisionReason(change, trigger.review_id, trigger.finding_ids) : "");
       const affectedIds = [...new Set(input.affectedIds)].sort();
       if (!reason)
         throw new RockSpecError("REVISION_REASON_REQUIRED", "Revision reason must not be empty");
@@ -28352,6 +29339,31 @@ var RockSpecEngine = class {
       };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
+  }
+  async applyRecovery(input = {}) {
+    const status = await this.getStatus(input);
+    const recovery = status.recovery;
+    if (!recovery) {
+      throw new RockSpecError("RECOVERY_NOT_AVAILABLE", "The Change has no current Finding-bound recovery", {
+        change_id: status.change.id,
+        state: status.current_state
+      });
+    }
+    if (recovery.kind !== "revision") {
+      throw new RockSpecError("RECOVERY_ACTION_REQUIRED", "The current recovery continues through an existing Action, not a Revision", {
+        change_id: status.change.id,
+        route_to: recovery.route_to,
+        recommended_next: status.recommended_next
+      });
+    }
+    const revisionInput = {
+      changeId: status.change.id,
+      reason: input.reason?.trim() ?? "",
+      affectedIds: input.affectedIds ?? [],
+      ...input.authorExecutionId?.trim() ? { authorExecutionId: input.authorExecutionId.trim() } : {},
+      consumeCurrentRecovery: true
+    };
+    return status.change.revisions.some((revision) => revision.status === "open") ? this.amendRevision(revisionInput) : this.revise(revisionInput);
   }
   async submitFeedback(input) {
     const reason = input.reason.trim();
@@ -28432,23 +29444,27 @@ var RockSpecEngine = class {
       if (!recovery || recovery.kind !== "revision" || !recovery.target || !recovery.revision_kind) {
         throw new RockSpecError("REVISION_AMENDMENT_FINDING_REQUIRED", "Revision amendment requires a new non-PASS Review with Open Findings");
       }
-      const findingIds = [...new Set(input.findingIds ?? [])].sort();
-      if (input.reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
+      const findingIds = input.consumeCurrentRecovery ? recovery.finding_ids : [...new Set(input.findingIds ?? [])].sort();
+      const reviewId = input.consumeCurrentRecovery ? recovery.review_id : input.reviewId;
+      if (reviewId !== recovery.review_id || JSON.stringify(findingIds) !== JSON.stringify(recovery.finding_ids)) {
         throw new RockSpecError("RECOVERY_TRIGGER_MISMATCH", "Revision amendment must bind every Open Finding in the Engine recommendation", {
+          change_id: change.id,
           expected_review_id: recovery.review_id,
           expected_finding_ids: recovery.finding_ids,
-          provided_review_id: input.reviewId ?? null,
+          provided_review_id: reviewId ?? null,
           provided_finding_ids: findingIds
         });
       }
       if (input.source && input.source !== recovery.source) {
         throw new RockSpecError("RECOVERY_SOURCE_MISMATCH", "Revision amendment source does not match the triggering Review", {
+          change_id: change.id,
           expected: recovery.source,
           provided: input.source
         });
       }
       if (input.target && input.target !== recovery.target) {
         throw new RockSpecError("RECOVERY_TARGET_MISMATCH", "Revision amendment target must be the earliest responsible capability", {
+          change_id: change.id,
           expected: recovery.target,
           provided: input.target
         });
@@ -28456,7 +29472,7 @@ var RockSpecEngine = class {
       const review = change.reviews[recovery.review_id];
       if (!review)
         throw new RockSpecError("RECOVERY_REVIEW_MISSING", "The triggering Review is no longer available");
-      const reason = input.reason.trim();
+      const reason = input.reason.trim() || (input.consumeCurrentRecovery ? recoveryRevisionReason(change, recovery.review_id, recovery.finding_ids) : "");
       const affectedIds = [...new Set(input.affectedIds)].sort();
       if (!reason)
         throw new RockSpecError("REVISION_REASON_REQUIRED", "Revision amendment reason must not be empty");
@@ -28480,7 +29496,9 @@ var RockSpecEngine = class {
       const approvalPolicy = revision.approval_policy === "human" || recovery.approval_policy === "human" || !isAutoRevision(classifications, authorityDelta) ? "human" : "auto";
       const authorExecutionId = input.authorExecutionId?.trim() || revision.author_execution_id;
       if (approvalPolicy === "auto" && !authorExecutionId) {
-        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision amendment requires --author-execution for Reviewer independence");
+        throw new RockSpecError("REVISION_AUTHOR_REQUIRED", "Auto Revision amendment requires --author-execution for Reviewer independence", {
+          change_id: change.id
+        });
       }
       const beforeHashes = await this.revisionHashes(changeDir);
       const invalidatedApprovals = revisionApprovals(amendmentTarget, change.approvals);
@@ -28565,11 +29583,12 @@ var RockSpecEngine = class {
   async validate(input = {}) {
     const context = await this.context();
     const located = await this.locateChange(context, input.changeId, true);
-    const errors = await this.validationErrors(context, located.changeDir, located.change, input.gate, input.strict ?? false);
+    const errors = input.artifactPath ? await this.artifactValidationErrors(located.changeDir, input.artifactPath) : await this.validationErrors(context, located.changeDir, located.change, input.gate, input.strict ?? false);
     const status = await this.statusFor(context, located.changeDir, located.change);
     return {
       valid: errors.length === 0,
       ...input.gate ? { gate: input.gate } : {},
+      ...input.artifactPath ? { artifact: input.artifactPath } : {},
       errors,
       warnings: [],
       status
@@ -28582,6 +29601,14 @@ var RockSpecEngine = class {
     const result = await this.mutate(input.changeId, "evidence.recorded", async (change, changeDir, context) => {
       const now = this.timestamp();
       const commit = input.commit ?? await git(context.root, ["rev-parse", "HEAD"]);
+      const scenarioIds = [...new Set(input.scenarioIds ?? [])].sort();
+      if (scenarioIds.length > 0) {
+        const known = (await this.loadSpecTraceability(changeDir)).scenarioRequirement;
+        const unknown2 = scenarioIds.filter((scenarioId) => !known.has(scenarioId));
+        if (unknown2.length > 0) {
+          throw new RockSpecError("EVIDENCE_SCENARIO_NOT_FOUND", "Evidence references unknown Scenarios", { scenario_ids: unknown2 });
+        }
+      }
       const record2 = {
         id: `E-${String(change.evidence.length + 1).padStart(3, "0")}`,
         kind: input.kind ?? "verification",
@@ -28592,9 +29619,9 @@ var RockSpecEngine = class {
         exit_code: input.exitCode,
         commit,
         source: input.source ?? "recorded",
-        scenario_ids: [],
-        finding_ids: [],
-        artifact_paths: [],
+        scenario_ids: scenarioIds,
+        finding_ids: [...new Set(input.findingIds ?? [])].sort(),
+        artifact_paths: [...new Set(input.artifactPaths ?? [])].sort(),
         ...input.taskId ? { task_id: input.taskId } : {},
         ...input.actionId ? { action_id: input.actionId } : {},
         ...input.reportPath ? { report_path: input.reportPath } : {},
@@ -28613,6 +29640,36 @@ var RockSpecEngine = class {
     const executable = input.executable.trim();
     if (!executable)
       throw new RockSpecError("INVALID_CHECK_COMMAND", "Check executable cannot be empty");
+    const command = formatCommand(executable, input.args ?? []);
+    const commit = await git(context.root, ["rev-parse", "HEAD"]);
+    const taskScenarioIds = input.taskId ? located.change.tasks[input.taskId]?.scenario_ids : void 0;
+    const scenarioIds = [...new Set(input.scenarioIds ?? taskScenarioIds ?? [])].sort();
+    const findingIds = [...new Set(input.findingIds ?? [])].sort();
+    const artifactPaths = [...new Set(input.artifactPaths ?? [])].sort();
+    if (input.reuseCachedEvidence !== false) {
+      const cached2 = await this.findReusableEvidence(located.changeDir, located.change, {
+        command,
+        commit,
+        ...input.taskId ? { taskId: input.taskId } : {},
+        ...input.actionId ? { actionId: input.actionId } : {},
+        scenarioIds,
+        findingIds,
+        artifactPaths
+      });
+      if (cached2) {
+        return {
+          ...await this.statusFor(context, located.changeDir, located.change),
+          check: {
+            evidence_id: cached2.id,
+            command,
+            exit_code: cached2.exit_code,
+            output_hash: cached2.output_hash,
+            report_path: cached2.report_path,
+            cached: true
+          }
+        };
+      }
+    }
     const startedAt = this.timestamp();
     let stdout2 = "";
     let stderr = "";
@@ -28631,7 +29688,6 @@ var RockSpecEngine = class {
       exitCode = typeof failure.code === "number" ? failure.code : 1;
     }
     const finishedAt = this.timestamp();
-    const command = formatCommand(executable, input.args ?? []);
     const output = [
       `command: ${command}`,
       `cwd: ${context.root}`,
@@ -28660,7 +29716,10 @@ var RockSpecEngine = class {
       outputHash,
       reportPath,
       ...input.taskId ? { taskId: input.taskId } : {},
-      ...input.actionId ? { actionId: input.actionId } : {}
+      ...input.actionId ? { actionId: input.actionId } : {},
+      scenarioIds,
+      findingIds,
+      artifactPaths
     });
     const evidence = status.change.evidence.at(-1);
     if (!evidence)
@@ -28672,7 +29731,8 @@ var RockSpecEngine = class {
         command,
         exit_code: exitCode,
         output_hash: outputHash,
-        report_path: reportPath
+        report_path: reportPath,
+        cached: false
       }
     };
   }
@@ -28727,7 +29787,10 @@ var RockSpecEngine = class {
       }
       await this.assertNoUncommittedProductChanges(context.root);
       const suspendedAttempt = task.status === "suspended" ? task.attempts.at(-1) : void 0;
-      const baseCommit = suspendedAttempt?.base_commit ?? await git(context.root, ["rev-parse", "HEAD"]);
+      const baseCommit = suspendedAttempt?.base_commit ?? (task.adopted_commit ? await git(context.root, ["rev-parse", `${task.adopted_commit}^`]) : await git(context.root, ["rev-parse", "HEAD"]));
+      if (task.adopted_commit) {
+        await this.assertHistoricalAttributionState(context.root, change, task);
+      }
       if (suspendedAttempt) {
         const headCommit = await git(context.root, ["rev-parse", "HEAD"]);
         const mergeBase = await git(context.root, ["merge-base", baseCommit, headCommit]);
@@ -28758,6 +29821,17 @@ var RockSpecEngine = class {
       delete task.review_subject;
       delete task.review_package_mode;
       task.review_attempts = 0;
+      change.execution.registry.push({
+        id: executionId,
+        role: "task_implementer",
+        action: "task.execute",
+        started_at: task.started_at,
+        ...input.modelTier ? { model_tier: input.modelTier } : {},
+        ...input.hostModel ? { host_model: input.hostModel } : {},
+        context_package_path: briefPath,
+        context_package_hash: briefHash,
+        context_package_verified: true
+      });
       change.execution.active_task = input.taskId;
       change.execution.active_execution = executionId;
       change.state = "IMPLEMENTING";
@@ -28823,6 +29897,7 @@ var RockSpecEngine = class {
     })))) {
       return knowledgePackageFromReceipt(located.change.knowledge_evolution, sourceDigest);
     }
+    const reviewRequired = proposal.delta.updates.some((update) => update.authority === "normative");
     return {
       change_id: located.change.id,
       already_evolved: false,
@@ -28832,8 +29907,10 @@ var RockSpecEngine = class {
       delta_hash: proposal.deltaHash,
       baseline_hashes: proposal.baselineHashes,
       candidate_hashes: proposal.candidateHashes,
-      ...proposal.delta.outcome === "proposed" ? { review_path: "reviews/knowledge-review.md" } : {},
-      requires_human_approval: proposal.delta.updates.some((update) => update.authority === "normative")
+      review_required: reviewRequired,
+      ...reviewRequired ? { review_path: "reviews/knowledge-review.md" } : {},
+      requires_human_approval: reviewRequired,
+      semantic_warnings: proposal.semanticWarnings
     };
   }
   async prepareReviewPackage(input) {
@@ -28859,19 +29936,26 @@ var RockSpecEngine = class {
           throw new RockSpecError("REVIEW_PACKAGE_MODE_CONFLICT", "Review package mode cannot be both product and scope_blocked");
         }
         await this.assertTaskBriefFresh(changeDir, task);
+        if (scopeBlocked && task.adopted_commit) {
+          throw new RockSpecError("REVIEW_PACKAGE_MODE_CONFLICT", "Historical attribution Tasks cannot use scope_blocked Review mode");
+        }
         if (scopeBlocked)
-          await this.assertTaskScopeBlockedState(context.root, task);
-        else
+          await this.assertTaskScopeBlockedState(context.root, changeDir, task);
+        else if (task.adopted_commit)
+          await this.assertHistoricalAttributionState(context.root, change, task);
+        else {
           await this.assertTaskProductState(context.root, task);
+          await this.assertTaskImplementedReport(changeDir, task);
+        }
         if (!task.report_path) {
           throw new RockSpecError("IMPLEMENTER_REPORT_MISSING", `Task ${input.taskId} has no Implementer report path`);
         }
         await this.assertMaterialized(changeDir, [task.report_path]);
         task.report_hash = sha256(await readFile3(path3.join(changeDir, task.report_path)));
-        prepared = await this.writeReviewPackage(context.root, changeDir, "task", task.base_commit, await git(context.root, ["rev-parse", "HEAD"]), input.taskId, scopeBlocked ? "scope_blocked" : "product", task.allowed_paths);
+        prepared = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]), input.taskId, scopeBlocked ? "scope_blocked" : task.adopted_commit ? "historical_attribution" : "product", task.allowed_paths);
         task.review_subject = prepared.subject;
-        task.review_package_mode = scopeBlocked ? "scope_blocked" : "product";
-        prepared.mode = scopeBlocked ? "scope_blocked" : "product";
+        task.review_package_mode = scopeBlocked ? "scope_blocked" : task.adopted_commit ? "historical_attribution" : "product";
+        prepared.mode = task.review_package_mode;
       } else {
         if (change.state !== "FINAL_REVIEW") {
           throw new RockSpecError("ILLEGAL_ACTION", "Delivery Review package requires FINAL_REVIEW state", {
@@ -28881,7 +29965,7 @@ var RockSpecEngine = class {
         if (!change.base_commit)
           throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
         await this.assertNoUncommittedProductChanges(context.root);
-        prepared = await this.writeReviewPackage(context.root, changeDir, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
+        prepared = await this.writeReviewPackage(context.root, changeDir, change, "delivery", change.base_commit, await git(context.root, ["rev-parse", "HEAD"]));
       }
       return { kind: input.kind, path: prepared.path, subject: prepared.subject };
     });
@@ -28906,16 +29990,26 @@ var RockSpecEngine = class {
         });
       }
       await this.assertTaskBriefFresh(changeDir, task);
-      const requestedSha = input.commitSha ?? await git(context.root, ["rev-parse", "HEAD"]);
+      const requestedSha = input.commitSha ?? task.adopted_commit ?? await git(context.root, ["rev-parse", "HEAD"]);
       const commitSha = await git(context.root, ["rev-parse", `${requestedSha}^{commit}`]);
       const headCommit = await git(context.root, ["rev-parse", "HEAD"]);
-      if (commitSha !== headCommit) {
+      if (task.adopted_commit && commitSha !== task.adopted_commit) {
+        throw new RockSpecError("ADOPTED_COMMIT_MISMATCH", `Task ${input.taskId} must complete against its adopted Commit`, {
+          task_id: input.taskId,
+          adopted_commit: task.adopted_commit,
+          requested_commit: commitSha
+        });
+      }
+      if (!task.adopted_commit && commitSha !== headCommit) {
         throw new RockSpecError("TASK_HEAD_MISMATCH", `Task ${input.taskId} must complete at the current HEAD`, {
           requested_commit: commitSha,
           current_head: headCommit
         });
       }
-      await this.assertTaskProductState(context.root, task);
+      if (task.adopted_commit)
+        await this.assertHistoricalAttributionState(context.root, change, task);
+      else
+        await this.assertTaskProductState(context.root, task);
       const duplicate = Object.values(change.tasks).find((candidate) => candidate.id !== input.taskId && candidate.commit_sha === commitSha);
       if (duplicate) {
         throw new RockSpecError("DUPLICATE_TASK_COMMIT", `Commit ${commitSha} already belongs to ${duplicate.id}`, {
@@ -28933,7 +30027,7 @@ var RockSpecEngine = class {
       }
       if (!task.base_commit)
         throw new RockSpecError("TASK_BASE_MISSING", `Task ${input.taskId} has no base commit`);
-      const currentPackage = await this.writeReviewPackage(context.root, changeDir, "task", task.base_commit, commitSha, input.taskId, "product", task.allowed_paths);
+      const currentPackage = await this.writeReviewPackage(context.root, changeDir, change, "task", task.base_commit, commitSha, input.taskId, task.adopted_commit ? "historical_attribution" : "product", task.allowed_paths);
       if (!sameReviewSubject(review.subject, currentPackage.subject)) {
         throw new RockSpecError("STALE_REVIEW", `Task ${input.taskId} Review does not cover the final Diff`, {
           reviewed_subject: review.subject,
@@ -28951,7 +30045,21 @@ var RockSpecEngine = class {
           current_hash: reportHash
         });
       }
-      await this.assertFreshEvidence(context.root, change, { taskId: input.taskId, commit: commitSha }, true);
+      const evidenceCommit = task.adopted_commit ? headCommit : commitSha;
+      if (task.adopted_commit) {
+        await this.assertFreshTaskScenarioEvidence(context.root, change, task, evidenceCommit);
+      } else {
+        await this.assertFreshEvidence(context.root, change, { taskId: input.taskId, commit: evidenceCommit }, true);
+      }
+      const coveredCommands = new Set(change.evidence.filter((item) => item.task_id === input.taskId && item.commit === evidenceCommit && item.source === "executed" && item.exit_code === 0).map((item) => item.command.trim()));
+      const missingValidationCommands = task.validation_commands.filter((command) => !coveredCommands.has(command.trim()));
+      if (missingValidationCommands.length > 0) {
+        throw new RockSpecError("TASK_VALIDATION_EVIDENCE_MISSING", `Task ${input.taskId} \u7F3A\u5C11\u58F0\u660E\u9A8C\u8BC1\u547D\u4EE4\u7684\u65B0\u9C9C\u6210\u529F\u8BC1\u636E`, {
+          task_id: input.taskId,
+          commit: evidenceCommit,
+          missing_commands: missingValidationCommands
+        });
+      }
       task.status = "completed";
       task.commit_sha = commitSha;
       task.completed_at = this.timestamp();
@@ -28999,7 +30107,7 @@ var RockSpecEngine = class {
         if (!change.base_commit || !change.reviews.delivery?.subject) {
           throw new RockSpecError("DELIVERY_REVIEW_SUBJECT_MISSING", "Delivery Review has no fixed subject");
         }
-        const currentPackage = await this.writeReviewPackage(context.root, changeDir, "delivery", change.base_commit, commit);
+        const currentPackage = await this.writeReviewPackage(context.root, changeDir, change, "delivery", change.base_commit, commit);
         if (!sameReviewSubject(change.reviews.delivery.subject, currentPackage.subject)) {
           throw new RockSpecError("STALE_REVIEW", "Delivery Review does not cover the current commit", {
             reviewed_subject: change.reviews.delivery.subject,
@@ -29039,8 +30147,78 @@ var RockSpecEngine = class {
           current_commit: currentCommit
         });
       }
-      change.finished_at = this.timestamp();
-      return { disposition: input.disposition ?? "keep", commit: deliveryHead, current_commit: currentCommit };
+      await this.assertDeliveryHeadAncestor(context.root, deliveryHead, currentCommit);
+      const disposition = input.disposition ?? change.finish_disposition?.choice ?? "keep";
+      if (change.finish_disposition && change.finish_disposition.choice !== disposition) {
+        throw new RockSpecError("FINISH_DISPOSITION_MISMATCH", "\u5DF2\u8BB0\u5F55\u7684\u5904\u7F6E\u9009\u62E9\u4E0D\u80FD\u88AB\u9759\u9ED8\u66FF\u6362", {
+          recorded: change.finish_disposition.choice,
+          supplied: disposition
+        });
+      }
+      const now = this.timestamp();
+      if (disposition === "keep") {
+        if (input.executed || input.resultRef || input.resultCommit) {
+          throw new RockSpecError("FINISH_CONFIRMATION_NOT_APPLICABLE", "keep \u4E0D\u9700\u8981\u5916\u90E8\u6267\u884C\u786E\u8BA4");
+        }
+        change.finish_disposition = {
+          choice: disposition,
+          status: "completed",
+          recorded_at: change.finish_disposition?.recorded_at ?? now,
+          pending_action: null,
+          completed_at: change.finish_disposition?.completed_at ?? now
+        };
+        change.finished_at ??= now;
+        return { disposition, disposition_status: "completed", commit: deliveryHead, current_commit: currentCommit };
+      }
+      if (!input.executed) {
+        if (input.resultRef || input.resultCommit) {
+          throw new RockSpecError("FINISH_CONFIRMATION_INCOMPLETE", "result-ref/result-commit \u53EA\u80FD\u4E0E --executed \u4E00\u8D77\u4F7F\u7528");
+        }
+        change.finish_disposition = {
+          choice: disposition,
+          status: "pending_external_action",
+          recorded_at: change.finish_disposition?.recorded_at ?? now,
+          pending_action: disposition === "push" ? `\u5C06\u51BB\u7ED3\u4EA4\u4ED8 Commit ${deliveryHead} \u63A8\u9001\u5230\u7528\u6237\u9009\u62E9\u7684\u8FDC\u7AEF Ref\uFF0C\u7136\u540E\u56DE\u586B Ref \u4E0E Commit` : `\u5C06\u51BB\u7ED3\u4EA4\u4ED8 Commit ${deliveryHead} \u5408\u5E76\u5230\u7528\u6237\u9009\u62E9\u7684\u672C\u5730\u76EE\u6807 Ref\uFF0C\u7136\u540E\u56DE\u586B Ref \u4E0E\u5408\u5E76\u7ED3\u679C Commit`
+        };
+        delete change.finished_at;
+        return { disposition, disposition_status: "pending_external_action", commit: deliveryHead, current_commit: currentCommit };
+      }
+      if (change.finish_disposition?.status !== "pending_external_action") {
+        throw new RockSpecError("FINISH_DISPOSITION_NOT_PENDING", "\u5916\u90E8\u5904\u7F6E\u5FC5\u987B\u5148\u8BB0\u5F55\u9009\u62E9\uFF0C\u518D\u786E\u8BA4\u6267\u884C\u7ED3\u679C", {
+          disposition
+        });
+      }
+      if (!input.resultRef || !input.resultCommit) {
+        throw new RockSpecError("FINISH_CONFIRMATION_INCOMPLETE", "\u786E\u8BA4\u5916\u90E8\u5904\u7F6E\u9700\u8981 --result-ref \u548C --result-commit");
+      }
+      const resultCommit = await git(context.root, ["rev-parse", `${input.resultCommit}^{commit}`]);
+      if (disposition === "push" && resultCommit !== deliveryHead) {
+        throw new RockSpecError("PUSH_RESULT_MISMATCH", "Push \u786E\u8BA4\u5FC5\u987B\u7ED1\u5B9A\u51BB\u7ED3\u4EA4\u4ED8 Commit", {
+          delivery_head: deliveryHead,
+          result_commit: resultCommit
+        });
+      }
+      if (disposition === "local_merge") {
+        await this.assertDeliveryHeadAncestor(context.root, deliveryHead, resultCommit);
+      }
+      change.finish_disposition = {
+        choice: disposition,
+        status: "completed",
+        recorded_at: change.finish_disposition.recorded_at,
+        pending_action: null,
+        result_ref: input.resultRef,
+        result_commit: resultCommit,
+        completed_at: now
+      };
+      change.finished_at = now;
+      return {
+        disposition,
+        disposition_status: "completed",
+        commit: deliveryHead,
+        current_commit: currentCommit,
+        result_ref: input.resultRef,
+        result_commit: resultCommit
+      };
     });
     return this.statusFor(result.context, result.changeDir, result.change);
   }
@@ -29062,6 +30240,16 @@ var RockSpecEngine = class {
           change_id: current.id
         });
       }
+      const currentCommit = await git(context.root, ["rev-parse", "HEAD"]);
+      const deliveryHead = current.delivery_head ?? current.verification.commit;
+      if (!deliveryHead || current.verification.commit !== deliveryHead) {
+        throw new RockSpecError("STALE_EVIDENCE", "Archived delivery must remain bound to the verified Commit", {
+          verified_commit: current.verification.commit,
+          delivery_head: deliveryHead,
+          current_commit: currentCommit
+        });
+      }
+      await this.assertDeliveryHeadAncestor(context.root, deliveryHead, currentCommit);
       const date5 = this.clock();
       archivePath = path3.join(context.rocksRoot, "archive", String(date5.getUTCFullYear()), String(date5.getUTCMonth() + 1).padStart(2, "0"), current.id);
       if (await exists(archivePath)) {
@@ -29083,8 +30271,7 @@ var RockSpecEngine = class {
         current.state = "ARCHIVED";
         current.archived_at = this.timestamp();
         current.updated_at = current.archived_at;
-        await writeChange(staging, current);
-        await appendEvent(staging, {
+        await commitChangeMutation(staging, before, current, {
           schema_version: 1,
           sequence: await eventCount(staging) + 1,
           event: "change.archived",
@@ -29123,6 +30310,7 @@ var RockSpecEngine = class {
   async completeKnowledgeEvolution(changeDir, change, context) {
     const sourceDigest = await this.knowledgeSourceDigest(changeDir, change);
     const proposal = await this.loadKnowledgeProposal(context, changeDir, change);
+    this.assertRegisteredExecution(change, proposal.delta.author_execution_id, "knowledge_author", "knowledge.evolve.author");
     if (change.knowledge_evolution.status !== "pending") {
       if (change.knowledge_evolution.source_digest !== sourceDigest) {
         throw new RockSpecError("KNOWLEDGE_EVOLUTION_STALE", "Knowledge evolution no longer matches the frozen Change inputs", {
@@ -29163,50 +30351,56 @@ var RockSpecEngine = class {
       change.knowledge_evolution = receipt2;
       return;
     }
-    const reviewPath = "reviews/knowledge-review.md";
-    const absoluteReviewPath = path3.join(changeDir, reviewPath);
-    if (!await exists(absoluteReviewPath)) {
-      throw new RockSpecError("MISSING_ARTIFACT", `Required artifact ${reviewPath} does not exist`, { path: reviewPath });
-    }
-    const reviewContent = await readFile3(absoluteReviewPath, "utf8");
-    const parsedReview = KnowledgeReviewDocumentSchema.safeParse(parseFrontmatter(reviewContent, reviewPath));
-    if (!parsedReview.success) {
-      throw new RockSpecError("INVALID_KNOWLEDGE_REVIEW", "Knowledge Review metadata is invalid", {
-        path: reviewPath,
-        issues: parsedReview.error.issues
-      });
-    }
-    const review = parsedReview.data;
-    const expectedSubject = {
-      source_digest: sourceDigest,
-      delta_hash: proposal.deltaHash,
-      baseline_hashes: proposal.baselineHashes,
-      candidate_hashes: proposal.candidateHashes
-    };
-    if (!sameJson(review.subject, expectedSubject)) {
-      throw new RockSpecError("STALE_KNOWLEDGE_REVIEW", "Knowledge Review does not cover the current Delta and candidates", {
-        reviewed_subject: review.subject,
-        current_subject: expectedSubject
-      });
-    }
-    if (review.reviewer_execution_id === proposal.delta.author_execution_id) {
-      throw new RockSpecError("REVIEWER_NOT_INDEPENDENT", "Knowledge Reviewer must be independent from the Delta author");
-    }
-    if (review.verdict !== "PASS") {
-      throw new RockSpecError("KNOWLEDGE_REVIEW_FAILED", "Resolve the Knowledge Review Findings before completion", {
-        verdict: review.verdict,
-        finding_ids: review.findings.filter((finding) => finding.status === "open").map((finding) => finding.id)
-      });
+    const reviewRequired = proposal.delta.updates.some((update) => update.authority === "normative");
+    let reviewReceipt;
+    if (reviewRequired) {
+      const reviewPath = "reviews/knowledge-review.md";
+      const absoluteReviewPath = path3.join(changeDir, reviewPath);
+      if (!await exists(absoluteReviewPath)) {
+        throw new RockSpecError("MISSING_ARTIFACT", `Required artifact ${reviewPath} does not exist`, { path: reviewPath });
+      }
+      const reviewContent = await readFile3(absoluteReviewPath, "utf8");
+      const parsedReview = KnowledgeReviewDocumentSchema.safeParse(parseFrontmatter(reviewContent, reviewPath));
+      if (!parsedReview.success) {
+        throw new RockSpecError("INVALID_KNOWLEDGE_REVIEW", "Knowledge Review metadata is invalid", {
+          path: reviewPath,
+          issues: parsedReview.error.issues
+        });
+      }
+      const review = parsedReview.data;
+      this.assertRegisteredExecution(change, review.reviewer_execution_id, "knowledge_reviewer", "knowledge.evolve.review");
+      const expectedSubject = {
+        source_digest: sourceDigest,
+        delta_hash: proposal.deltaHash,
+        baseline_hashes: proposal.baselineHashes,
+        candidate_hashes: proposal.candidateHashes
+      };
+      if (!sameJson(review.subject, expectedSubject)) {
+        throw new RockSpecError("STALE_KNOWLEDGE_REVIEW", "Knowledge Review does not cover the current Delta and candidates", {
+          reviewed_subject: review.subject,
+          current_subject: expectedSubject
+        });
+      }
+      if (review.reviewer_execution_id === proposal.delta.author_execution_id) {
+        throw new RockSpecError("REVIEWER_NOT_INDEPENDENT", "Knowledge Reviewer must be independent from the Delta author");
+      }
+      if (review.verdict !== "PASS") {
+        throw new RockSpecError("KNOWLEDGE_REVIEW_FAILED", "Resolve the Knowledge Review Findings before completion", {
+          verdict: review.verdict,
+          finding_ids: review.findings.filter((finding) => finding.status === "open").map((finding) => finding.id)
+        });
+      }
+      reviewReceipt = {
+        reviewer_execution_id: review.reviewer_execution_id,
+        report_path: reviewPath,
+        report_hash: sha256(reviewContent)
+      };
     }
     const receipt = KnowledgeEvolutionSchema.parse({
       ...baseReceipt,
       status: "approved",
       updates: proposal.updates,
-      review: {
-        reviewer_execution_id: review.reviewer_execution_id,
-        report_path: reviewPath,
-        report_hash: sha256(reviewContent)
-      },
+      ...reviewReceipt ? { review: reviewReceipt } : {},
       ...proposal.delta.approval ? { approval: proposal.delta.approval } : {}
     });
     await atomicWrite(path3.join(changeDir, "knowledge-evolution.yaml"), (0, import_yaml2.stringify)(receipt, { lineWidth: 0 }));
@@ -29233,6 +30427,24 @@ var RockSpecEngine = class {
         actual_change_id: delta.change_id
       });
     }
+    for (const update of delta.updates) {
+      for (const source of update.sources) {
+        const sourcePath = source.split("#", 1)[0]?.trim();
+        if (!sourcePath || path3.isAbsolute(sourcePath) || sourcePath.includes("\\") || sourcePath.split("/").includes("..")) {
+          throw new RockSpecError("INVALID_KNOWLEDGE_SOURCE", `Knowledge source ${source} must reference a Change-relative artifact`, {
+            target: update.target,
+            source
+          });
+        }
+        if (!await exists(path3.join(changeDir, sourcePath))) {
+          throw new RockSpecError("KNOWLEDGE_SOURCE_MISSING", `Knowledge source artifact ${sourcePath} does not exist`, {
+            target: update.target,
+            source,
+            path: sourcePath
+          });
+        }
+      }
+    }
     const candidateRoot = path3.join(changeDir, "knowledge", "updates");
     const candidateFiles = await exists(candidateRoot) ? (await walkFiles(candidateRoot)).map((file2) => path3.relative(candidateRoot, file2)).sort() : [];
     const declaredTargets = delta.updates.map((update) => update.target).sort();
@@ -29244,6 +30456,7 @@ var RockSpecEngine = class {
     }
     const candidateHashes = {};
     const baselineHashes = {};
+    const semanticWarnings = [];
     const updates = [];
     for (const update of delta.updates) {
       const candidatePath = path3.join(candidateRoot, update.target);
@@ -29267,6 +30480,19 @@ var RockSpecEngine = class {
       }
       const beforeDigest = baselineExists ? sha256(await readFile3(baselinePath)) : null;
       const afterDigest = sha256(candidateContent);
+      if (update.authority === "derived") {
+        const beforeMarkers = baselineExists ? modalMarkers(await readFile3(baselinePath, "utf8")) : [];
+        const afterMarkers = modalMarkers(candidateContent.toString("utf8"));
+        if (!sameJson(beforeMarkers, afterMarkers) && (beforeMarkers.length > 0 || afterMarkers.length > 0)) {
+          semanticWarnings.push({
+            code: "POSSIBLE_NORMATIVE_MODAL_CHANGE",
+            target: update.target,
+            message: "\u5019\u9009\u4E2D\u7684\u4E49\u52A1\u5F3A\u5EA6\u8BCD\u53EF\u80FD\u53D1\u751F\u53D8\u5316\uFF1B\u8BF7\u786E\u8BA4\u8FD9\u53EA\u662F\u65E2\u6709\u51B3\u7B56\u7684\u7B49\u4E49\u6D3E\u751F\uFF0C\u5426\u5219\u5E94\u6539\u4E3A normative\u3002",
+            before_markers: beforeMarkers,
+            after_markers: afterMarkers
+          });
+        }
+      }
       baselineHashes[update.target] = beforeDigest;
       candidateHashes[update.target] = afterDigest;
       updates.push({ ...update, before_digest: beforeDigest, after_digest: afterDigest });
@@ -29276,6 +30502,7 @@ var RockSpecEngine = class {
       deltaHash: sha256(deltaContent),
       baselineHashes: Object.fromEntries(Object.entries(baselineHashes).sort(([left], [right]) => left.localeCompare(right))),
       candidateHashes: Object.fromEntries(Object.entries(candidateHashes).sort(([left], [right]) => left.localeCompare(right))),
+      semanticWarnings,
       updates
     };
   }
@@ -29358,7 +30585,7 @@ ${hashed.aggregate_hash}
         const stagedTargetExists = await exists(stagedTarget);
         const actualBefore = stagedTargetExists ? sha256(await readFile3(stagedTarget)) : null;
         if (actualBefore !== update.before_digest) {
-          throw new RockSpecError("KNOWLEDGE_BASELINE_DIVERGED", `Knowledge target ${update.target} changed after Review`, {
+          throw new RockSpecError("KNOWLEDGE_BASELINE_DIVERGED", `Knowledge target ${update.target} changed after validation`, {
             target: update.target,
             reviewed_digest: update.before_digest,
             current_digest: actualBefore
@@ -29366,7 +30593,7 @@ ${hashed.aggregate_hash}
         }
         const candidate = path3.join(changeDir, "knowledge", "updates", update.target);
         if (!await exists(candidate) || sha256(await readFile3(candidate)) !== update.after_digest) {
-          throw new RockSpecError("KNOWLEDGE_CANDIDATE_DIVERGED", `Knowledge candidate ${update.target} changed after Review`, {
+          throw new RockSpecError("KNOWLEDGE_CANDIDATE_DIVERGED", `Knowledge candidate ${update.target} changed after validation`, {
             target: update.target
           });
         }
@@ -29399,6 +30626,39 @@ ${hashed.aggregate_hash}
   async context() {
     const repository = await resolveRepository(this.cwd);
     return { ...repository, config: await readConfig(repository.rocksRoot) };
+  }
+  async runEnvironmentPreflight(context, changeId) {
+    const checks = [];
+    for (const probe of context.config.environment_preflight) {
+      const started = Date.now();
+      try {
+        await execFileAsync2(probe.command, probe.args, {
+          cwd: context.root,
+          timeout: 15e3,
+          maxBuffer: 256 * 1024
+        });
+        checks.push({
+          id: probe.id,
+          kind: probe.kind,
+          required: probe.required,
+          status: "passed",
+          duration_ms: Date.now() - started,
+          detail: `${probe.kind} probe passed`
+        });
+      } catch (error51) {
+        const message = error51 instanceof Error ? error51.message.split("\n", 1)[0] : String(error51);
+        checks.push({
+          id: probe.id,
+          kind: probe.kind,
+          required: probe.required,
+          status: probe.required ? "failed" : "skipped",
+          duration_ms: Date.now() - started,
+          detail: `${probe.kind} probe failed: ${message}`
+        });
+      }
+    }
+    const valid = checks.every((check2) => !check2.required || check2.status === "passed");
+    return { valid, checks };
   }
   async locateChange(context, requestedId, includeArchive = false) {
     let id = requestedId;
@@ -29438,10 +30698,10 @@ ${hashed.aggregate_hash}
           change_id: change.id
         });
       }
+      const before = structuredClone(change);
       const previousState = change.state;
       const data = await operation(change, initiallyLocated.changeDir, context);
       change.updated_at = this.timestamp();
-      await writeChange(initiallyLocated.changeDir, change);
       const event = {
         schema_version: 1,
         sequence: await eventCount(initiallyLocated.changeDir) + 1,
@@ -29452,7 +30712,7 @@ ${hashed.aggregate_hash}
         current_state: change.state,
         data
       };
-      await appendEvent(initiallyLocated.changeDir, event);
+      await commitChangeMutation(initiallyLocated.changeDir, before, change, event);
     }, this.lockTimeoutMs, this.lockStaleMs);
     return { context, changeDir: initiallyLocated.changeDir, change };
   }
@@ -29684,13 +30944,47 @@ ${hashed.aggregate_hash}
     }
     return deduplicateBlocks(errors);
   }
+  async artifactValidationErrors(changeDir, artifactPath) {
+    const absolute = path3.resolve(changeDir, artifactPath);
+    const relative = path3.relative(changeDir, absolute);
+    if (relative.startsWith("..") || path3.isAbsolute(relative) || !await exists(absolute)) {
+      return [{
+        code: "ARTIFACT_NOT_FOUND",
+        message: "\u5F85\u6821\u9A8C\u4EA7\u7269\u5FC5\u987B\u662F\u5F53\u524D Change \u4E2D\u5DF2\u5B58\u5728\u7684\u6587\u4EF6",
+        paths: [artifactPath]
+      }];
+    }
+    const normalized = relative.split(path3.sep).join("/");
+    const content = await readFile3(absolute, "utf8");
+    try {
+      if (/^specs\/[^/]+\.md$/.test(normalized)) {
+        const result2 = validateSpec(content);
+        return result2.valid ? [] : result2.issues.map((issue2) => validationIssue(normalized, issue2));
+      }
+      const document = parseFrontmatter(content, normalized);
+      const result = artifactSchemaResult(normalized, document);
+      if (!result) {
+        return [{
+          code: "ARTIFACT_SCHEMA_UNKNOWN",
+          message: "\u8BE5\u8DEF\u5F84\u6CA1\u6709\u53EF\u7528\u7684 RockSpec \u4EA7\u7269 Schema",
+          paths: [normalized]
+        }];
+      }
+      return result.success ? [] : result.error.issues.map((issue2) => validationIssue(normalized, issue2));
+    } catch (error51) {
+      if (error51 instanceof RockSpecError) {
+        return [{ code: error51.code, message: error51.message, paths: [normalized] }];
+      }
+      throw error51;
+    }
+  }
   async assertNoStalePrerequisites(changeDir, change, action) {
     const required2 = [];
     if (["design.technical", "design.prototype"].includes(action))
       required2.push("spec");
     if (["plan.create", "readiness.review"].includes(action))
       required2.push("spec", "design");
-    if (["task.execute", "task.review", "acceptance.validate", "delivery.review"].includes(action)) {
+    if (["task.execute", "task.review", "acceptance.validate", "acceptance.uat", "delivery.review"].includes(action)) {
       required2.push("spec", "design", "implementation");
     }
     await this.assertApprovalClosure(changeDir, change, required2);
@@ -29733,13 +31027,16 @@ ${hashed.aggregate_hash}
   async assertApprovalPrerequisites(changeDir, change, gate) {
     if (gate === "spec") {
       await this.assertMaterialized(changeDir, ["proposal.md", "specs"], true);
+      await this.assertProposalReady(changeDir);
       this.assertReviewPassed(change, "requirements");
       await this.assertReviewFresh(changeDir, change, "requirements");
+      await this.assertReviewSourcesFresh(changeDir, change.reviews.requirements);
       return;
     }
     if (gate === "design") {
       await this.assertApprovalFresh(changeDir, change, "spec");
       await this.assertMaterialized(changeDir, change.prototype.required ? ["design.md", "prototype"] : ["design.md"]);
+      await this.assertDesignCoverage(changeDir);
       if (change.prototype.required && change.prototype.status !== "reconciled") {
         throw new RockSpecError("PROTOTYPE_NOT_RECONCILED", "Reconcile the completed UI prototype into Design before approval");
       }
@@ -29750,6 +31047,7 @@ ${hashed.aggregate_hash}
     await this.assertMaterialized(changeDir, ["plan.md", "tasks.md", "tasks"]);
     this.assertReviewPassed(change, "readiness");
     await this.assertReviewFresh(changeDir, change, "readiness");
+    await this.assertReviewSourcesFresh(changeDir, change.reviews.readiness);
     if (Object.keys(change.tasks).length === 0) {
       throw new RockSpecError("NO_TASKS", "At least one Task is required before implementation approval");
     }
@@ -29821,9 +31119,11 @@ ${hashed.aggregate_hash}
       if (content.trim().length === 0) {
         throw new RockSpecError("EMPTY_ARTIFACT", `${relative} is empty`, { path: relative });
       }
-      if (/\bTODO\b/i.test(content)) {
-        throw new RockSpecError("UNRESOLVED_PLACEHOLDER", `${relative} still contains TODO`, {
-          path: relative
+      const placeholder = content.match(/\b(?:TODO|TBD|FIXME)\b|\{\{[^}\n]+\}\}|<placeholder>/i)?.[0];
+      if (placeholder) {
+        throw new RockSpecError("UNRESOLVED_PLACEHOLDER", `${relative} still contains an unresolved placeholder`, {
+          path: relative,
+          placeholder
         });
       }
       if (validateSpecs && relative.startsWith(`specs${path3.sep}`)) {
@@ -29860,7 +31160,7 @@ ${hashed.aggregate_hash}
       });
     }
   }
-  async loadStageReview(changeDir, profile, relativePath, kind, assertedVerdict) {
+  async loadStageReview(changeDir, change, profile, relativePath, kind, assertedVerdict) {
     const sourcePaths = profile === "strict" ? strictReviewerPaths(relativePath) : [relativePath];
     const paths = profile === "strict" ? [...sourcePaths, relativePath] : sourcePaths;
     const sources = [];
@@ -29879,6 +31179,7 @@ ${hashed.aggregate_hash}
       if (!sourcePaths.includes(reviewPath))
         continue;
       const document = parseStageReviewDocument(content, reviewPath, kind);
+      this.assertRegisteredExecution(change, document.reviewer_execution_id, kind === "requirements" ? "requirements_reviewer" : "readiness_reviewer", kind === "requirements" ? "requirements.review" : "readiness.review");
       assertStageFindingRoutes(kind, document.findings, reviewPath);
       combinedVerdict = worseVerdict(combinedVerdict, document.verdict);
       sources.push({
@@ -29925,7 +31226,7 @@ ${hashed.aggregate_hash}
       findings: sources.flatMap((source) => source.findings)
     };
   }
-  async loadCodeReview(changeDir, profile, relativePath, subject, excludedReviewerExecutions, assertedVerdict) {
+  async loadCodeReview(changeDir, change, profile, relativePath, subject, excludedReviewerExecutions, expectedExpandedPaths, assertedVerdict) {
     const sourcePaths = profile === "strict" ? strictReviewerPaths(relativePath) : [relativePath];
     const allPaths = profile === "strict" ? [...sourcePaths, relativePath] : sourcePaths;
     const sources = [];
@@ -29945,6 +31246,16 @@ ${hashed.aggregate_hash}
       if (!sourcePaths.includes(reviewPath))
         continue;
       const document = parseReviewDocument(content, reviewPath);
+      const reviewKind = relativePath.includes("/tasks/") ? "task" : "delivery";
+      this.assertRegisteredExecution(change, document.reviewer_execution_id, reviewKind === "task" ? "task_reviewer" : "delivery_reviewer", reviewKind === "task" ? "task.review" : "delivery.review");
+      const assessedPaths = document.scope_assessment.map((item) => item.path);
+      if (new Set(assessedPaths).size !== assessedPaths.length || JSON.stringify([...assessedPaths].sort()) !== JSON.stringify([...expectedExpandedPaths].sort())) {
+        throw new RockSpecError("SCOPE_ASSESSMENT_MISMATCH", `${reviewPath} must assess every expanded path exactly once`, {
+          path: reviewPath,
+          expected_paths: [...expectedExpandedPaths].sort(),
+          assessed_paths: [...assessedPaths].sort()
+        });
+      }
       assertFindingRoutes(relativePath.includes("/tasks/") ? "task" : "delivery", document.findings, reviewPath);
       if (!sameReviewSubject(document.subject, subject)) {
         throw new RockSpecError("STALE_REVIEW", `${reviewPath} does not cover the current Diff`, {
@@ -30011,10 +31322,41 @@ ${hashed.aggregate_hash}
       findings: sources.flatMap((source) => source.findings)
     };
   }
-  async loadAcceptanceReview(changeDir, currentCommit, excludedReviewerExecutions, assertedVerdict) {
+  async loadAcceptanceReview(changeDir, change, currentCommit, excludedReviewerExecutions, assertedVerdict) {
     const relativePath = "testing/test-report.md";
     const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
     const document = parseAcceptanceDocument(content, relativePath);
+    this.assertRegisteredExecution(change, document.reviewer_execution_id, "acceptance_engineer", "acceptance.validate");
+    if (document.verdict === "PASS") {
+      const expectedScenarios = [...(await this.loadSpecTraceability(changeDir)).scenarioRequirement.keys()].sort();
+      const coveredScenarios = document.scenario_coverage.map((coverage) => coverage.scenario_id).sort();
+      if (JSON.stringify(coveredScenarios) !== JSON.stringify(expectedScenarios)) {
+        throw new RockSpecError("ACCEPTANCE_SCENARIO_COVERAGE_GAP", "Acceptance must cover every approved Scenario", {
+          expected_scenario_ids: expectedScenarios,
+          covered_scenario_ids: coveredScenarios
+        });
+      }
+      for (const coverage of document.scenario_coverage) {
+        for (const evidenceId of coverage.evidence_ids) {
+          await this.assertAcceptanceEvidence(changeDir, change, currentCommit, evidenceId, coverage.scenario_id);
+        }
+      }
+      if (change.prototype.required) {
+        const dimensions = document.ui_evidence.map((item) => item.dimension).sort();
+        const expectedDimensions = ["accessibility", "interaction", "responsive"];
+        if (JSON.stringify(dimensions) !== JSON.stringify(expectedDimensions)) {
+          throw new RockSpecError("UI_EVIDENCE_COVERAGE_GAP", "UI Acceptance must bind responsive, accessibility, and interaction evidence", {
+            expected_dimensions: expectedDimensions,
+            covered_dimensions: dimensions
+          });
+        }
+        for (const item of document.ui_evidence) {
+          for (const evidenceId of item.evidence_ids) {
+            await this.assertAcceptanceEvidence(changeDir, change, currentCommit, evidenceId, void 0, "ui.prototype", true);
+          }
+        }
+      }
+    }
     assertFindingRoutes("acceptance", document.findings, relativePath);
     if (document.commit !== currentCommit) {
       throw new RockSpecError("STALE_ACCEPTANCE", "Acceptance report does not cover the current Commit", {
@@ -30076,17 +31418,74 @@ ${hashed.aggregate_hash}
       }
     }
   }
-  async syncTasks(changeDir, change) {
+  async assertAcceptanceEvidence(changeDir, change, commit, evidenceId, scenarioId, kind, requireArtifact = false) {
+    const evidence = change.evidence.find((record2) => record2.id === evidenceId);
+    if (!evidence || evidence.source !== "executed" || evidence.exit_code !== 0 || evidence.commit !== commit || evidence.action_id !== "acceptance.validate" || scenarioId && !evidence.scenario_ids.includes(scenarioId) || kind && evidence.kind !== kind || requireArtifact && evidence.artifact_paths.length === 0) {
+      throw new RockSpecError("INVALID_ACCEPTANCE_EVIDENCE", "Acceptance coverage references evidence without the required execution binding", {
+        evidence_id: evidenceId,
+        scenario_id: scenarioId ?? null,
+        kind: kind ?? null,
+        commit
+      });
+    }
+    if (!evidence.report_path || !evidence.output_hash) {
+      throw new RockSpecError("INVALID_EXECUTED_EVIDENCE", "Acceptance evidence is missing its log binding", { evidence_id: evidenceId });
+    }
+    const report = path3.join(changeDir, evidence.report_path);
+    if (!await exists(report) || sha256(await readFile3(report)) !== evidence.output_hash) {
+      throw new RockSpecError("STALE_EVIDENCE_LOG", "Acceptance evidence log is missing or changed", { evidence_id: evidenceId });
+    }
+    for (const artifactPath of evidence.artifact_paths) {
+      if (!await exists(path3.join(changeDir, artifactPath))) {
+        throw new RockSpecError("MISSING_EVIDENCE_ARTIFACT", "Acceptance evidence artifact is missing", {
+          evidence_id: evidenceId,
+          artifact_path: artifactPath
+        });
+      }
+    }
+  }
+  assertRegisteredExecution(change, executionId, role, action) {
+    const execution = change.execution.registry.find((record2) => record2.id === executionId);
+    if (!execution || execution.role !== role || execution.action !== action) {
+      throw new RockSpecError("EXECUTION_NOT_REGISTERED", "Report identity is not a registered execution for this role and Action", {
+        execution_id: executionId,
+        expected_role: role,
+        expected_action: action
+      });
+    }
+    if ((role === "task_reviewer" || role === "delivery_reviewer") && !execution.context_package_verified) {
+      throw new RockSpecError("REVIEW_CONTEXT_NOT_VERIFIED", "Code Review execution must bind the Engine-generated Review Package", {
+        execution_id: executionId,
+        role,
+        action
+      });
+    }
+  }
+  completeActionExecutions(change, action) {
+    const completedAt = this.timestamp();
+    for (const execution of change.execution.registry) {
+      if (execution.action !== action || execution.completed_at)
+        continue;
+      execution.completed_at = completedAt;
+      execution.outcome = "success";
+    }
+  }
+  async syncTasks(changeDir, change, root = path3.resolve(changeDir, "../../..")) {
     const taskFiles = (await walkFiles(path3.join(changeDir, "tasks"))).filter((file2) => /^T-[0-9]{3}\.md$/.test(path3.basename(file2))).sort();
     if (taskFiles.length === 0) {
       throw new RockSpecError("NO_TASKS", "The task plan must contain at least one tasks/T-xxx.md file");
     }
     const plan = parsePlanDefinition(await readFile3(path3.join(changeDir, "plan.md"), "utf8"), "plan.md");
     const recovery = change.revisions.find((revision) => revision.status === "open" && revision.mode === "implementation_recovery");
+    const recoveryFindingIds = /* @__PURE__ */ new Set([
+      ...recovery?.trigger?.finding_ids ?? [],
+      ...recovery?.amendments.flatMap((amendment) => amendment.trigger.finding_ids) ?? []
+    ]);
     const feedbackRevision = change.revisions.find((revision) => revision.status === "open" && revision.mode === "feedback_reopen");
     const historyProtected = recovery || feedbackRevision;
     const previousTasks = change.tasks;
     const next = {};
+    const immutableChanges = [];
     for (const file2 of taskFiles) {
       const id = path3.basename(file2, ".md");
       const definition = parseTaskDefinition(await readFile3(file2, "utf8"), path3.relative(changeDir, file2));
@@ -30098,6 +31497,44 @@ ${hashed.aggregate_hash}
         });
       }
       const previous = previousTasks[id];
+      let adoptedCommit = definition.adopted_commit;
+      if (adoptedCommit) {
+        if (!recovery) {
+          throw new RockSpecError("ADOPTED_COMMIT_REQUIRES_RECOVERY", `Task ${id} can only adopt a historical Commit during implementation Recovery`, { task_id: id, adopted_commit: adoptedCommit });
+        }
+        if (definition.finding_ids.length === 0 || !definition.finding_ids.some((findingId) => recoveryFindingIds.has(findingId))) {
+          throw new RockSpecError("ADOPTED_COMMIT_FINDING_REQUIRED", `Task ${id} must bind its adopted Commit to a Recovery Finding`, {
+            task_id: id,
+            revision_id: recovery.id,
+            recovery_finding_ids: [...recoveryFindingIds].sort()
+          });
+        }
+        if (!change.base_commit)
+          throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
+        adoptedCommit = await git(root, ["rev-parse", `${adoptedCommit}^{commit}`]);
+        if (previous && previous.adopted_commit !== adoptedCommit) {
+          throw new RockSpecError("ADOPTED_TASK_MUST_BE_NEW", `Historical attribution Task ${id} must use a new Task ID`, {
+            task_id: id,
+            revision_id: recovery.id
+          });
+        }
+        const headCommit = await git(root, ["rev-parse", "HEAD"]);
+        const commits = (await git(root, ["rev-list", `${change.base_commit}..${headCommit}`])).split("\n").filter(Boolean);
+        if (!commits.includes(adoptedCommit)) {
+          throw new RockSpecError("ADOPTED_COMMIT_OUT_OF_RANGE", `Task ${id} adopted Commit must be inside the Change base..HEAD history`, { task_id: id, adopted_commit: adoptedCommit, base_commit: change.base_commit, head_commit: headCommit });
+        }
+        const duplicate = [
+          ...Object.values(previousTasks),
+          ...Object.values(next)
+        ].find((candidate) => candidate.id !== id && (candidate.commit_sha === adoptedCommit || candidate.adopted_commit === adoptedCommit));
+        if (duplicate) {
+          throw new RockSpecError("DUPLICATE_TASK_COMMIT", `Commit ${adoptedCommit} already belongs to ${duplicate.id}`, {
+            task_id: id,
+            other_task_id: duplicate.id,
+            commit_sha: adoptedCommit
+          });
+        }
+      }
       const activeRevision = recovery ?? feedbackRevision;
       const historicalSupersession = feedbackRevision !== void 0 && previous !== void 0 && sameTaskDefinition(previous, definition) && definition.supersedes.length > 0 && definition.supersedes.every((supersededId) => {
         const superseded = previousTasks[supersededId];
@@ -30109,7 +31546,11 @@ ${hashed.aggregate_hash}
         });
       }
       if (historyProtected && (previous?.status === "completed" || previous?.status === "suspended") && !sameTaskDefinition(previous, definition)) {
-        throw new RockSpecError(previous.status === "completed" ? "COMPLETED_TASK_IMMUTABLE" : "SUSPENDED_TASK_IMMUTABLE", `${previous.status === "completed" ? "Completed" : "Suspended"} Task ${id} cannot be redefined during recovery; add a new Task`, { task_id: id, revision_id: (recovery ?? feedbackRevision)?.id });
+        immutableChanges.push({
+          task_id: id,
+          status: previous.status,
+          path: path3.relative(changeDir, file2)
+        });
       }
       next[id] = {
         ...previous ?? {
@@ -30125,12 +31566,31 @@ ${hashed.aggregate_hash}
         supersedes: definition.supersedes,
         requirement_ids: definition.requirement_ids,
         scenario_ids: definition.scenario_ids,
+        decision_ids: definition.decision_ids,
         finding_ids: definition.finding_ids,
+        ...adoptedCommit ? { adopted_commit: adoptedCommit } : {},
         acceptance_criteria: definition.acceptance_criteria,
+        validation_commands: definition.validation_commands,
         consumes: definition.consumes,
         produces: definition.produces,
         allowed_paths: definition.allowed_paths
       };
+      if (!adoptedCommit)
+        delete next[id].adopted_commit;
+    }
+    if (immutableChanges.length > 0) {
+      const completed = immutableChanges.filter((item) => item.status === "completed").map((item) => item.task_id);
+      const suspended = immutableChanges.filter((item) => item.status === "suspended").map((item) => item.task_id);
+      throw new RockSpecError("RECOVERY_PLAN_APPEND_ONLY", "Recovery Plan is append-only: preserve completed and suspended Tasks and add a new Remediation or Replacement Task", {
+        revision_id: (recovery ?? feedbackRevision)?.id,
+        immutable_tasks: immutableChanges,
+        completed_task_ids: completed,
+        suspended_task_ids: suspended,
+        recommended_next: {
+          action: "plan.create",
+          instruction: "Restore immutable Task definitions, then append a new T-xxx Task bound to the triggering Finding"
+        }
+      });
     }
     if (historyProtected) {
       for (const task of Object.values(previousTasks)) {
@@ -30148,10 +31608,6 @@ ${hashed.aggregate_hash}
         return;
       }
       const superseders = /* @__PURE__ */ new Map();
-      const recoveryFindingIds = /* @__PURE__ */ new Set([
-        ...recovery.trigger?.finding_ids ?? [],
-        ...recovery.amendments.flatMap((amendment) => amendment.trigger.finding_ids)
-      ]);
       for (const task of Object.values(next)) {
         if (task.supersedes.length === 0)
           continue;
@@ -30305,6 +31761,18 @@ ${hashed.aggregate_hash}
       throw new RockSpecError("DESIGN_COVERAGE_GAP", "Design Decisions must cover every approved Requirement and Scenario", {
         requirement_ids: missingRequirements,
         scenario_ids: missingScenarios
+      });
+    }
+    assertDesignStructure(content, design.decisions.map((decision) => decision.id));
+  }
+  async assertProposalReady(changeDir) {
+    const relativePath = "proposal.md";
+    const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
+    const result = ProposalDefinitionSchema.safeParse(parseFrontmatter(content, relativePath));
+    if (!result.success) {
+      throw new RockSpecError("INVALID_PROPOSAL", "Proposal must declare non-goals, assumptions, and resolved open questions", {
+        path: relativePath,
+        issues: result.error.issues
       });
     }
   }
@@ -30526,8 +31994,11 @@ ${hashed.aggregate_hash}
       }
     }
     const { requirementScenarios, scenarioRequirement } = await this.loadSpecTraceability(changeDir);
+    const design = parseDesignDefinition(await readFile3(path3.join(changeDir, "design.md"), "utf8"), "design.md");
+    const knownDecisions = new Set(design.decisions.map((decision) => decision.id));
     const coveredRequirements = /* @__PURE__ */ new Set();
     const coveredScenarios = /* @__PURE__ */ new Set();
+    const coveredDecisions = /* @__PURE__ */ new Set();
     for (const task of Object.values(tasks)) {
       const historical = isHistoricalTask(task);
       for (const requirementId of task.requirement_ids) {
@@ -30558,6 +32029,17 @@ ${hashed.aggregate_hash}
         }
         coveredScenarios.add(scenarioId);
       }
+      for (const decisionId of task.decision_ids) {
+        if (!knownDecisions.has(decisionId)) {
+          if (historical)
+            continue;
+          throw new RockSpecError("TASK_DECISION_NOT_FOUND", `Task ${task.id} references an unknown Design Decision`, {
+            task_id: task.id,
+            decision_id: decisionId
+          });
+        }
+        coveredDecisions.add(decisionId);
+      }
     }
     const verificationOnly = new Set(verificationOnlyScenarioIds);
     for (const scenarioId of verificationOnly) {
@@ -30579,32 +32061,181 @@ ${hashed.aggregate_hash}
         requirement_ids: requirementGaps
       });
     }
+    const decisionGaps = [...knownDecisions].filter((decisionId) => !coveredDecisions.has(decisionId)).sort();
+    if (decisionGaps.length > 0) {
+      throw new RockSpecError("DECISION_COVERAGE_GAP", "Every approved Design Decision must map to a Task", {
+        decision_ids: decisionGaps
+      });
+    }
   }
   async composeTaskBrief(changeDir, change, taskId) {
+    const task = change.tasks[taskId];
+    if (!task)
+      throw new RockSpecError("TASK_NOT_FOUND", `Task ${taskId} does not exist`);
+    const taskPath = `tasks/${taskId}.md`;
     const references = ["proposal.md"];
     const specFiles = (await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort();
-    references.push(...specFiles, "design.md", "plan.md", `tasks/${taskId}.md`);
+    references.push(...specFiles, "design.md", "plan.md", taskPath);
     if (change.prototype.required) {
       await this.assertApprovalFresh(changeDir, change, "design");
-      references.push("prototype/design-system.md", "prototype/prototype.md");
+      references.push("prototype/brief.md", "prototype/design-system.md", "prototype/prototype.md");
     }
-    const sections = [];
-    for (const reference of references) {
-      const target = path3.join(changeDir, reference);
-      if (await exists(target))
-        sections.push(`<!-- source: ${reference} -->
+    const [taskContent, specProjection, designContent, planContent] = await Promise.all([
+      readFile3(path3.join(changeDir, taskPath), "utf8"),
+      this.composeSpecProjection(changeDir, specFiles, task.requirement_ids, task.scenario_ids),
+      readFile3(path3.join(changeDir, "design.md"), "utf8"),
+      readFile3(path3.join(changeDir, "plan.md"), "utf8")
+    ]);
+    parseDesignDefinition(designContent, "design.md");
+    const decisionSections = task.decision_ids.map((decisionId) => extractMarkdownSectionById(designContent, decisionId, "Design Decision", "design.md"));
+    const designGlobalConstraints = extractOptionalMarkdownSection(designContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"]);
+    if (!designGlobalConstraints) {
+      throw new RockSpecError("DESIGN_GLOBAL_CONSTRAINTS_MISSING", "Design must declare an explicit Global Constraints section", {
+        path: "design.md",
+        accepted_headings: ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"]
+      });
+    }
+    const globalConstraints = [
+      ["design.md", designGlobalConstraints],
+      ["plan.md", extractOptionalMarkdownSection(planContent, ["Global Constraints", "\u5168\u5C40\u7EA6\u675F"])]
+    ].filter((item) => Boolean(item[1]));
+    const dependencyFacts = collectTaskAncestors(task, change.tasks).map((dependency) => renderDependencyFact(dependency)).join("\n\n");
+    const prototypeSections = [];
+    if (change.prototype.required && await exists(path3.join(changeDir, "prototype", "brief.md"))) {
+      const prototypeBriefContent = await readFile3(path3.join(changeDir, "prototype", "brief.md"), "utf8");
+      const prototypeBrief = parsePrototypeBriefDefinition(prototypeBriefContent, "prototype/brief.md");
+      const relevant = intersects(prototypeBrief.requirement_ids, task.requirement_ids) || intersects(prototypeBrief.scenario_ids, task.scenario_ids) || intersects(prototypeBrief.decision_ids, task.decision_ids);
+      if (relevant) {
+        for (const reference of ["prototype/brief.md", "prototype/design-system.md", "prototype/prototype.md"]) {
+          const target = path3.join(changeDir, reference);
+          if (await exists(target)) {
+            prototypeSections.push(`<!-- source: ${reference} -->
 ${await readFile3(target, "utf8")}`);
+          }
+        }
+      }
     }
-    return {
-      content: `# ${taskId} Execution Brief
+    const manifest = await renderAuthorityManifest(changeDir, references, {
+      [taskPath]: { ids: [taskId], projectionHash: sha256(taskContent) },
+      ...specProjection.projections,
+      "design.md": {
+        ids: [...task.decision_ids, "Global Constraints"],
+        projectionHash: sha256([...decisionSections, designGlobalConstraints].join("\n\n"))
+      },
+      ...globalConstraints.some(([source]) => source === "plan.md") ? {
+        "plan.md": {
+          ids: ["Global Constraints"],
+          projectionHash: sha256(globalConstraints.find(([source]) => source === "plan.md")[1])
+        }
+      } : {}
+    });
+    const sections = [
+      `# ${taskId} Execution Brief`,
+      "This is a frozen projection of the approved authority. Implement the Task contract; do not reinterpret or broaden it.",
+      "If required behavior, an interface contract, a dependency, or an authority source conflicts with this projection, stop and report `CONTRACT_CONFLICT` or `AUTHORITY_CONFLICT`. If a missing repository fact can be discovered without changing the contract, inspect only the necessary code and record the scope expansion.",
+      `## Task Contract
 
-${sections.join("\n\n")}`,
+<!-- source: ${taskPath} -->
+${taskContent}`,
+      ...task.adopted_commit ? [
+        `## Historical Attribution Mode
+
+This Task does not create a new product Commit. Independently review and attribute the fixed Diff \`${task.adopted_commit}^..${task.adopted_commit}\`, then run fresh executed validation at current HEAD for every projected Scenario before completion.`
+      ] : [],
+      `## Relevant Approved Requirements
+
+${specProjection.content}`,
+      `## Relevant Approved Design Decisions
+
+${decisionSections.join("\n\n")}`,
+      ...globalConstraints.length > 0 ? [
+        `## Applicable Global Constraints
+
+${globalConstraints.map(([source, body]) => `<!-- source: ${source} -->
+${body}`).join("\n\n")}`
+      ] : [],
+      `## Dependency Delivery Facts
+
+${dependencyFacts || "None."}`,
+      ...prototypeSections.length > 0 ? [`## Relevant Approved UI/UX Context
+
+${prototypeSections.join("\n\n")}`] : [],
+      `## Authority Manifest
+
+${manifest}`
+    ];
+    return {
+      content: `${sections.join("\n\n")}
+`,
       references
     };
   }
-  async assertTaskScopeBlockedState(root, task) {
+  async composeSpecProjection(changeDir, specFiles, requirementIds, scenarioIds) {
+    const remainingRequirements = new Set(requirementIds);
+    const remainingScenarios = new Set(scenarioIds);
+    const sections = [];
+    const projectedBySource = /* @__PURE__ */ new Map();
+    for (const relativePath of specFiles) {
+      const content = await readFile3(path3.join(changeDir, relativePath), "utf8");
+      const result = validateSpec(content);
+      if (!result.valid || !result.data) {
+        throw new RockSpecError("INVALID_SPEC", `${relativePath} is not a valid RockSpec document`, {
+          path: relativePath,
+          issues: result.issues
+        });
+      }
+      const source = parseSpecSource(content);
+      for (const requirement of source.document.requirements) {
+        if (!remainingRequirements.has(requirement.id))
+          continue;
+        const selectedScenarios = requirement.scenarios.map((scenario) => scenario.id).filter((scenarioId) => remainingScenarios.has(scenarioId));
+        const requirementSource = source.requirements.find((candidate) => candidate.id === requirement.id);
+        if (!requirementSource) {
+          throw new RockSpecError("TASK_AUTHORITY_PROJECTION_GAP", `Requirement ${requirement.id} has no source span`, {
+            path: relativePath,
+            requirement_id: requirement.id
+          });
+        }
+        const fragment = [
+          ...source.lines.slice(requirementSource.preambleSpan.startLine, requirementSource.preambleSpan.endLine),
+          ...requirementSource.scenarios.filter((scenario) => selectedScenarios.includes(scenario.id)).flatMap((scenario) => source.lines.slice(scenario.span.startLine, scenario.span.endLine))
+        ].join("\n").trimEnd();
+        const ids = [requirement.id, ...selectedScenarios];
+        sections.push(`<!-- source: ${relativePath}; projection: ${ids.join(", ")}; projection-hash: ${sha256(fragment)} -->
+${fragment}`);
+        const projected = projectedBySource.get(relativePath) ?? { ids: [], sections: [] };
+        projected.ids.push(...ids);
+        projected.sections.push(fragment);
+        projectedBySource.set(relativePath, projected);
+        remainingRequirements.delete(requirement.id);
+        for (const scenarioId of selectedScenarios)
+          remainingScenarios.delete(scenarioId);
+      }
+    }
+    if (remainingRequirements.size > 0 || remainingScenarios.size > 0) {
+      throw new RockSpecError("TASK_AUTHORITY_PROJECTION_GAP", "Task authority IDs could not be projected from the approved Specs", {
+        requirement_ids: [...remainingRequirements].sort(),
+        scenario_ids: [...remainingScenarios].sort()
+      });
+    }
+    return {
+      content: sections.join("\n\n"),
+      projections: Object.fromEntries([...projectedBySource].map(([relativePath, projection]) => [relativePath, {
+        ids: projection.ids,
+        projectionHash: sha256(projection.sections.join("\n\n"))
+      }]))
+    };
+  }
+  async assertTaskScopeBlockedState(root, changeDir, task) {
     if (!task.base_commit)
       throw new RockSpecError("TASK_BASE_MISSING", `Task ${task.id} has no recorded base commit`);
+    const report = await this.loadBoundImplementerReport(changeDir, task);
+    if (report.outcome !== "blocked" || !report.blocker) {
+      throw new RockSpecError("SCOPE_BLOCKED_REPORT_REQUIRED", `Task ${task.id} requires a structured blocked Implementer report`, {
+        task_id: task.id,
+        outcome: report.outcome
+      });
+    }
     await this.assertNoUncommittedProductChanges(root);
     const head = await git(root, ["rev-parse", "HEAD"]);
     const mergeBase = await git(root, ["merge-base", task.base_commit, head]);
@@ -30621,6 +32252,53 @@ ${sections.join("\n\n")}`,
       throw new RockSpecError("SCOPE_BLOCKED_PRODUCT_DIFF", `Task ${task.id} scope-blocked review requires no product changes`, {
         task_id: task.id,
         changed_paths: productPaths
+      });
+    }
+  }
+  async assertTaskImplementedReport(changeDir, task) {
+    const report = await this.loadBoundImplementerReport(changeDir, task);
+    if (report.outcome !== "implemented") {
+      throw new RockSpecError("IMPLEMENTED_REPORT_REQUIRED", `Task ${task.id} product Review requires an implemented outcome`, {
+        task_id: task.id,
+        outcome: report.outcome
+      });
+    }
+  }
+  async loadBoundImplementerReport(changeDir, task) {
+    if (!task.report_path || !await exists(path3.join(changeDir, task.report_path))) {
+      throw new RockSpecError("IMPLEMENTER_REPORT_MISSING", `Task ${task.id} has no Implementer report`);
+    }
+    const report = parseImplementerReport(await readFile3(path3.join(changeDir, task.report_path), "utf8"), task.report_path);
+    const binding = {
+      task_id: task.id,
+      execution_id: task.execution_id,
+      base_commit: task.base_commit,
+      brief_path: task.brief_path,
+      brief_hash: task.brief_hash
+    };
+    if (Object.entries(binding).some(([key, value]) => report[key] !== value)) {
+      throw new RockSpecError("IMPLEMENTER_REPORT_BINDING_MISMATCH", `Task ${task.id} Implementer report does not match its frozen execution`, {
+        task_id: task.id,
+        expected: binding
+      });
+    }
+    return report;
+  }
+  async assertDeliveryHeadAncestor(root, deliveryHead, currentCommit) {
+    let mergeBase;
+    try {
+      mergeBase = await git(root, ["merge-base", deliveryHead, currentCommit]);
+    } catch {
+      throw new RockSpecError("DELIVERY_HISTORY_DIVERGED", "Current HEAD no longer contains the frozen delivery Commit", {
+        delivery_head: deliveryHead,
+        current_commit: currentCommit
+      });
+    }
+    if (mergeBase !== deliveryHead) {
+      throw new RockSpecError("DELIVERY_HISTORY_DIVERGED", "Current HEAD no longer contains the frozen delivery Commit", {
+        delivery_head: deliveryHead,
+        current_commit: currentCommit,
+        merge_base: mergeBase
       });
     }
   }
@@ -30661,7 +32339,34 @@ ${sections.join("\n\n")}`,
       throw new RockSpecError("EMPTY_TASK_DIFF", `Task ${task.id} has no product changes`);
     }
   }
-  async writeReviewPackage(root, changeDir, kind, baseCommit, headCommit, taskId, mode = "product", plannedPaths = []) {
+  async assertHistoricalAttributionState(root, change, task) {
+    if (!task.adopted_commit) {
+      throw new RockSpecError("ADOPTED_COMMIT_MISSING", `Task ${task.id} does not declare an adopted Commit`);
+    }
+    if (!change.base_commit)
+      throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
+    await this.assertNoUncommittedProductChanges(root);
+    const adoptedCommit = await git(root, ["rev-parse", `${task.adopted_commit}^{commit}`]);
+    const headCommit = await git(root, ["rev-parse", "HEAD"]);
+    const commits = (await git(root, ["rev-list", `${change.base_commit}..${headCommit}`])).split("\n").filter(Boolean);
+    if (!commits.includes(adoptedCommit)) {
+      throw new RockSpecError("ADOPTED_COMMIT_OUT_OF_RANGE", `Task ${task.id} adopted Commit must remain inside the Change base..HEAD history`, { task_id: task.id, adopted_commit: adoptedCommit, base_commit: change.base_commit, head_commit: headCommit });
+    }
+    const parentCommit = await git(root, ["rev-parse", `${adoptedCommit}^`]);
+    if (task.base_commit && task.base_commit !== parentCommit) {
+      throw new RockSpecError("ADOPTED_COMMIT_BASE_MISMATCH", `Task ${task.id} base must be the adopted Commit parent`, {
+        task_id: task.id,
+        adopted_commit: adoptedCommit,
+        expected_base_commit: parentCommit,
+        recorded_base_commit: task.base_commit
+      });
+    }
+    const changedPaths = (await git(root, ["diff", "--name-only", "-z", parentCommit, adoptedCommit])).split("\0").filter(Boolean).filter((candidate) => candidate !== ".rockspec" && !candidate.startsWith(".rockspec/"));
+    if (changedPaths.length === 0) {
+      throw new RockSpecError("EMPTY_TASK_DIFF", `Adopted Commit for Task ${task.id} has no product changes`);
+    }
+  }
+  async writeReviewPackage(root, changeDir, change, kind, baseCommit, headCommit, taskId, mode = "product", plannedPaths = []) {
     const diff = await git(root, ["diff", "--full-index", "--binary", "-U10", baseCommit, headCommit]);
     const subject = { base_commit: baseCommit, head_commit: headCommit, diff_hash: sha256(diff) };
     const [commits, stat2, changedPathOutput] = await Promise.all([
@@ -30677,10 +32382,14 @@ ${sections.join("\n\n")}`,
     } : void 0;
     const label = kind === "task" ? `task-${taskId}` : "delivery";
     const relativePath = `runtime/reviews/${label}-${baseCommit.slice(0, 7)}..${headCommit.slice(0, 7)}.diff`;
+    const reviewerContext = kind === "task" && taskId ? await this.composeTaskReviewerContext(changeDir, change, taskId) : await this.composeDeliveryReviewerContext(changeDir, change);
     const content = [
       `# Review package: ${baseCommit}..${headCommit}`,
       `# Diff hash: ${subject.diff_hash}`,
       `# Mode: ${mode}`,
+      "",
+      "## Reviewer Context",
+      reviewerContext,
       "",
       "## Commits",
       commits,
@@ -30706,8 +32415,88 @@ ${sections.join("\n\n")}`,
       ...kind === "task" ? { mode } : {},
       ...scope ? { scope } : {},
       path: relativePath,
+      hash: sha256(content),
       subject
     };
+  }
+  async composeTaskReviewerContext(changeDir, change, taskId) {
+    const task = change.tasks[taskId];
+    if (!task)
+      throw new RockSpecError("TASK_NOT_FOUND", `Task ${taskId} does not exist`);
+    await this.assertTaskBriefFresh(changeDir, task);
+    const briefContent = await readFile3(path3.join(changeDir, task.brief_path), "utf8");
+    const designContent = await readFile3(path3.join(changeDir, "design.md"), "utf8");
+    const design = parseDesignDefinition(designContent, "design.md");
+    const relatedDecisions = design.decisions.filter((decision) => !task.decision_ids.includes(decision.id) && (intersects(decision.requirement_ids, task.requirement_ids) || intersects(decision.scenario_ids, task.scenario_ids)));
+    const crossCheck = relatedDecisions.length > 0 ? relatedDecisions.map((decision) => `Mapped ${decision.id} (${[...decision.requirement_ids, ...decision.scenario_ids].join(", ")})
+
+` + extractMarkdownSectionById(designContent, decision.id, "Design Decision", "design.md")).join("\n\n") : "No additional Design Decisions share this Task's Requirement or Scenario IDs.";
+    const evidence = change.evidence.filter((item) => item.task_id === taskId).map((item) => `- ${item.id}: ${item.source} ${item.kind}, commit ${item.commit}, exit ${item.exit_code}, output ${item.output_hash ?? "unhashed"}`).join("\n");
+    const report = task.report_path && await exists(path3.join(changeDir, task.report_path)) ? `<!-- source: ${task.report_path}; hash: ${sha256(await readFile3(path3.join(changeDir, task.report_path)))} -->
+${await readFile3(path3.join(changeDir, task.report_path), "utf8")}` : "Missing Implementer Report.";
+    return [
+      `### Frozen Implementer Projection
+
+- Path: ${task.brief_path}
+- Hash: ${task.brief_hash}
+
+${briefContent}`,
+      `### Reviewer-only Projection Audit
+
+Task mapping: ${[...task.requirement_ids, ...task.scenario_ids, ...task.decision_ids].join(", ")}
+
+${crossCheck}`,
+      `### Implementer Report
+
+${report}`,
+      `### Executed Evidence Index
+
+${evidence || "No Task evidence is recorded."}`
+    ].join("\n\n");
+  }
+  async composeDeliveryReviewerContext(changeDir, change) {
+    const specPaths = (await walkFiles(path3.join(changeDir, "specs"))).filter((file2) => file2.endsWith(".md")).map((file2) => path3.relative(changeDir, file2)).sort();
+    const authorityPaths = [
+      "proposal.md",
+      ...specPaths,
+      "design.md",
+      "plan.md"
+    ];
+    const requirementIds = new Set(Object.values(change.tasks).flatMap((task) => task.requirement_ids));
+    const scenarioIds = new Set(Object.values(change.tasks).flatMap((task) => task.scenario_ids));
+    const decisionIds = new Set(Object.values(change.tasks).flatMap((task) => task.decision_ids));
+    const coverage = {};
+    for (const specPath of specPaths) {
+      const spec = parseSpecSource(await readFile3(path3.join(changeDir, specPath), "utf8")).document;
+      const ids = spec.requirements.flatMap((requirement) => [
+        ...requirementIds.has(requirement.id) ? [requirement.id] : [],
+        ...requirement.scenarios.filter((scenario) => scenarioIds.has(scenario.id)).map((scenario) => scenario.id)
+      ]);
+      if (ids.length > 0)
+        coverage[specPath] = { ids };
+    }
+    const design = parseDesignDefinition(await readFile3(path3.join(changeDir, "design.md"), "utf8"), "design.md");
+    coverage["design.md"] = {
+      ids: [
+        ...design.decisions.filter((decision) => decisionIds.has(decision.id)).map((decision) => decision.id),
+        "Global Constraints"
+      ]
+    };
+    coverage["plan.md"] = { ids: Object.keys(change.tasks).sort() };
+    const manifest = await renderAuthorityManifest(changeDir, authorityPaths, coverage);
+    const taskCoverage = Object.values(change.tasks).sort((left, right) => left.id.localeCompare(right.id)).map((task) => `- ${task.id}: ${task.status}; commit ${task.commit_sha ?? "pending"}; R/S/D ${[...task.requirement_ids, ...task.scenario_ids, ...task.decision_ids].join(", ")}`).join("\n");
+    const evidence = change.evidence.map((item) => `- ${item.id}: ${item.action_id ?? item.task_id ?? "change"}; ${item.source} ${item.kind}; commit ${item.commit}; scenarios ${item.scenario_ids.join(", ") || "none"}`).join("\n");
+    return [
+      `### Authority Manifest
+
+${manifest}`,
+      `### Change-level Task Coverage
+
+${taskCoverage || "No Tasks."}`,
+      `### Evidence Index
+
+${evidence || "No evidence recorded."}`
+    ].join("\n\n");
   }
   async assertFreshEvidence(root, change, expected, executedOnly = false) {
     const commit = expected.commit ?? await git(root, ["rev-parse", "HEAD"]);
@@ -30742,9 +32531,50 @@ ${sections.join("\n\n")}`,
       }
     }
   }
+  async assertFreshTaskScenarioEvidence(root, change, task, commit) {
+    const requiredScenarios = new Set(task.scenario_ids);
+    const evidence = [...change.evidence].reverse().find((record2) => record2.source === "executed" && record2.exit_code === 0 && record2.commit === commit && record2.task_id === task.id && [...requiredScenarios].every((scenarioId) => record2.scenario_ids.includes(scenarioId)));
+    if (!evidence) {
+      throw new RockSpecError("TASK_SCENARIO_EVIDENCE_MISSING", `Historical attribution Task ${task.id} requires fresh executed evidence covering all Task Scenarios at current HEAD`, { task_id: task.id, commit, required_scenario_ids: task.scenario_ids });
+    }
+    if (!evidence.report_path || !evidence.output_hash) {
+      throw new RockSpecError("INVALID_EXECUTED_EVIDENCE", "Executed evidence is missing its log binding", {
+        evidence_id: evidence.id
+      });
+    }
+    const reportPath = path3.join(root, ".rockspec", "changes", change.id, evidence.report_path);
+    if (!await exists(reportPath)) {
+      throw new RockSpecError("MISSING_EVIDENCE_LOG", `Evidence log ${evidence.report_path} does not exist`, {
+        evidence_id: evidence.id
+      });
+    }
+    const currentHash = sha256(await readFile3(reportPath));
+    if (currentHash !== evidence.output_hash) {
+      throw new RockSpecError("STALE_EVIDENCE_LOG", `Evidence log ${evidence.report_path} has changed`, {
+        evidence_id: evidence.id,
+        recorded_hash: evidence.output_hash,
+        current_hash: currentHash
+      });
+    }
+  }
+  async findReusableEvidence(changeDir, change, expected) {
+    for (const evidence of [...change.evidence].reverse()) {
+      if (evidence.source !== "executed" || evidence.exit_code !== 0 || evidence.commit !== expected.commit || evidence.command !== expected.command || evidence.task_id !== expected.taskId || evidence.action_id !== expected.actionId || !evidence.report_path || !evidence.output_hash)
+        continue;
+      if (JSON.stringify(evidence.scenario_ids) !== JSON.stringify(expected.scenarioIds) || JSON.stringify(evidence.finding_ids) !== JSON.stringify(expected.findingIds) || JSON.stringify(evidence.artifact_paths) !== JSON.stringify(expected.artifactPaths))
+        continue;
+      const report = path3.join(changeDir, evidence.report_path);
+      if (!await exists(report))
+        continue;
+      if (sha256(await readFile3(report)) !== evidence.output_hash)
+        continue;
+      return evidence;
+    }
+    return void 0;
+  }
   async assertPrototypeEvidence(root, change) {
     const commit = await git(root, ["rev-parse", "HEAD"]);
-    const evidence = [...change.evidence].reverse().find((record2) => record2.exit_code === 0 && record2.commit === commit && record2.kind === "ui.prototype");
+    const evidence = [...change.evidence].reverse().find((record2) => record2.exit_code === 0 && record2.commit === commit && record2.kind === "ui.prototype" && record2.source === "executed" && record2.action_id === "acceptance.validate" && Boolean(record2.report_path && record2.output_hash) && record2.artifact_paths.length > 0);
     if (!evidence) {
       throw new RockSpecError("MISSING_UI_EVIDENCE", "UI prototype changes require responsive, accessibility, and interaction evidence", { commit, capability: change.prototype.capability });
     }
@@ -30770,6 +32600,45 @@ ${sections.join("\n\n")}`,
       throw new RockSpecError("UNCOMMITTED_PRODUCT_CHANGES", "Acceptance and Delivery Review require product and test assets to be committed", { paths });
     }
   }
+  async findUnassignedProductCommits(root, change) {
+    if (!change.base_commit)
+      throw new RockSpecError("BASE_COMMIT_MISSING", "Change has no base commit");
+    const head = await git(root, ["rev-parse", "HEAD"]);
+    const commits = (await git(root, ["rev-list", "--reverse", `${change.base_commit}..${head}`])).split("\n").filter(Boolean);
+    const assigned = new Set(Object.values(change.tasks).map((task) => task.commit_sha).filter((sha) => Boolean(sha)));
+    const workflowPrefixes = [".rockspec/", ".agents/", ".claude/", ".codex/"];
+    const unassigned = [];
+    for (const commit of commits) {
+      if (assigned.has(commit))
+        continue;
+      const statusLines = (await git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", commit])).split("\n").filter(Boolean);
+      const productStatusLines = statusLines.filter((line) => {
+        const file2 = line.split("	").at(-1) ?? "";
+        return file2 && !workflowPrefixes.some((prefix) => file2 === prefix.slice(0, -1) || file2.startsWith(prefix));
+      });
+      const paths = productStatusLines.map((line) => line.split("	").at(-1) ?? "");
+      const subject = await git(root, ["show", "-s", "--format=%s", commit]);
+      const newAcceptanceTestsOnly = subject.trimStart().startsWith("test(") && productStatusLines.length > 0 && productStatusLines.every((line) => line.trimStart().startsWith("A")) && paths.every((file2) => /(?:test|spec|e2e|fixture)/i.test(file2));
+      if (paths.length > 0 && !newAcceptanceTestsOnly)
+        unassigned.push({ commit, paths });
+    }
+    return unassigned;
+  }
+  async assertProductCommitsAssigned(root, change) {
+    const unassigned = await this.findUnassignedProductCommits(root, change);
+    if (unassigned.length > 0) {
+      const head = await git(root, ["rev-parse", "HEAD"]);
+      throw new RockSpecError("UNASSIGNED_PRODUCT_COMMIT", "Every product or test Commit between the Change base and delivery head must belong to a completed Task or Remediation Task", {
+        base_commit: change.base_commit,
+        head_commit: head,
+        commits: unassigned,
+        recommended_next: {
+          action: "plan.create",
+          instruction: "Attach the repair to a new Finding-bound Remediation Task before Delivery Review"
+        }
+      });
+    }
+  }
   providerAvailable(provider, distribution) {
     return distribution === "bundled" || this.availableProviders.has(provider);
   }
@@ -30788,10 +32657,10 @@ ${sections.join("\n\n")}`,
       });
     }
   }
-  async ensureTemplates(changeDir, change) {
+  async ensureTemplates(changeDir, change, language) {
     await Promise.all([
       mkdir2(path3.join(changeDir, "evidence"), { recursive: true }),
-      this.writeTemplate(changeDir, "brief.md", briefTemplate(change)),
+      this.writeTemplate(changeDir, "brief.md", briefTemplate(change, language)),
       this.writeTemplate(changeDir, "evidence/verification.yaml", (0, import_yaml2.stringify)({ schema_version: 1, evidence: [] }))
     ]);
     if (change.profile === "lite")
@@ -30803,18 +32672,18 @@ ${sections.join("\n\n")}`,
       mkdir2(path3.join(changeDir, "testing"), { recursive: true })
     ]);
     const templates = {
-      "proposal.md": "# Proposal\n\n## Why\n\nTODO\n\n## What\n\nTODO\n",
-      "specs/change/spec.md": specTemplate(change),
-      "design.md": "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nTODO\n\n## Decisions\n\n### D-001\n\nTODO\n",
-      "plan.md": "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Implementation Plan\n\n## Approach\n\nTODO\n\n## Task DAG\n\n- T-001\n",
-      "tasks.md": "# Tasks\n\n- [ ] T-001\n",
-      "tasks/T-001.md": taskTemplate("T-001"),
-      "reviews/requirements-review.md": reviewTemplate("Requirements Review"),
-      "reviews/readiness-review.md": reviewTemplate("Readiness Review"),
-      "reviews/tasks/T-001-review.md": codeReviewTemplate("T-001 Task Review"),
-      "reviews/delivery-review.md": codeReviewTemplate("Delivery Review"),
-      "testing/test-plan.md": "# Acceptance Test Plan\n\nTODO\n",
-      "testing/test-report.md": reviewTemplate("Acceptance Test Report")
+      "proposal.md": proposalTemplate(language),
+      "specs/change/spec.md": specTemplate(change, language),
+      "design.md": designTemplate(language),
+      "plan.md": planTemplate(language),
+      "tasks.md": language === "zh-CN" ? "# \u4EFB\u52A1\n\n- [ ] T-001\n" : "# Tasks\n\n- [ ] T-001\n",
+      "tasks/T-001.md": taskTemplate("T-001", language),
+      "reviews/requirements-review.md": reviewTemplate(language === "zh-CN" ? "\u9700\u6C42\u8BC4\u5BA1" : "Requirements Review", language),
+      "reviews/readiness-review.md": reviewTemplate(language === "zh-CN" ? "\u5B9E\u65BD\u5C31\u7EEA\u8BC4\u5BA1" : "Readiness Review", language),
+      "reviews/tasks/T-001-review.md": codeReviewTemplate(language === "zh-CN" ? "T-001 \u4EFB\u52A1\u8BC4\u5BA1" : "T-001 Task Review", language),
+      "reviews/delivery-review.md": codeReviewTemplate(language === "zh-CN" ? "\u4EA4\u4ED8\u8BC4\u5BA1" : "Delivery Review", language),
+      "testing/test-plan.md": language === "zh-CN" ? "# \u9A8C\u6536\u6D4B\u8BD5\u8BA1\u5212\n\nTODO\n" : "# Acceptance Test Plan\n\nTODO\n",
+      "testing/test-report.md": acceptanceReviewTemplate(language)
     };
     for (const [relativePath, content] of Object.entries(templates)) {
       await this.writeTemplate(changeDir, relativePath, content);
@@ -30827,7 +32696,7 @@ ${sections.join("\n\n")}`,
         "reviews/delivery-review.md"
       ]) {
         for (const strictPath of reviewPaths("strict", base)) {
-          const template = base.includes("/tasks/") || base.includes("delivery-review") ? codeReviewTemplate(path3.basename(strictPath, ".md")) : reviewTemplate(path3.basename(strictPath, ".md"));
+          const template = base.includes("/tasks/") || base.includes("delivery-review") ? codeReviewTemplate(path3.basename(strictPath, ".md"), language) : reviewTemplate(path3.basename(strictPath, ".md"), language);
           await this.writeTemplate(changeDir, strictPath, template);
         }
       }
@@ -30835,10 +32704,32 @@ ${sections.join("\n\n")}`,
     if (change.prototype.required) {
       await mkdir2(path3.join(changeDir, "prototype", "assets"), { recursive: true });
       await Promise.all([
-        this.writeTemplate(changeDir, "prototype/brief.md", "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\n  design_hash: TODO\nrequirement_ids: [R-001]\nscenario_ids: [S-001]\ndecision_ids: [D-001]\n---\n\n# Prototype Brief\n\nTODO\n"),
-        this.writeTemplate(changeDir, "prototype/design-system.md", "# Design System\n\nTODO\n"),
-        this.writeTemplate(changeDir, "prototype/prototype.md", "# Prototype\n\nTODO\n")
+        this.writeTemplate(changeDir, "prototype/brief.md", `---
+schema_version: 1
+inputs:
+  spec_hash: TODO
+  design_hash: TODO
+requirement_ids: [R-001]
+scenario_ids: [S-001]
+decision_ids: [D-001]
+---
+
+# ${language === "zh-CN" ? "\u539F\u578B\u8BF4\u660E" : "Prototype Brief"}
+
+TODO
+`),
+        this.writeTemplate(changeDir, "prototype/design-system.md", `# ${language === "zh-CN" ? "\u8BBE\u8BA1\u7CFB\u7EDF" : "Design System"}
+
+TODO
+`),
+        this.writeTemplate(changeDir, "prototype/prototype.md", `# ${language === "zh-CN" ? "\u4EA4\u4E92\u539F\u578B" : "Prototype"}
+
+TODO
+`)
       ]);
+    }
+    if (change.uat.policy === "required") {
+      await this.writeTemplate(changeDir, "testing/uat-report.md", uatReportTemplate(language));
     }
   }
   async writeTemplate(changeDir, relativePath, content) {
@@ -30918,17 +32809,401 @@ function knowledgePackageFromReceipt(receipt, sourceDigest) {
     ...receipt.delta_hash ? { delta_hash: receipt.delta_hash } : {},
     baseline_hashes: Object.fromEntries(receipt.updates.map((update) => [update.target, update.before_digest])),
     candidate_hashes: Object.fromEntries(receipt.updates.map((update) => [update.target, update.after_digest])),
-    requires_human_approval: receipt.updates.some((update) => update.authority === "normative")
+    review_required: receipt.updates.some((update) => update.authority === "normative"),
+    requires_human_approval: receipt.updates.some((update) => update.authority === "normative"),
+    semantic_warnings: []
   };
+}
+function modalMarkers(content) {
+  const matches = content.match(/必须|不得|只能|恰好|至少|至多|可以|\bmust\b|\bshall\b|\bshould\b|\bmay\b|\bexactly\b|\bat least\b|\bat most\b/giu) ?? [];
+  return [...new Set(matches.map((value) => value.toLocaleLowerCase()))].sort();
 }
 function reviewPaths(profile, relativePath) {
   if (profile !== "strict")
     return [relativePath];
   return [...strictReviewerPaths(relativePath), relativePath];
 }
+async function buildApprovalReviewSummary(input) {
+  const zh = input.language === "zh-CN";
+  const artifactRoot = path3.relative(input.repositoryRoot, input.changeDir);
+  const projectPath = (relativePath) => path3.relative(input.repositoryRoot, path3.join(input.changeDir, relativePath));
+  const artifact = (label, relativePath, description) => ({
+    label,
+    path: projectPath(relativePath),
+    relative_path: relativePath,
+    description
+  });
+  const none = zh ? "\u65E0" : "None";
+  const descriptions = zh ? {
+    proposal: "\u63CF\u8FF0\u9700\u6C42\u80CC\u666F\u3001\u76EE\u6807\u3001\u8303\u56F4\u3001\u975E\u76EE\u6807\u3001\u5047\u8BBE\u548C\u5F00\u653E\u95EE\u9898\u3002",
+    spec: "\u5B9A\u4E49\u5177\u6709\u7EA6\u675F\u529B\u7684 Requirement\u3001Scenario \u548C\u53EF\u9A8C\u6536\u884C\u4E3A\u3002",
+    requirementsReview: "\u8BB0\u5F55\u72EC\u7ACB\u9700\u6C42\u8BC4\u5BA1\u7ED3\u8BBA\u3001\u8986\u76D6\u68C0\u67E5\u548C Findings\u3002",
+    design: "\u8BB0\u5F55\u65B9\u6848\u6BD4\u8F83\u3001\u67B6\u6784\u51B3\u7B56\u3001\u6A21\u5757\u63A5\u53E3\u3001\u5931\u8D25\u3001\u5B89\u5168\u548C\u56DE\u6EDA\u8BBE\u8BA1\u3002",
+    prototypeBrief: "\u8BF4\u660E\u539F\u578B\u8986\u76D6\u7684\u7528\u6237\u3001\u9875\u9762\u3001\u6D41\u7A0B\u3001\u4F53\u9A8C\u76EE\u6807\u548C\u7EA6\u675F\u3002",
+    designSystem: "\u5B9A\u4E49\u539F\u578B\u91C7\u7528\u7684\u89C6\u89C9 Token\u3001\u7EC4\u4EF6\u72B6\u6001\u3001\u54CD\u5E94\u5F0F\u548C\u53EF\u8BBF\u95EE\u6027\u89C4\u5219\u3002",
+    prototype: "\u5448\u73B0\u5DF2\u6279\u51C6\u7684\u9875\u9762\u7ED3\u6784\u3001\u4EA4\u4E92\u6D41\u7A0B\u3001\u72B6\u6001\u548C\u54CD\u5E94\u5F0F\u884C\u4E3A\u3002",
+    plan: "\u63CF\u8FF0\u603B\u4F53\u5B9E\u65BD\u65B9\u5F0F\u3001Task DAG\u3001\u4EA4\u4ED8\u987A\u5E8F\u3001\u8DE8 Task \u5951\u7EA6\u548C\u9A8C\u8BC1\u7B56\u7565\u3002",
+    taskIndex: "\u6C47\u603B\u5168\u90E8 Task \u53CA\u5176\u5F53\u524D\u8BA1\u5212\u987A\u5E8F\u3002",
+    task: "\u5B9A\u4E49\u5355\u4E2A Task \u7684\u76EE\u6807\u3001\u6587\u4EF6\u8303\u56F4\u3001\u63A5\u53E3\u5951\u7EA6\u3001\u9A8C\u6536\u6807\u51C6\u548C\u9A8C\u8BC1\u6B65\u9AA4\u3002",
+    readinessReview: "\u8BB0\u5F55\u8BA1\u5212\u8986\u76D6\u3001\u4F9D\u8D56\u3001\u63A5\u53E3\u3001\u9A8C\u8BC1\u548C\u5B9E\u65BD\u5C31\u7EEA\u5EA6\u8BC4\u5BA1\u7ED3\u8BBA\u3002"
+  } : {
+    proposal: "Describes the problem, goals, scope, non-goals, assumptions, and open questions.",
+    spec: "Defines binding Requirements, Scenarios, and observable acceptance behavior.",
+    requirementsReview: "Records independent requirements review results, coverage checks, and Findings.",
+    design: "Records option analysis, architecture decisions, interfaces, failures, security, and rollback design.",
+    prototypeBrief: "Defines the users, pages, flows, experience goals, and constraints covered by the prototype.",
+    designSystem: "Defines visual tokens, component states, responsive behavior, and accessibility rules.",
+    prototype: "Presents the approved page structure, interaction flows, states, and responsive behavior.",
+    plan: "Describes the implementation approach, Task DAG, delivery order, contracts, and verification strategy.",
+    taskIndex: "Summarizes all Tasks and their planned order.",
+    task: "Defines one Task's goal, file scope, interface contracts, acceptance criteria, and verification steps.",
+    readinessReview: "Records the plan coverage, dependencies, interfaces, verification, and readiness verdict."
+  };
+  const common = {
+    language: input.language,
+    artifact_root: artifactRoot,
+    approval_prompt: zh ? `\u8BF7\u8F93\u5165\u201C\u6279\u51C6${input.gate === "spec" ? "\u9700\u6C42" : input.gate === "design" ? "\u8BBE\u8BA1" : "\u5B9E\u65BD"}\u201D\u7EE7\u7EED\uFF0C\u6216\u76F4\u63A5\u63D0\u51FA\u4FEE\u6539\u610F\u89C1\u3002` : `Reply with "Approve ${input.gate}" to continue, or provide revision feedback.`,
+    machine_receipt_note: zh ? "\u4E0B\u65B9 Hash \u4EC5\u7528\u4E8E\u673A\u5668\u4E00\u81F4\u6027\u6821\u9A8C\uFF0C\u65E0\u9700\u590D\u5236\u6216\u7406\u89E3\u3002" : "The Hash below is only a machine consistency receipt; you do not need to copy it."
+  };
+  if (input.gate === "spec") {
+    const proposal = await readFile3(path3.join(input.changeDir, "proposal.md"), "utf8");
+    const proposalDefinition = ProposalDefinitionSchema.parse(parseFrontmatter(proposal, "proposal.md"));
+    const requirements = [];
+    for (const relativePath of input.specFiles) {
+      const parsed = parseSpecSource(await readFile3(path3.join(input.changeDir, relativePath), "utf8"));
+      for (const requirement of parsed.document.requirements) {
+        requirements.push(`${requirement.id} ${requirement.title}: ${summarizeText(requirement.statement)}`);
+        for (const scenario of requirement.scenarios)
+          requirements.push(`  ${scenario.id} ${scenario.title}`);
+      }
+    }
+    const scopeItems = [
+      extractSummary(proposal, ["\u539F\u56E0\u4E0E\u4EF7\u503C", "Why"]),
+      extractSummary(proposal, ["\u884C\u4E3A\u53D8\u5316", "What", "Behavior Changes"]),
+      extractSummary(proposal, ["\u8303\u56F4", "Scope"]),
+      extractSummary(proposal, ["\u975E\u76EE\u6807", "Non-goals", "Non-goals and Scope"])
+    ].filter((item) => Boolean(item));
+    const assumptionAndQuestionItems = [
+      ...proposalDefinition.assumptions.map((assumption) => `${assumption.id}: ${assumption.description}; ${zh ? "\u4F9D\u636E" : "basis"}: ${assumption.basis}; ${zh ? "\u9519\u8BEF\u5F71\u54CD" : "impact if wrong"}: ${assumption.impact_if_wrong}`),
+      ...proposalDefinition.open_questions.map((question) => `${question.id} [${question.status}]: ${question.question}; ${zh ? "\u5F71\u54CD" : "impact"}: ${question.impact}`)
+    ];
+    return {
+      ...common,
+      title: zh ? "\u9700\u6C42\u5BA1\u6279" : "Requirements Approval",
+      artifacts: [
+        artifact(zh ? "\u9700\u6C42\u63D0\u6848" : "Proposal", "proposal.md", descriptions.proposal),
+        ...input.specFiles.map((file2) => artifact(zh ? "\u884C\u4E3A\u89C4\u683C" : "Behavior Spec", file2, descriptions.spec)),
+        ...reviewPaths(input.change.profile, "reviews/requirements-review.md").map((file2) => artifact(zh ? "\u9700\u6C42\u8BC4\u5BA1" : "Requirements Review", file2, descriptions.requirementsReview))
+      ],
+      sections: [
+        {
+          title: zh ? "\u5BA1\u9605\u95EE\u9898" : "Review Question",
+          items: [zh ? "\u662F\u5426\u6279\u51C6\u4EE5\u4E0B\u9700\u6C42\u8303\u56F4\u548C\u53EF\u9A8C\u6536\u884C\u4E3A\u8FDB\u5165\u6280\u672F\u8BBE\u8BA1\uFF1F" : "Approve the following scope and observable behavior for technical design?"]
+        },
+        { title: zh ? "\u76EE\u6807\u3001\u53D8\u66F4\u8303\u56F4\u4E0E\u975E\u76EE\u6807" : "Goals, Change Scope, and Non-goals", items: scopeItems.length > 0 ? scopeItems : [none] },
+        { title: zh ? "\u5173\u952E\u9700\u6C42\u4E0E\u9A8C\u6536\u884C\u4E3A" : "Key Requirements and Acceptance Behavior", items: requirements.length > 0 ? requirements : [none] },
+        {
+          title: zh ? "\u5047\u8BBE\u3001\u98CE\u9669\u4E0E\u5F85\u786E\u8BA4\u4E8B\u9879" : "Assumptions, Risks, and Open Items",
+          items: assumptionAndQuestionItems.length > 0 ? assumptionAndQuestionItems : [none]
+        }
+      ]
+    };
+  }
+  const designContent = await readFile3(path3.join(input.changeDir, "design.md"), "utf8");
+  const design = parseDesignDefinition(designContent, "design.md");
+  const decisionSections = design.decisions.map((decision) => ({
+    id: decision.id,
+    content: extractMarkdownSectionById(designContent, decision.id, "Design Decision", "design.md")
+  }));
+  if (input.gate === "design") {
+    const approachContent = extractOptionalMarkdownSection(designContent, ["\u603B\u4F53\u65B9\u6848\u6BD4\u8F83", "Approach Comparison"]);
+    const recommendation2 = extractLabeledMarkdownValue(approachContent, ["\u63A8\u8350\u7406\u7531", "Recommendation", "Recommendation Rationale"]);
+    const scopeItems = [
+      extractSummary(designContent, ["\u4E0A\u4E0B\u6587\u4E0E\u4ED3\u5E93\u4E8B\u5B9E", "\u4E0A\u4E0B\u6587", "Context and Repository Facts", "Context"]),
+      extractSummary(designContent, ["\u8303\u56F4\u9002\u914D\u4E0E\u62C6\u5206", "Scope Fit and Decomposition"]),
+      extractSummary(designContent, ["\u5168\u5C40\u7EA6\u675F", "Global Constraints"])
+    ].filter((item) => Boolean(item));
+    const decisionItems = decisionSections.map(({ id, content }) => {
+      const title = markdownHeadingTitle(content) ?? id;
+      const architectureContent = extractOptionalMarkdownSection(content, ["\u67B6\u6784\u51B3\u7B56", "Architecture Decision"]);
+      const decision = extractLabeledMarkdownValue(architectureContent, ["\u51B3\u7B56", "Decision"]) ?? (architectureContent ? summarizeText(architectureContent) : void 0) ?? none;
+      const rationale = extractLabeledMarkdownValue(architectureContent, ["\u7406\u7531", "Rationale", "Reason"]) ?? extractLabeledMarkdownValue(architectureContent, ["\u4ED3\u5E93\u8BC1\u636E", "Repository Evidence", "Evidence"]) ?? extractSummary(content, ["\u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669", "Trade-offs and Residual Risks"]) ?? none;
+      const modules = extractSummary(content, ["\u6A21\u5757\u4E0E\u804C\u8D23", "Modules and Responsibilities"]);
+      const interfaces = extractSummary(content, ["\u63A5\u53E3\u4E0E\u6570\u636E\u6D41", "Interfaces and Data Flow"]);
+      const impact = extractLabeledMarkdownValue(architectureContent, ["\u5F71\u54CD", "Impact"]) ?? ([modules, interfaces].filter(Boolean).join("; ") || none);
+      return [
+        title,
+        `${zh ? "\u51B3\u5B9A\uFF1A" : "Decision: "}${decision}`,
+        `${zh ? "\u7406\u7531\uFF1A" : "Rationale: "}${rationale}`,
+        `${zh ? "\u5F71\u54CD\uFF1A" : "Impact: "}${impact}`
+      ].join("\n");
+    });
+    const flowItems = decisionSections.map(({ id, content }) => {
+      const modules = extractSummary(content, ["\u6A21\u5757\u4E0E\u804C\u8D23", "Modules and Responsibilities"]);
+      const interfaces = extractSummary(content, ["\u63A5\u53E3\u4E0E\u6570\u636E\u6D41", "Interfaces and Data Flow"]);
+      return `${id}: ${[modules, interfaces].filter(Boolean).join("; ") || none}`;
+    });
+    const failureItems = decisionSections.map(({ id, content }) => {
+      const parts = [
+        extractSummary(content, ["\u5931\u8D25\u4E0E\u8FB9\u754C\u884C\u4E3A", "Failure and Boundary Behavior"]),
+        extractSummary(content, ["\u5B89\u5168\u4E0E\u9690\u79C1", "Security and Privacy"])
+      ].filter((item) => Boolean(item));
+      return `${id}: ${parts.join(" | ") || none}`;
+    });
+    const deliveryItems = decisionSections.map(({ id, content }) => {
+      const parts = [
+        extractSummary(content, ["\u517C\u5BB9\u3001\u8FC1\u79FB\u4E0E\u56DE\u6EDA", "Compatibility, Migration, and Rollback"]),
+        extractSummary(content, ["\u9A8C\u8BC1\u7B56\u7565", "Verification Strategy"])
+      ].filter((item) => Boolean(item));
+      return `${id}: ${parts.join(" | ") || none}`;
+    });
+    const riskItems = [
+      ...decisionSections.map(({ id, content }) => `${id}: ${extractSummary(content, ["\u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669", "Trade-offs and Residual Risks"]) ?? none}`),
+      extractSummary(designContent, ["\u672A\u89E3\u51B3\u98CE\u9669", "Unresolved Risks"]) ?? none
+    ];
+    const openItems = extractSummary(designContent, ["\u5F85\u51B3\u5B9A\u4E8B\u9879", "Open Items", "Open Decisions"]);
+    const artifacts = [artifact(zh ? "\u6280\u672F\u8BBE\u8BA1" : "Technical Design", "design.md", descriptions.design)];
+    if (input.change.prototype.required) {
+      for (const [label, relativePath, description] of [
+        [zh ? "\u539F\u578B\u8BF4\u660E" : "Prototype Brief", "prototype/brief.md", descriptions.prototypeBrief],
+        [zh ? "\u8BBE\u8BA1\u7CFB\u7EDF" : "Design System", "prototype/design-system.md", descriptions.designSystem],
+        [zh ? "\u4EA4\u4E92\u539F\u578B" : "Prototype", "prototype/prototype.md", descriptions.prototype]
+      ])
+        artifacts.push(artifact(label, relativePath, description));
+    }
+    return {
+      ...common,
+      title: zh ? "\u8BBE\u8BA1\u5BA1\u6279" : "Design Approval",
+      artifacts,
+      sections: [
+        {
+          title: zh ? "\u5BA1\u9605\u95EE\u9898" : "Review Question",
+          items: [zh ? "\u662F\u5426\u6279\u51C6\u4EE5\u4E0B\u6280\u672F\u8BBE\u8BA1\u8FDB\u5165\u5B9E\u65BD\u8BA1\u5212\uFF1F" : "Approve the following technical design for implementation planning?"]
+        },
+        {
+          title: zh ? "\u5BA1\u9605\u7ED3\u8BBA\u4E0E\u65B9\u6848\u63A8\u8350" : "Review Summary and Recommendation",
+          items: [recommendation2 ?? (approachContent ? summarizeText(approachContent) : none)]
+        },
+        { title: zh ? "\u53D8\u66F4\u8303\u56F4\u4E0E\u7EA6\u675F" : "Change Scope and Constraints", items: scopeItems.length > 0 ? scopeItems : [none] },
+        { title: zh ? "\u6838\u5FC3\u8BBE\u8BA1\u51B3\u7B56" : "Key Design Decisions", items: decisionItems.length > 0 ? decisionItems : [none] },
+        { title: zh ? "\u6A21\u5757\u3001\u63A5\u53E3\u4E0E\u6570\u636E\u6D41" : "Modules, Interfaces, and Data Flow", items: flowItems.length > 0 ? flowItems : [none] },
+        { title: zh ? "\u5931\u8D25\u3001\u5B89\u5168\u4E0E\u8FB9\u754C" : "Failure, Security, and Boundaries", items: failureItems.length > 0 ? failureItems : [none] },
+        { title: zh ? "\u517C\u5BB9\u3001\u56DE\u6EDA\u4E0E\u9A8C\u8BC1" : "Compatibility, Rollback, and Verification", items: deliveryItems.length > 0 ? deliveryItems : [none] },
+        {
+          title: zh ? "\u5269\u4F59\u98CE\u9669" : "Residual Risks",
+          items: riskItems
+        },
+        {
+          title: zh ? "\u5F85\u7528\u6237\u51B3\u5B9A" : "Open Decisions",
+          items: [openItems ?? none]
+        }
+      ]
+    };
+  }
+  const planContent = await readFile3(path3.join(input.changeDir, "plan.md"), "utf8");
+  const taskEntries = await Promise.all(Object.values(input.change.tasks).sort((left, right) => left.id.localeCompare(right.id)).map(async (task) => {
+    const relativePath = `tasks/${task.id}.md`;
+    const content = await readFile3(path3.join(input.changeDir, relativePath), "utf8");
+    return { task, relativePath, content };
+  }));
+  const dagItems = taskEntries.map(({ task }) => `${task.id} <- ${task.dependencies.length > 0 ? task.dependencies.join(", ") : zh ? "\u65E0\u524D\u7F6E\u4EFB\u52A1" : "no dependencies"}`);
+  const taskItems = taskEntries.map(({ task, content }) => {
+    const goal = extractSummary(content, ["\u76EE\u6807", "Goal"]);
+    const attribution = task.adopted_commit ? `; ${zh ? "\u5386\u53F2\u5F52\u5C5E Commit" : "historical attributed Commit"}: ${task.adopted_commit}` : "";
+    return `${task.id} ${task.title}: ${goal ?? none}; ${zh ? "\u5173\u952E\u8DEF\u5F84" : "key paths"}: ${task.allowed_paths.join(", ") || none}${attribution}`;
+  });
+  const contractItems = taskEntries.map(({ task }) => `${task.id}: consumes [${task.consumes.join(", ") || none}]; produces [${task.produces.join(", ") || none}]`);
+  const verificationItems = taskEntries.map(({ task, content }) => `${task.id}: ${extractSummary(content, ["TDD \u4E0E\u9A8C\u8BC1", "TDD and Verification", "Verification", "\u9A8C\u8BC1"]) ?? task.acceptance_criteria.join("; ")}`);
+  return {
+    ...common,
+    title: zh ? "\u5B9E\u65BD\u5BA1\u6279" : "Implementation Approval",
+    artifacts: [
+      artifact(zh ? "\u6280\u672F\u8BBE\u8BA1" : "Technical Design", "design.md", descriptions.design),
+      artifact(zh ? "\u5B9E\u65BD\u8BA1\u5212" : "Implementation Plan", "plan.md", descriptions.plan),
+      artifact(zh ? "\u4EFB\u52A1\u7D22\u5F15" : "Task Index", "tasks.md", descriptions.taskIndex),
+      ...taskEntries.map(({ task, relativePath }) => artifact(`${zh ? "\u4EFB\u52A1" : "Task"} ${task.id}`, relativePath, descriptions.task)),
+      ...reviewPaths(input.change.profile, "reviews/readiness-review.md").map((file2) => artifact(zh ? "\u5C31\u7EEA\u8BC4\u5BA1" : "Readiness Review", file2, descriptions.readinessReview))
+    ],
+    sections: [
+      {
+        title: zh ? "\u5BA1\u9605\u95EE\u9898" : "Review Question",
+        items: [zh ? "\u662F\u5426\u6279\u51C6\u4EE5\u4E0B\u5B9E\u65BD\u8303\u56F4\u3001\u4EFB\u52A1\u8FB9\u754C\u548C\u9A8C\u8BC1\u65B9\u5F0F\u8FDB\u5165\u5F00\u53D1\uFF1F" : "Approve the following implementation scope, task boundaries, and verification approach?"]
+      },
+      {
+        title: zh ? "\u5B9E\u65BD\u7ED3\u8BBA\u4E0E\u8303\u56F4" : "Implementation Summary and Scope",
+        items: [extractSummary(planContent, ["\u76EE\u6807\u4E0E\u65B9\u6CD5", "Approach", "Goal and Approach"]) ?? none]
+      },
+      { title: zh ? "Task DAG" : "Task DAG", items: dagItems },
+      { title: zh ? "\u4EFB\u52A1\u76EE\u6807\u4E0E\u5173\u952E\u6587\u4EF6" : "Task Goals and Key Files", items: taskItems },
+      { title: zh ? "\u4F9D\u8D56\u4E0E\u63A5\u53E3\u5951\u7EA6" : "Dependencies and Interface Contracts", items: contractItems },
+      { title: zh ? "\u9A8C\u8BC1\u4E0E\u9A8C\u6536" : "Verification and Acceptance", items: verificationItems },
+      {
+        title: zh ? "\u98CE\u9669\u4E0E\u5F85\u51B3\u5B9A\u4E8B\u9879" : "Risks and Open Items",
+        items: [extractSummary(planContent, ["\u98CE\u9669\u4E0E\u5F85\u51B3\u5B9A\u4E8B\u9879", "Risks and Open Items", "\u98CE\u9669", "Risks"]) ?? none]
+      }
+    ]
+  };
+}
+function extractLabeledMarkdownValue(content, labels) {
+  if (!content)
+    return void 0;
+  for (const line of content.split(/\r?\n/)) {
+    const normalized = line.replace(/^\s*[-*+]\s*/, "").trim();
+    for (const label of labels) {
+      const match = new RegExp(`^${escapeRegExp(label)}\\s*[:\uFF1A]\\s*(.+)$`, "i").exec(normalized);
+      if (match?.[1])
+        return summarizeText(match[1]);
+    }
+  }
+  return void 0;
+}
+function extractSummary(content, titles) {
+  const section = extractOptionalMarkdownSection(content, titles);
+  return section ? summarizeText(section) : void 0;
+}
+function summarizeText(value, maxLength = 420) {
+  const normalized = value.replace(/<!--[\s\S]*?-->/g, " ").replace(/^#{1,6}\s+/gm, "").replace(/^[-*+]\s+/gm, "").replace(/^\s*\|/gm, "").replace(/\|\s*$/gm, "").replace(/\s*\|\s*/g, " | ").replace(/\s+/g, " ").trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+}
+function markdownHeadingTitle(content) {
+  return scanMarkdown(content).find((line) => line.heading)?.heading?.title.trim();
+}
 function strictReviewerPaths(relativePath) {
   const suffix = relativePath.endsWith(".md") ? relativePath.slice(0, -3) : relativePath;
   return [`${suffix}-reviewer-1.md`, `${suffix}-reviewer-2.md`];
+}
+function intersects(left, right) {
+  const values = new Set(right);
+  return left.some((value) => values.has(value));
+}
+function collectTaskAncestors(task, tasks) {
+  const ancestors = /* @__PURE__ */ new Map();
+  const visit = (taskId) => {
+    const dependency = tasks[taskId];
+    if (!dependency || ancestors.has(taskId))
+      return;
+    ancestors.set(taskId, dependency);
+    for (const parent of [...dependency.dependencies, ...dependency.supersedes])
+      visit(parent);
+  };
+  for (const dependency of [...task.dependencies, ...task.supersedes])
+    visit(dependency);
+  return [...ancestors.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+function renderDependencyFact(task) {
+  const contracts = task.produces.length > 0 ? task.produces.map((contract) => `  - ${contract}`).join("\n") : "  - None declared.";
+  const inheritedAttempt = task.attempts.at(-1);
+  const delivery = task.commit_sha ? ["- Relationship: Completed Dependency", `- Delivered Commit: ${task.commit_sha}`] : inheritedAttempt ? [
+    "- Relationship: Inherited Suspended Baseline",
+    `- Attempt Base: ${inheritedAttempt.base_commit}`,
+    `- Attempt Head: ${inheritedAttempt.head_commit}`,
+    `- Archived Brief: ${inheritedAttempt.brief_path}`,
+    `- Archived Report: ${inheritedAttempt.report_path ?? "not recorded"}`
+  ] : ["- Relationship: Planned Dependency", "- Delivered Commit: not recorded"];
+  return [
+    `### ${task.id}`,
+    `- Status: ${task.status}`,
+    ...delivery,
+    `- Planned paths: ${task.allowed_paths.join(", ") || "none"}`,
+    "- Produced contracts:",
+    contracts
+  ].join("\n");
+}
+function extractMarkdownSectionById(content, id, kind, relativePath) {
+  const lines = content.split(/\r?\n/);
+  const scanned = scanMarkdown(content);
+  const idPattern = new RegExp(`^${escapeRegExp(id)}(?:\\b|\\s|:)`);
+  const start = scanned.find((line) => line.heading !== void 0 && idPattern.test(line.heading.title))?.index ?? -1;
+  if (start < 0) {
+    throw new RockSpecError("AUTHORITY_SECTION_MISSING", `${kind} ${id} has no Markdown section`, {
+      path: relativePath,
+      id,
+      kind
+    });
+  }
+  const level = scanned[start].heading.level;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const heading = scanned[index]?.heading;
+    if (heading && heading.level <= level) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n").trimEnd();
+}
+function extractOptionalMarkdownSection(content, titles) {
+  const lines = content.split(/\r?\n/);
+  const scanned = scanMarkdown(content);
+  const start = scanned.find((line) => line.heading !== void 0 && titles.includes(line.heading.title.trim()))?.index ?? -1;
+  if (start < 0)
+    return void 0;
+  const level = scanned[start].heading.level;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const heading = scanned[index]?.heading;
+    if (heading && heading.level <= level) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join("\n").trim();
+}
+var REQUIRED_DESIGN_DECISION_SECTIONS = [
+  ["\u76EE\u6807\u4E0E\u8986\u76D6\u8303\u56F4", "Goal and Coverage"],
+  ["\u67B6\u6784\u51B3\u7B56", "Architecture Decision"],
+  ["\u6A21\u5757\u4E0E\u804C\u8D23", "Modules and Responsibilities"],
+  ["\u63A5\u53E3\u4E0E\u6570\u636E\u6D41", "Interfaces and Data Flow"],
+  ["\u5931\u8D25\u4E0E\u8FB9\u754C\u884C\u4E3A", "Failure and Boundary Behavior"],
+  ["\u5B89\u5168\u4E0E\u9690\u79C1", "Security and Privacy"],
+  ["\u517C\u5BB9\u3001\u8FC1\u79FB\u4E0E\u56DE\u6EDA", "Compatibility, Migration, and Rollback"],
+  ["\u9A8C\u8BC1\u7B56\u7565", "Verification Strategy"],
+  ["\u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669", "Trade-offs and Residual Risks"]
+];
+function assertDesignStructure(content, decisionIds) {
+  const globalConstraints = extractOptionalMarkdownSection(content, ["\u5168\u5C40\u7EA6\u675F", "Global Constraints"]);
+  if (!globalConstraints) {
+    throw new RockSpecError("DESIGN_GLOBAL_CONSTRAINTS_MISSING", "Design must declare explicit Global Constraints", {
+      path: "design.md",
+      accepted_headings: ["\u5168\u5C40\u7EA6\u675F", "Global Constraints"]
+    });
+  }
+  for (const titles of [
+    ["\u603B\u4F53\u65B9\u6848\u6BD4\u8F83", "Approach Comparison"],
+    ["\u672A\u89E3\u51B3\u98CE\u9669", "Unresolved Risks"]
+  ]) {
+    if (!extractOptionalMarkdownSection(content, titles)) {
+      throw new RockSpecError("DESIGN_SECTION_MISSING", `Design is missing required section ${titles[0]}`, {
+        path: "design.md",
+        accepted_headings: titles
+      });
+    }
+  }
+  for (const decisionId of decisionIds) {
+    const decision = extractMarkdownSectionById(content, decisionId, "Design Decision", "design.md");
+    const missing = REQUIRED_DESIGN_DECISION_SECTIONS.filter((titles) => !extractOptionalMarkdownSection(decision, [...titles])).map((titles) => titles[0]);
+    if (missing.length > 0) {
+      throw new RockSpecError("DESIGN_DECISION_INCOMPLETE", `Design Decision ${decisionId} is missing implementation detail sections`, {
+        path: "design.md",
+        decision_id: decisionId,
+        missing_sections: missing
+      });
+    }
+  }
+}
+async function renderAuthorityManifest(changeDir, references, projections) {
+  const rows = ["| Source | SHA-256 | Projection / Coverage | Projection SHA-256 |", "|---|---|---|---|"];
+  for (const relativePath of references) {
+    const target = path3.join(changeDir, relativePath);
+    if (!await exists(target))
+      continue;
+    const projection = projections[relativePath];
+    rows.push(`| ${relativePath} | ${sha256(await readFile3(target))} | ${projection?.ids.join(", ") || "index only"} | ${projection?.projectionHash ?? "-"} |`);
+  }
+  return rows.join("\n");
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function parseFrontmatter(content, relativePath) {
   const lines = content.split(/\r?\n/);
@@ -30952,6 +33227,55 @@ function parseFrontmatter(content, relativePath) {
     });
   }
 }
+function artifactSchemaResult(relativePath, document) {
+  if (relativePath === "proposal.md")
+    return ProposalDefinitionSchema.safeParse(document);
+  if (relativePath === "design.md")
+    return DesignDefinitionSchema.safeParse(document);
+  if (relativePath === "plan.md")
+    return PlanDefinitionSchema.safeParse(document);
+  if (relativePath === "prototype/brief.md")
+    return PrototypeBriefDefinitionSchema.safeParse(document);
+  if (/^tasks\/T-\d{3,}\.md$/.test(relativePath))
+    return TaskDefinitionSchema.safeParse(document);
+  if (/^runtime\/tasks\/T-\d{3,}\/implementer-report\.md$/.test(relativePath)) {
+    return ImplementerReportDocumentSchema.safeParse(document);
+  }
+  if (/^reviews\/(requirements|readiness)-review(?:-reviewer-[12])?\.md$/.test(relativePath)) {
+    return StageReviewDocumentSchema.safeParse(document);
+  }
+  if (/^reviews\/(?:delivery-review(?:-reviewer-[12])?|tasks\/T-\d{3,}-review(?:-reviewer-[12])?)\.md$/.test(relativePath)) {
+    return ReviewDocumentSchema.safeParse(document);
+  }
+  if (relativePath === "testing/test-report.md")
+    return AcceptanceDocumentSchema.safeParse(document);
+  if (relativePath === "testing/uat-report.md")
+    return UatDocumentSchema.safeParse(document);
+  if (relativePath === "knowledge-delta.md")
+    return KnowledgeDeltaDocumentSchema.safeParse(document);
+  if (relativePath === "reviews/knowledge-review.md")
+    return KnowledgeReviewDocumentSchema.safeParse(document);
+  if (/^revisions\/RV-\d{3,}\/reviews\/(spec|design|implementation)-reconciliation-review\.md$/.test(relativePath)) {
+    return ReconciliationReviewDocumentSchema.safeParse(document);
+  }
+  return null;
+}
+function validationIssue(relativePath, issue2) {
+  const record2 = typeof issue2 === "object" && issue2 !== null ? issue2 : {};
+  const issuePath = Array.isArray(record2.path) ? record2.path.map(String) : [];
+  const values = Array.isArray(record2.values) ? record2.values.filter((value) => typeof value === "string") : void 0;
+  const expected = typeof record2.expected === "string" ? record2.expected : void 0;
+  const input = record2.input;
+  const received = input === void 0 ? void 0 : typeof input === "string" ? input : JSON.stringify(input);
+  return {
+    code: typeof record2.code === "string" ? record2.code : "invalid_artifact",
+    message: typeof record2.message === "string" ? record2.message : "\u4EA7\u7269\u5B57\u6BB5\u4E0D\u7B26\u5408 Schema",
+    paths: [relativePath, ...issuePath],
+    ...expected ? { expected } : {},
+    ...received ? { received } : {},
+    ...values && values.length > 0 ? { allowed: values } : {}
+  };
+}
 function parseTaskDefinition(content, relativePath) {
   const result = TaskDefinitionSchema.safeParse(parseFrontmatter(content, relativePath));
   if (!result.success) {
@@ -30962,15 +33286,32 @@ function parseTaskDefinition(content, relativePath) {
   }
   return result.data;
 }
+function parseImplementerReport(content, relativePath) {
+  const result = ImplementerReportDocumentSchema.safeParse(parseFrontmatter(content, relativePath));
+  if (!result.success) {
+    throw new RockSpecError("INVALID_IMPLEMENTER_REPORT", `${relativePath} has invalid Implementer report metadata`, {
+      path: relativePath,
+      issues: result.error.issues
+    });
+  }
+  return result.data;
+}
 function sameTaskDefinition(task, definition) {
+  if (task.adopted_commit !== void 0 || definition.adopted_commit !== void 0) {
+    if (!task.adopted_commit || !definition.adopted_commit || !task.adopted_commit.startsWith(definition.adopted_commit)) {
+      return false;
+    }
+  }
   return JSON.stringify({
     title: task.title,
     dependencies: task.dependencies,
     supersedes: task.supersedes,
     requirement_ids: task.requirement_ids,
     scenario_ids: task.scenario_ids,
+    decision_ids: task.decision_ids,
     finding_ids: task.finding_ids,
     acceptance_criteria: task.acceptance_criteria,
+    validation_commands: task.validation_commands,
     consumes: task.consumes,
     produces: task.produces,
     allowed_paths: task.allowed_paths
@@ -30980,8 +33321,10 @@ function sameTaskDefinition(task, definition) {
     supersedes: definition.supersedes,
     requirement_ids: definition.requirement_ids,
     scenario_ids: definition.scenario_ids,
+    decision_ids: definition.decision_ids,
     finding_ids: definition.finding_ids,
     acceptance_criteria: definition.acceptance_criteria,
+    validation_commands: definition.validation_commands,
     consumes: definition.consumes,
     produces: definition.produces,
     allowed_paths: definition.allowed_paths
@@ -31029,16 +33372,7 @@ function parseReviewDocument(content, relativePath) {
 }
 function parseStageReviewDocument(content, relativePath, kind) {
   if (!content.trimStart().startsWith("---")) {
-    const verdict = parseVerdict(content);
-    if (verdict !== "PASS") {
-      throw new RockSpecError("UNSTRUCTURED_STAGE_REVIEW", `${relativePath} must use structured Frontmatter when the verdict is not PASS`, { path: relativePath, verdict, kind });
-    }
-    return {
-      schema_version: 1,
-      verdict,
-      reviewer_execution_id: `legacy:${relativePath}`,
-      findings: []
-    };
+    throw new RockSpecError("UNSTRUCTURED_STAGE_REVIEW", `${relativePath} must use structured Frontmatter`, { path: relativePath, kind });
   }
   const result = StageReviewDocumentSchema.safeParse(parseFrontmatter(content, relativePath));
   if (!result.success) {
@@ -31108,6 +33442,14 @@ function formatCommand(executable, args) {
 }
 function changedArtifactPaths(previous, current) {
   return [.../* @__PURE__ */ new Set([...Object.keys(previous), ...Object.keys(current)])].filter((key) => previous[key] !== current[key]).sort();
+}
+function recoveryRevisionReason(change, reviewId, findingIds) {
+  const findings = change.reviews[reviewId]?.findings ?? [];
+  const descriptions = findingIds.map((findingId) => {
+    const description = findings.find((finding) => finding.id === findingId)?.description;
+    return description ? `${findingId}: ${description}` : findingId;
+  });
+  return `${reviewId} recovery: ${descriptions.join("; ")}`;
 }
 var REVISION_ACTIONS = {
   requirements: ["requirements.clarify", "requirements.review", "design.technical", "design.prototype", "plan.create", "readiness.review"],
@@ -31186,7 +33528,7 @@ function revisionReviews(target, reviews, mode = "pre_implementation") {
 function revisionActions(target, completedActions, mode = "pre_implementation") {
   const invalid = new Set(REVISION_ACTIONS[target]);
   if (mode === "implementation_recovery" || mode === "feedback_reopen") {
-    for (const action of ["task.execute", "task.review", "acceptance.validate", "delivery.review", "change.verify"]) {
+    for (const action of ["task.execute", "task.review", "acceptance.validate", "acceptance.uat", "delivery.review", "change.verify"]) {
       invalid.add(action);
     }
   }
@@ -31229,8 +33571,9 @@ function applyPreImplementationRevisionInvalidation(change, target) {
   const invalidActions = new Set(REVISION_ACTIONS[target]);
   change.completed_actions = change.completed_actions.filter((action) => !invalidActions.has(action));
   change.tasks = {};
-  change.execution = { active_task: null, active_execution: null };
+  change.execution = { ...change.execution, active_task: null, active_execution: null };
   change.verification = { status: "pending" };
+  resetUat(change);
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
   change.state = target === "requirements" ? "SCOPING" : target === "plan" ? "DESIGN_APPROVED" : target === "prototype" ? "DESIGNING" : "SPEC_APPROVED";
@@ -31282,8 +33625,9 @@ function applyImplementationRecoveryInvalidation(change, target, revisionId, inv
     delete task.started_at;
     delete task.completed_at;
   }
-  change.execution = { active_task: null, active_execution: null };
+  change.execution = { ...change.execution, active_task: null, active_execution: null };
   change.verification = { status: "pending" };
+  resetUat(change);
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
   change.state = target === "requirements" ? "SCOPING" : target === "plan" ? "DESIGN_APPROVED" : target === "prototype" ? "DESIGNING" : "SPEC_APPROVED";
@@ -31300,14 +33644,19 @@ function applyFeedbackRevisionInvalidation(change, target) {
     delete change.reviews[review];
   const invalidActions = new Set(revisionActions(target, change.completed_actions, "feedback_reopen"));
   change.completed_actions = change.completed_actions.filter((action) => !invalidActions.has(action));
-  change.execution = { active_task: null, active_execution: null };
+  change.execution = { ...change.execution, active_task: null, active_execution: null };
   change.verification = { status: "pending" };
+  resetUat(change);
   change.knowledge_evolution = { schema_version: 1, status: "pending", protocol_version: 1, updates: [] };
   delete change.finished_at;
+  delete change.finish_disposition;
   delete change.delivery_head;
   if (change.prototype.required && target !== "plan")
     change.prototype.status = "pending";
   change.state = target === "requirements" ? "SCOPING" : target === "plan" ? "DESIGN_APPROVED" : target === "prototype" ? "DESIGNING" : "SPEC_APPROVED";
+}
+function resetUat(change) {
+  change.uat = change.uat.policy === "required" ? { policy: "required", status: "pending" } : { policy: change.uat.policy, status: "not_required" };
 }
 var STATE_ORDER = [
   "SCOPING",
@@ -31320,11 +33669,36 @@ var STATE_ORDER = [
   "READY",
   "IMPLEMENTING",
   "ACCEPTANCE_VALIDATING",
+  "UAT_PENDING",
   "FINAL_REVIEW",
   "VERIFYING",
   "READY_TO_FINISH",
   "ARCHIVED"
 ];
+var EXECUTION_ACTION_BY_ROLE = {
+  requirements_author: ["requirements.clarify"],
+  requirements_reviewer: ["requirements.review"],
+  design_author: ["design.technical", "design.prototype"],
+  planner: ["plan.create"],
+  readiness_reviewer: ["readiness.review"],
+  task_implementer: ["task.execute"],
+  task_reviewer: ["task.review"],
+  acceptance_engineer: ["acceptance.validate"],
+  delivery_reviewer: ["delivery.review"],
+  revision_author: ["revision.author"],
+  reconciliation_reviewer: ["reconcile.spec", "reconcile.design", "reconcile.implementation"],
+  knowledge_author: ["knowledge.evolve.author"],
+  knowledge_reviewer: ["knowledge.evolve.review"]
+};
+function assertExecutionRoleAction(role, action) {
+  if (!EXECUTION_ACTION_BY_ROLE[role].includes(action)) {
+    throw new RockSpecError("EXECUTION_ROLE_ACTION_MISMATCH", "Execution role is not allowed for this Action", {
+      role,
+      action,
+      allowed_actions: EXECUTION_ACTION_BY_ROLE[role]
+    });
+  }
+}
 function stateAtLeast(changeState, target) {
   const current = STATE_ORDER.indexOf(changeState);
   return current >= STATE_ORDER.indexOf(target);
@@ -31376,8 +33750,32 @@ function deduplicateBlocks(blocks) {
     return true;
   });
 }
-function briefTemplate(change) {
-  return `# ${change.title}
+function normalizeExecutionUsage(usage) {
+  if (!usage)
+    return void 0;
+  const normalized = {};
+  for (const key of ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"]) {
+    const value = usage[key];
+    if (value === void 0)
+      continue;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RockSpecError("INVALID_EXECUTION_USAGE", `${key} must be a non-negative integer`, { key, value });
+    }
+    normalized[key] = value;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : void 0;
+}
+function briefTemplate(change, language = "zh-CN") {
+  return language === "zh-CN" ? `# ${change.title}
+
+## \u8303\u56F4
+
+TODO
+
+## \u9A8C\u8BC1
+
+TODO
+` : `# ${change.title}
 
 ## Scope
 
@@ -31388,14 +33786,18 @@ TODO
 TODO
 `;
 }
-function specTemplate(change) {
+function proposalTemplate(language) {
+  return language === "zh-CN" ? "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# \u9700\u6C42\u63D0\u6848\n\n## \u539F\u56E0\u4E0E\u4EF7\u503C\n\nTODO\n\n## \u884C\u4E3A\u53D8\u5316\n\nTODO\n\n## \u8303\u56F4\n\nTODO\n\n## \u975E\u76EE\u6807\n\n\u65E0\n" : "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# Proposal\n\n## Why\n\nTODO\n\n## What\n\nTODO\n\n## Scope\n\nTODO\n\n## Non-goals\n\nNone\n";
+}
+function specTemplate(change, language = "zh-CN") {
+  const statement = language === "zh-CN" ? "\u7CFB\u7EDF MUST TODO\u3002" : "The system MUST TODO.";
   return `# ${change.title}
 
 ## ADDED Requirements
 
 ### R-001 Requirement: TODO
 
-The system MUST TODO.
+${statement}
 
 #### S-001 Scenario: TODO
 
@@ -31404,7 +33806,17 @@ The system MUST TODO.
 - THEN TODO
 `;
 }
-function taskTemplate(id) {
+function designTemplate(language) {
+  if (language === "en-US") {
+    return "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context and Repository Facts\n\nTODO\n\n## Global Constraints\n\nTODO\n\n## Approach Comparison\n\nTODO\n\n## Decisions\n\n### D-001 TODO\n\n#### Goal and Coverage\n\nTODO\n\n#### Architecture Decision\n\n- Decision: TODO\n- Rationale: TODO\n- Impact: TODO\n\n#### Modules and Responsibilities\n\nTODO\n\n#### Interfaces and Data Flow\n\nTODO\n\n#### Failure and Boundary Behavior\n\nTODO\n\n#### Security and Privacy\n\nTODO\n\n#### Compatibility, Migration, and Rollback\n\nTODO\n\n#### Verification Strategy\n\nTODO\n\n#### Trade-offs and Residual Risks\n\nTODO\n\n## Unresolved Risks\n\nNone\n\n## Open Decisions\n\nNone\n";
+  }
+  return "---\nschema_version: 1\ninputs:\n  spec_hash: TODO\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# \u6280\u672F\u8BBE\u8BA1\n\n## \u4E0A\u4E0B\u6587\u4E0E\u4ED3\u5E93\u4E8B\u5B9E\n\nTODO\n\n## \u5168\u5C40\u7EA6\u675F\n\nTODO\n\n## \u603B\u4F53\u65B9\u6848\u6BD4\u8F83\n\nTODO\n\n## \u51B3\u7B56\n\n### D-001 TODO\n\n#### \u76EE\u6807\u4E0E\u8986\u76D6\u8303\u56F4\n\nTODO\n\n#### \u67B6\u6784\u51B3\u7B56\n\n- \u51B3\u7B56\uFF1ATODO\n- \u7406\u7531\uFF1ATODO\n- \u5F71\u54CD\uFF1ATODO\n\n#### \u6A21\u5757\u4E0E\u804C\u8D23\n\nTODO\n\n#### \u63A5\u53E3\u4E0E\u6570\u636E\u6D41\n\nTODO\n\n#### \u5931\u8D25\u4E0E\u8FB9\u754C\u884C\u4E3A\n\nTODO\n\n#### \u5B89\u5168\u4E0E\u9690\u79C1\n\nTODO\n\n#### \u517C\u5BB9\u3001\u8FC1\u79FB\u4E0E\u56DE\u6EDA\n\nTODO\n\n#### \u9A8C\u8BC1\u7B56\u7565\n\nTODO\n\n#### \u53D6\u820D\u4E0E\u5269\u4F59\u98CE\u9669\n\nTODO\n\n## \u672A\u89E3\u51B3\u98CE\u9669\n\n\u65E0\n\n## \u5F85\u51B3\u5B9A\u4E8B\u9879\n\n\u65E0\n";
+}
+function planTemplate(language) {
+  return language === "zh-CN" ? "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# \u5B9E\u65BD\u8BA1\u5212\n\n## \u76EE\u6807\u4E0E\u65B9\u6CD5\n\nTODO\n\n## \u5168\u5C40\u7EA6\u675F\n\nTODO\n\n## \u6587\u4EF6\u804C\u8D23\u56FE\n\nTODO\n\n## \u8986\u76D6\u77E9\u9635\n\nTODO\n\n## Task \u56FE\n\n- T-001\n\n## \u63A5\u53E3\u4E0E\u8DE8 Task \u7EA6\u675F\n\nTODO\n\n## \u9A8C\u8BC1\u7B56\u7565\n\nTODO\n" : "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Implementation Plan\n\n## Goal and Approach\n\nTODO\n\n## Global Constraints\n\nTODO\n\n## File Responsibility Map\n\nTODO\n\n## Coverage Matrix\n\nTODO\n\n## Task DAG\n\n- T-001\n\n## Cross-task Interface Contracts\n\nTODO\n\n## Verification Strategy\n\nTODO\n";
+}
+function taskTemplate(id, language = "zh-CN") {
+  const headings = language === "zh-CN" ? ["\u76EE\u6807", "\u8FFD\u8E2A\u5173\u7CFB", "\u73AF\u5883\u4E0E\u524D\u7F6E\u6761\u4EF6", "\u6587\u4EF6\u8303\u56F4", "\u63A5\u53E3\u5951\u7EA6", "\u975E\u76EE\u6807\u4E0E\u7981\u6B62\u6539\u52A8", "\u9A8C\u6536\u6807\u51C6", "TDD \u4E0E\u9A8C\u8BC1", "\u5B8C\u6210\u5951\u7EA6"] : ["Goal", "Traceability", "Environment and Prerequisites", "File Scope", "Interface Contracts", "Non-goals and Forbidden Changes", "Acceptance Criteria", "TDD and Verification", "Completion Contract"];
   return `---
 schema_version: 1
 id: ${id}
@@ -31413,7 +33825,11 @@ dependencies: []
 supersedes: []
 requirement_ids: [R-001]
 scenario_ids: [S-001]
+decision_ids: [D-001]
+finding_ids: []
 acceptance_criteria:
+  - TODO
+validation_commands:
   - TODO
 consumes: []
 produces: []
@@ -31423,26 +33839,46 @@ allowed_paths:
 
 # ${id}
 
-## Goal
+## ${headings[0]}
 
 TODO
 
-## Traceability
+## ${headings[1]}
 
 - R-001
 - S-001
 - D-001
 
-## Acceptance Criteria
+## ${headings[2]}
 
 TODO
 
-## Verification
+## ${headings[3]}
+
+TODO
+
+## ${headings[4]}
+
+TODO
+
+## ${headings[5]}
+
+TODO
+
+## ${headings[6]}
+
+TODO
+
+## ${headings[7]}
+
+TODO
+
+## ${headings[8]}
 
 TODO
 `;
 }
-function reviewTemplate(title) {
+function reviewTemplate(title, language = "zh-CN") {
   return `---
 schema_version: 1
 verdict: BLOCKED
@@ -31454,12 +33890,12 @@ findings: []
 
 Verdict: BLOCKED
 
-## Findings
+## ${language === "zh-CN" ? "\u8BC4\u5BA1\u53D1\u73B0" : "Findings"}
 
 TODO
 `;
 }
-function codeReviewTemplate(title) {
+function codeReviewTemplate(title, language = "zh-CN") {
   return `---
 schema_version: 1
 verdict: BLOCKED
@@ -31469,6 +33905,7 @@ subject:
   head_commit: TODO
   diff_hash: TODO
 round: 0
+scope_assessment: []
 findings: []
 ---
 
@@ -31476,11 +33913,46 @@ findings: []
 
 Verdict: BLOCKED
 
-## Four-axis assessment
+## ${language === "zh-CN" ? "\u56DB\u8F74\u8BC4\u4F30" : "Four-axis Assessment"}
 
 TODO
 
-## Findings
+## ${language === "zh-CN" ? "\u8BC4\u5BA1\u53D1\u73B0" : "Findings"}
+
+TODO
+`;
+}
+function acceptanceReviewTemplate(language = "zh-CN") {
+  return `---
+schema_version: 1
+verdict: BLOCKED
+reviewer_execution_id: TODO
+commit: TODO
+scenario_coverage: []
+ui_evidence: []
+findings: []
+---
+
+# ${language === "zh-CN" ? "\u9A8C\u6536\u6D4B\u8BD5\u62A5\u544A" : "Acceptance Test Report"}
+
+Verdict: BLOCKED
+
+## ${language === "zh-CN" ? "\u8BC4\u5BA1\u53D1\u73B0" : "Findings"}
+
+TODO
+`;
+}
+function uatReportTemplate(language = "zh-CN") {
+  return `---
+schema_version: 1
+verdict: CONFIRMED
+confirmed_by: TODO
+commit: TODO
+scenario_ids: [S-001]
+notes: TODO
+---
+
+# ${language === "zh-CN" ? "\u7528\u6237\u9A8C\u6536" : "User Acceptance"}
 
 TODO
 `;
@@ -31535,7 +34007,20 @@ TODO
 `;
 }
 function implementerReportTemplate(taskId, executionId, baseCommit, briefPath, briefHash) {
-  return `# ${taskId} Implementer Report
+  const metadata = (0, import_yaml2.stringify)({
+    schema_version: 1,
+    task_id: taskId,
+    execution_id: executionId,
+    base_commit: baseCommit,
+    brief_path: briefPath,
+    brief_hash: briefHash,
+    outcome: "implemented"
+  }, { lineWidth: 0 }).trimEnd();
+  return `---
+${metadata}
+---
+
+# ${taskId} Implementer Report
 
 - Execution ID: ${executionId}
 - Base Commit: ${baseCommit}
@@ -31563,8 +34048,8 @@ TODO
 
 // packages/installer/dist/index.js
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
-import { cp as cp2, lstat, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, readlink, realpath as realpath2, rename as rename3, rm as rm3, symlink, writeFile } from "node:fs/promises";
+import { createHash as createHash3 } from "node:crypto";
+import { cp as cp2, lstat, mkdir as mkdir3, mkdtemp, readFile as readFile4, readdir as readdir2, readlink, realpath as realpath3, rename as rename3, rm as rm3, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path4 from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31712,7 +34197,7 @@ async function listInstalledProviders(cwd = process.cwd()) {
 async function resolveProjectRoot(cwd) {
   try {
     const { stdout: stdout2 } = await execFileAsync3("git", ["rev-parse", "--show-toplevel"], { cwd });
-    return await realpath2(stdout2.trim());
+    return await realpath3(stdout2.trim());
   } catch (error51) {
     throw new InstallerError("GIT_ROOT_REQUIRED", "RockSpec installation requires a Git repository", {
       cwd,
@@ -31731,7 +34216,7 @@ async function resolveSourceRoot(explicit) {
     let current = path4.resolve(candidate);
     while (true) {
       if (await exists2(path4.join(current, "distribution", "install-manifest.yaml")) && await exists2(path4.join(current, "skills"))) {
-        return await realpath2(current);
+        return await realpath3(current);
       }
       const parent = path4.dirname(current);
       if (parent === current)
@@ -32091,7 +34576,7 @@ async function commitInstall(projectRoot, manifest, hosts, capabilities, skills,
 async function validateSkill(skillRoot, expectedName) {
   if (!await exists2(skillRoot))
     throw new InstallerError("SKILL_SOURCE_MISSING", `Skill source ${expectedName} does not exist`);
-  const canonical = await realpath2(skillRoot);
+  const canonical = await realpath3(skillRoot);
   const skillFile = path4.join(canonical, "SKILL.md");
   if (!await exists2(skillFile))
     throw new InstallerError("SKILL_INVALID", `${expectedName} has no SKILL.md`);
@@ -32103,7 +34588,7 @@ async function validateSkill(skillRoot, expectedName) {
   for (const file2 of await walk(canonical)) {
     const info = await lstat(file2);
     if (info.isSymbolicLink()) {
-      const resolved = await realpath2(file2);
+      const resolved = await realpath3(file2);
       if (resolved !== canonical && !resolved.startsWith(`${canonical}${path4.sep}`)) {
         throw new InstallerError("SKILL_SYMLINK_ESCAPE", `${expectedName} contains a symlink outside its root`, {
           path: path4.relative(canonical, file2)
@@ -32118,7 +34603,7 @@ async function hashPath(target) {
     return hashBytes(`symlink:${await readlink(target)}`);
   if (info.isFile())
     return hashBytes(await readFile4(target));
-  const hash2 = createHash2("sha256");
+  const hash2 = createHash3("sha256");
   for (const file2 of await walk(target)) {
     const relative = path4.relative(target, file2).split(path4.sep).join("/");
     const child = await lstat(file2);
@@ -32135,7 +34620,7 @@ async function hashPath(target) {
   return `sha256:${hash2.digest("hex")}`;
 }
 function hashBytes(content) {
-  return `sha256:${createHash2("sha256").update(content).digest("hex")}`;
+  return `sha256:${createHash3("sha256").update(content).digest("hex")}`;
 }
 async function walk(root) {
   const result = [];
@@ -32196,20 +34681,47 @@ var {
 
 // packages/cli/src/output.ts
 var CLI_SCHEMA_VERSION = 1;
-var STATUS_VIEWS = ["summary", "tasks", "recovery", "hashes", "full"];
+var STATUS_VIEWS = ["summary", "resume", "tasks", "recovery", "hashes", "full"];
 function successEnvelope(command, data) {
   return { schema_version: CLI_SCHEMA_VERSION, ok: true, command, data };
 }
 function failureEnvelope(command, error51) {
   const candidate = asErrorRecord(error51);
+  const code = typeof candidate.code === "string" ? candidate.code : "INTERNAL_ERROR";
+  const details = candidate.details ?? candidate.issues ?? null;
+  const detailRecord = isRecord(details) ? details : {};
+  const changeId = typeof detailRecord.change_id === "string" ? detailRecord.change_id : void 0;
+  const recoverApplyCodes = /* @__PURE__ */ new Set([
+    "RECOVERY_TRIGGER_MISMATCH",
+    "RECOVERY_SOURCE_MISMATCH",
+    "RECOVERY_TARGET_MISMATCH",
+    "REVISION_AMENDMENT_FINDING_REQUIRED",
+    "REVISION_AUTHOR_REQUIRED"
+  ]);
+  const changeIdForRecovery = changeId ?? "[change-id]";
+  const recommendedCommandByCode = {
+    EXECUTION_ALREADY_ACTIVE: `rockspec execution complete ${String(detailRecord.execution_id ?? "[execution-id]")} ${changeIdForRecovery} --outcome success`,
+    ENVIRONMENT_PREFLIGHT_FAILED: `rockspec preflight environment ${changeIdForRecovery}`,
+    ACCEPTANCE_PREFLIGHT_REQUIRED: `rockspec preflight acceptance ${changeIdForRecovery}`,
+    COMPLETED_TASK_IMMUTABLE: `rockspec action complete plan.create ${changeIdForRecovery}  # append a new Remediation Task; keep completed Tasks unchanged`,
+    SUSPENDED_TASK_IMMUTABLE: `rockspec action complete plan.create ${changeIdForRecovery}  # append a new Replacement Task; keep suspended Tasks unchanged`,
+    RECOVERY_PLAN_APPEND_ONLY: `rockspec action complete plan.create ${changeIdForRecovery}  # restore immutable Tasks and append a new Finding-bound Task`,
+    UNASSIGNED_PRODUCT_COMMIT: `rockspec action complete plan.create ${changeIdForRecovery}  # attach the repair to a Remediation Task`,
+    UNASSIGNED_PRODUCT_COMMIT_REVIEW_REQUIRED: `rockspec action complete delivery.review ${changeIdForRecovery} --verdict CHANGES_REQUIRED`
+  };
+  const recoveryCommand = typeof candidate.recovery_command === "string" ? candidate.recovery_command : recommendedCommandByCode[code] ? recommendedCommandByCode[code] : recoverApplyCodes.has(code) ? `rockspec recover apply${changeId ? ` ${changeId}` : " [change-id]"}` : null;
   return {
     schema_version: CLI_SCHEMA_VERSION,
     ok: false,
     command,
     error: {
-      code: typeof candidate.code === "string" ? candidate.code : "INTERNAL_ERROR",
+      code,
       message: typeof candidate.message === "string" ? candidate.message : "An unexpected error occurred",
-      details: candidate.details ?? candidate.issues ?? null
+      details,
+      retryable: candidate.retryable === true || code === "LOCK_TIMEOUT",
+      state_changed: candidate.state_changed === true,
+      recovery_command: recoveryCommand,
+      recommended_next: candidate.recommended_next ?? detailRecord.recommended_next ?? null
     }
   };
 }
@@ -32224,6 +34736,45 @@ function projectStatus(status, view) {
     blocked_by: status.blocked_by,
     recovery: status.recovery
   };
+  if (view === "resume") {
+    const openExecutions = status.change.execution.registry.filter((execution) => !execution.completed_at).map((execution) => ({
+      id: execution.id,
+      role: execution.role,
+      action: execution.action,
+      started_at: execution.started_at,
+      context_package_path: execution.context_package_path
+    }));
+    const openFindings = Object.entries(status.change.reviews).flatMap(
+      ([reviewId, review]) => review.findings.filter((finding) => finding.status === "open").map((finding) => ({
+        review_id: reviewId,
+        id: finding.id,
+        severity: finding.severity,
+        owner_domain: finding.owner_domain,
+        route_to: finding.route_to,
+        description: finding.description
+      }))
+    );
+    return {
+      ...common,
+      workspace: status.change.workspace,
+      commits: {
+        base: status.change.base_commit,
+        delivery: status.change.delivery_head,
+        verified: status.change.verification.commit
+      },
+      approvals: Object.fromEntries(Object.entries(status.change.approvals).map(([gate, approval]) => [
+        gate,
+        approval ? { approved_at: approval.approved_at, mode: approval.mode } : null
+      ])),
+      active_task: status.change.execution.active_task,
+      remaining_tasks: Object.values(status.change.tasks).filter((task) => !["completed", "superseded"].includes(task.status)).sort((left, right) => left.id.localeCompare(right.id)).map((task) => ({ id: task.id, title: task.title, status: task.status, dependencies: task.dependencies })),
+      open_executions: openExecutions,
+      open_findings: openFindings,
+      artifacts: Object.fromEntries(Object.entries(status.change.artifacts).map(([name, artifact]) => [name, artifact.path])),
+      finish_disposition: status.change.finish_disposition ?? null,
+      resume_note: "\u4EE5\u672C\u5FEB\u7167\u6062\u590D Engine \u5DF2\u6301\u4E45\u5316\u72B6\u6001\uFF1B\u53EA\u9700\u989D\u5916\u8865\u5145\u672A\u5199\u5165\u4EA7\u7269\u7684\u7528\u6237\u53E3\u5934\u7EA6\u675F\u548C\u51B3\u7B56\u610F\u56FE\u3002"
+    };
+  }
   if (view === "tasks") {
     return {
       ...common,
@@ -32235,6 +34786,7 @@ function projectStatus(status, view) {
         dependencies: task.dependencies,
         supersedes: task.supersedes,
         finding_ids: task.finding_ids,
+        adopted_commit: task.adopted_commit,
         base_commit: task.base_commit,
         commit_sha: task.commit_sha
       }))
@@ -32340,6 +34892,84 @@ function formatHuman(data) {
   if (!isRecord(data)) {
     return JSON.stringify(data, null, 2);
   }
+  const approvalSummary = isRecord(data.review_summary) ? data.review_summary : void 0;
+  if (approvalSummary) {
+    const zh = stringValue(approvalSummary.language) !== "en-US";
+    const lines2 = [];
+    lines2.push(`\u3010${stringValue(approvalSummary.title) ?? (zh ? "\u5BA1\u6279" : "Approval")}\u3011`);
+    const sections = Array.isArray(approvalSummary.sections) ? approvalSummary.sections : [];
+    for (const section of sections) {
+      if (!isRecord(section)) continue;
+      lines2.push("", `${stringValue(section.title) ?? (zh ? "\u6458\u8981" : "Summary")}${zh ? "\uFF1A" : ":"}`);
+      for (const item of Array.isArray(section.items) ? section.items : []) {
+        if (typeof item !== "string") continue;
+        const itemLines = item.split(/\r?\n/).filter((line) => line.trim().length > 0);
+        if (itemLines.length === 0) continue;
+        lines2.push(`- ${itemLines[0]}`);
+        for (const line of itemLines.slice(1)) lines2.push(`  ${line}`);
+      }
+    }
+    lines2.push("", zh ? "\u6B63\u5F0F\u8BC4\u5BA1\u6750\u6599" : "Formal Review Materials");
+    const artifactRoot = stringValue(approvalSummary.artifact_root);
+    if (artifactRoot) {
+      lines2.push(`${zh ? "\u76EE\u5F55" : "Directory"}${zh ? "\uFF1A" : ":"}`, `  ${artifactRoot}/`);
+    }
+    const artifacts = Array.isArray(approvalSummary.artifacts) ? approvalSummary.artifacts : [];
+    for (const [index, artifact] of artifacts.entries()) {
+      if (!isRecord(artifact)) continue;
+      const label = stringValue(artifact.label);
+      const artifactPath = stringValue(artifact.relative_path) ?? stringValue(artifact.path);
+      const description = stringValue(artifact.description);
+      if (!label || !artifactPath) continue;
+      lines2.push("", `${index + 1}. ${label}`);
+      lines2.push(`   ${zh ? "\u6587\u4EF6" : "File"}${zh ? "\uFF1A" : ":"}${artifactPath}`);
+      if (description) lines2.push(`   ${zh ? "\u8BF4\u660E" : "Description"}${zh ? "\uFF1A" : ":"}${description}`);
+    }
+    const prompt = stringValue(approvalSummary.approval_prompt);
+    if (prompt) lines2.push("", prompt);
+    const hash2 = stringValue(data.hash);
+    const receiptNote = stringValue(approvalSummary.machine_receipt_note);
+    if (hash2) lines2.push("", `${zh ? "\u673A\u5668\u51ED\u8BC1" : "Machine Receipt"}${zh ? "\uFF1A" : ":"}${hash2}${receiptNote ? `\uFF08${receiptNote}\uFF09` : ""}`);
+    const packagePath = stringValue(data.path);
+    if (packagePath) lines2.push(`${zh ? "\u51ED\u8BC1\u5305" : "Receipt Package"}${zh ? "\uFF1A" : ":"}${packagePath}`);
+    return lines2.join("\n");
+  }
+  if (data.view === "resume") {
+    const lines2 = [
+      `Change\uFF1A${stringValue(data.change_id) ?? "-"}`,
+      `\u72B6\u6001\uFF1A${stringValue(data.current_state) ?? "-"}`
+    ];
+    const next2 = isRecord(data.recommended_next) ? data.recommended_next : void 0;
+    if (next2) {
+      const action = stringValue(next2.action);
+      const reason = stringValue(next2.reason);
+      if (action) lines2.push(`\u4E0B\u4E00\u6B65\uFF1A${action}${reason ? `\uFF08${reason}\uFF09` : ""}`);
+    }
+    const workspace = isRecord(data.workspace) ? data.workspace : void 0;
+    if (workspace) lines2.push(`\u5DE5\u4F5C\u533A\uFF1A${stringValue(workspace.mode) ?? "-"} / ${stringValue(workspace.branch) ?? "detached"}`);
+    const commits = isRecord(data.commits) ? data.commits : void 0;
+    if (commits) {
+      lines2.push(`\u63D0\u4EA4\uFF1Abase=${stringValue(commits.base) ?? "-"} delivery=${stringValue(commits.delivery) ?? "-"} verified=${stringValue(commits.verified) ?? "-"}`);
+    }
+    appendResumeItems(lines2, "\u5269\u4F59 Task", data.remaining_tasks, (item) => {
+      const id2 = stringValue(item.id) ?? "-";
+      return `${id2} ${stringValue(item.title) ?? ""} [${stringValue(item.status) ?? "unknown"}]`.trim();
+    });
+    appendResumeItems(lines2, "\u5F00\u653E Finding", data.open_findings, (item) => `${stringValue(item.id) ?? "-"} ${stringValue(item.description) ?? ""} -> ${stringValue(item.route_to) ?? "-"}`.trim());
+    appendResumeItems(lines2, "\u672A\u5B8C\u6210 Execution", data.open_executions, (item) => `${stringValue(item.id) ?? "-"} ${stringValue(item.role) ?? "-"} / ${stringValue(item.action) ?? "-"}`);
+    const disposition2 = isRecord(data.finish_disposition) ? data.finish_disposition : void 0;
+    if (disposition2) {
+      lines2.push("", "\u6536\u5C3E\u5904\u7F6E\uFF1A", `- ${stringValue(disposition2.choice) ?? "-"} / ${stringValue(disposition2.status) ?? "-"}`);
+      const pending = stringValue(disposition2.pending_action);
+      if (pending) lines2.push(`  ${pending}`);
+    }
+    const note = stringValue(data.resume_note);
+    if (note) lines2.push("", note);
+    return lines2.join("\n");
+  }
+  if (typeof data.artifact === "string" && data.valid === true) {
+    return `${data.artifact} \u6821\u9A8C\u901A\u8FC7`;
+  }
   const lines = [];
   const change = isRecord(data.change) ? data.change : data;
   const id = stringValue(change.id) ?? stringValue(data.change_id);
@@ -32374,9 +35004,92 @@ function formatHuman(data) {
     if (typeof item === "string") lines.push(`Blocked: ${item}`);
     else if (isRecord(item)) lines.push(`Blocked: ${stringValue(item.message) ?? JSON.stringify(item)}`);
   }
+  const semanticWarnings = Array.isArray(data.semantic_warnings) ? data.semantic_warnings : [];
+  if (semanticWarnings.length > 0) {
+    lines.push("", "\u8BED\u4E49\u63D0\u793A\uFF08\u4E0D\u963B\u65AD\uFF09\uFF1A");
+    for (const item of semanticWarnings) {
+      if (!isRecord(item)) continue;
+      lines.push(`- ${stringValue(item.target) ?? "\u77E5\u8BC6\u5019\u9009"}\uFF1A${stringValue(item.message) ?? "\u53EF\u80FD\u6539\u53D8\u4E49\u52A1\u5F3A\u5EA6\uFF0C\u8BF7\u6838\u5BF9 Authority \u5206\u7C7B"}`);
+    }
+  }
+  const disposition = isRecord(change.finish_disposition) ? change.finish_disposition : void 0;
+  if (disposition) {
+    const choice = stringValue(disposition.choice);
+    const dispositionStatus = stringValue(disposition.status);
+    if (choice) lines.push(`\u5904\u7F6E\u9009\u62E9\uFF1A${choice}`);
+    if (dispositionStatus) lines.push(`\u5904\u7F6E\u72B6\u6001\uFF1A${dispositionStatus}`);
+    const pendingAction = stringValue(disposition.pending_action);
+    if (pendingAction) lines.push(`\u5F85\u6267\u884C\uFF1A${pendingAction}`);
+  }
   if (lines.length > 0) return lines.join("\n");
   if (typeof data.message === "string") return data.message;
   return JSON.stringify(data, null, 2);
+}
+function formatHumanFailure(failure) {
+  const lines = [`RockSpec ${failure.error.code}: ${failure.error.message}`];
+  const details = isRecord(failure.error.details) ? failure.error.details : void 0;
+  const renderable = collectValidationItems(details);
+  if (renderable.length > 0) {
+    lines.push("");
+    for (const item of renderable) {
+      const location = item.paths.length > 0 ? item.paths.join(" -> ") : "\u4EA7\u7269";
+      lines.push(`- ${location}`);
+      lines.push(`  \u95EE\u9898\uFF1A${validationMessage(item.code, item.message)}`);
+      if (item.expected) lines.push(`  \u671F\u671B\uFF1A${item.expected}`);
+      if (item.received) lines.push(`  \u5F53\u524D\u503C\uFF1A${item.received}`);
+      if (item.allowed.length > 0) lines.push(`  \u53EF\u9009\u503C\uFF1A${item.allowed.join("\u3001")}`);
+    }
+  } else if (failure.error.details !== null) {
+    lines.push(JSON.stringify(failure.error.details, null, 2));
+  }
+  if (failure.error.recovery_command) lines.push(`\u6062\u590D\u547D\u4EE4\uFF1A${failure.error.recovery_command}`);
+  return lines.join("\n");
+}
+function collectValidationItems(details) {
+  if (!details) return [];
+  if (Array.isArray(details.errors)) {
+    return details.errors.filter(isRecord).map((item) => ({
+      code: stringValue(item.code),
+      message: stringValue(item.message),
+      paths: Array.isArray(item.paths) ? item.paths.filter((value) => typeof value === "string") : [],
+      expected: stringValue(item.expected),
+      received: stringValue(item.received),
+      allowed: Array.isArray(item.allowed) ? item.allowed.filter((value) => typeof value === "string") : []
+    }));
+  }
+  if (Array.isArray(details.issues)) {
+    const basePath = stringValue(details.path);
+    return details.issues.filter(isRecord).map((issue2) => normalizeZodIssue(issue2, basePath));
+  }
+  return [];
+}
+function normalizeZodIssue(issue2, basePath) {
+  const issuePath = Array.isArray(issue2.path) ? issue2.path.map(String) : [];
+  const allowed = Array.isArray(issue2.values) ? issue2.values.filter((value) => typeof value === "string") : [];
+  const input = issue2.input;
+  const received = input === void 0 ? void 0 : typeof input === "string" ? input : JSON.stringify(input);
+  return {
+    code: stringValue(issue2.code),
+    message: stringValue(issue2.message),
+    paths: [...basePath ? [basePath] : [], ...issuePath],
+    expected: stringValue(issue2.expected),
+    received,
+    allowed
+  };
+}
+function validationMessage(code, fallback) {
+  if (code === "invalid_type") return "\u5B57\u6BB5\u7C7B\u578B\u4E0D\u6B63\u786E";
+  if (code === "invalid_value") return "\u5B57\u6BB5\u503C\u4E0D\u5728\u5141\u8BB8\u8303\u56F4\u5185";
+  if (code === "too_small") return "\u5185\u5BB9\u6570\u91CF\u6216\u957F\u5EA6\u4E0D\u8DB3";
+  if (code === "unrecognized_keys") return "\u5305\u542B\u672A\u5B9A\u4E49\u5B57\u6BB5";
+  return fallback ?? "\u4EA7\u7269\u5B57\u6BB5\u4E0D\u7B26\u5408 Schema";
+}
+function appendResumeItems(lines, title, value, render) {
+  if (!Array.isArray(value) || value.length === 0) return;
+  lines.push("", `${title}\uFF1A`);
+  for (const item of value) {
+    if (isRecord(item)) lines.push(`- ${render(item)}`);
+  }
 }
 function asErrorRecord(error51) {
   if (isRecord(error51)) return error51;
@@ -32463,6 +35176,65 @@ function parseHosts(value) {
 }
 
 // packages/cli/src/program.ts
+async function recordTelemetry(cwd, record2) {
+  try {
+    await appendRuntimeTelemetry(cwd ?? process.cwd(), record2);
+  } catch {
+  }
+}
+function telemetryChangeId(result, details) {
+  for (const candidate of [result, details]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const record2 = candidate;
+    if (typeof record2.change_id === "string") return record2.change_id;
+    if (record2.change && typeof record2.change === "object") {
+      const change = record2.change;
+      if (typeof change.id === "string") return change.id;
+    }
+  }
+  return void 0;
+}
+function telemetryChangeIdHint(commandName, command) {
+  const localOptions = command.opts();
+  if (typeof localOptions.change === "string") return localOptions.change;
+  const processedArgs = command.processedArgs ?? [];
+  const firstArgumentCommands = /* @__PURE__ */ new Set([
+    "new",
+    "status",
+    "feedback.submit",
+    "continue",
+    "revise",
+    "revise.amend",
+    "recover.apply",
+    "validate",
+    "task.list",
+    "task.next",
+    "knowledge.package",
+    "evidence.add",
+    "uat.confirm",
+    "verify",
+    "finish",
+    "archive"
+  ]);
+  const secondArgumentCommands = /* @__PURE__ */ new Set([
+    "action.complete",
+    "execution.start",
+    "execution.complete",
+    "approval.package",
+    "approve",
+    "promote",
+    "reconcile.prepare",
+    "reconcile.complete",
+    "preflight.implementation",
+    "task.brief",
+    "task.start",
+    "task.complete",
+    "review.package",
+    "preflight"
+  ]);
+  const index = firstArgumentCommands.has(commandName) ? 0 : secondArgumentCommands.has(commandName) ? 1 : -1;
+  return index >= 0 && typeof processedArgs[index] === "string" ? processedArgs[index] : void 0;
+}
 function createProgram(dependencies = {}) {
   const stdout2 = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
@@ -32476,6 +35248,10 @@ function createProgram(dependencies = {}) {
   const program2 = new Command().name("rockspec").description("Deterministic Harness Engineering workflow for coding agents").version("0.1.0").option("--cwd <path>", "run as if started in this directory").option("--provider <skill-name>", "external Skill available in this host; repeat as needed", collect, []).option("--json", "emit a versioned JSON envelope", false).option("--summary", "project status-like command results to a compact summary", false).showHelpAfterError();
   const execute = async (commandName, command, operation) => {
     const options = command.optsWithGlobals();
+    const invocationId = randomUUID3();
+    const startedAt = /* @__PURE__ */ new Date();
+    const started = Date.now();
+    const changeIdHint = telemetryChangeIdHint(commandName, command);
     try {
       const configuredProviders = process.env.ROCKSPEC_AVAILABLE_PROVIDERS?.split(",").map((provider) => provider.trim()).filter(Boolean) ?? [];
       const installedProviders = await listInstalledProviders(options.cwd ?? process.cwd());
@@ -32486,24 +35262,55 @@ function createProgram(dependencies = {}) {
       );
       const output = options.summary && isFullStatusResult(result) ? projectStatus(result, "summary") : result;
       const rendered = options.json ? JSON.stringify(successEnvelope(commandName, output), null, 2) : formatHuman(output);
+      const changeId = telemetryChangeId(result) ?? changeIdHint;
+      await recordTelemetry(options.cwd, {
+        schema_version: 1,
+        invocation_id: invocationId,
+        command: commandName,
+        ...changeId ? { change_id: changeId } : {},
+        started_at: startedAt.toISOString(),
+        finished_at: (/* @__PURE__ */ new Date()).toISOString(),
+        duration_ms: Date.now() - started,
+        result: "success",
+        internal_error: false,
+        response_bytes: Buffer.byteLength(rendered)
+      });
       stdout2.write(`${rendered}
 `);
     } catch (error51) {
       const failure = failureEnvelope(commandName, error51);
+      const renderedFailure = JSON.stringify(failure);
+      const changeId = telemetryChangeId(void 0, failure.error.details) ?? changeIdHint;
+      await recordTelemetry(options.cwd, {
+        schema_version: 1,
+        invocation_id: invocationId,
+        command: commandName,
+        ...changeId ? { change_id: changeId } : {},
+        started_at: startedAt.toISOString(),
+        finished_at: (/* @__PURE__ */ new Date()).toISOString(),
+        duration_ms: Date.now() - started,
+        result: "error",
+        error_code: failure.error.code,
+        internal_error: failure.error.code === "INTERNAL_ERROR",
+        response_bytes: Buffer.byteLength(renderedFailure)
+      });
       if (options.json) {
         stderr.write(`${JSON.stringify(failure, null, 2)}
 `);
       } else {
-        stderr.write(`RockSpec ${failure.error.code}: ${failure.error.message}
+        stderr.write(`${formatHumanFailure(failure)}
 `);
-        if (failure.error.details !== null) {
-          stderr.write(`${JSON.stringify(failure.error.details, null, 2)}
-`);
-        }
       }
       setExitCode(errorExitCode(error51));
     }
   };
+  const telemetry = program2.command("telemetry").description("inspect privacy-safe Runtime command telemetry");
+  telemetry.command("report").argument("[change-id]").action(async (changeId, _options, command) => {
+    await execute("telemetry.report", command, () => summarizeRuntimeTelemetry(
+      command.optsWithGlobals().cwd ?? process.cwd(),
+      changeId
+    ));
+  });
   program2.action(async (_options, command) => {
     const cwd = command.optsWithGlobals().cwd;
     await execute("install", command, () => runInstallWizard({ ...cwd ? { cwd } : {} }));
@@ -32564,7 +35371,7 @@ function createProgram(dependencies = {}) {
   program2.command("init").description("initialize .rockspec at the Git repository root").action(async (_options, command) => {
     await execute("init", command, (engine) => engine.init());
   });
-  program2.command("new").description("low-level: create a Change in the workspace selected by RockSpec Skills").argument("<change-id>", "stable English kebab-case change ID").option("--title <title>", "human-readable title").option("--base <ref>", "target branch or ref used as the Change baseline").option("--managed-worktree", "record that RockSpec prepared this linked Worktree", false).option("--based-on-change <change-id>", "parent Change whose frozen delivery snapshot this Change extends").option("--reuse-workspace", "explicitly confirm sequential reuse of the current Worktree", false).option("--confirm-boundary", "confirm that this feedback is an independent Change", false).addOption(new Option("--kind <kind>", "change kind used for triage").choices([...CHANGE_KINDS]).default("feature")).addOption(new Option("--profile <profile>", "explicitly promote the selected profile").choices([...PROFILES])).option("--risk <risk>", "risk tag; repeat for multiple tags", collect, []).option("--ui-impact", "require a UI/UX prototype", false).action(async (changeId, options, command) => {
+  program2.command("new").description("low-level: create a Change in the workspace selected by RockSpec Skills").argument("<change-id>", "stable English kebab-case change ID").option("--title <title>", "human-readable title").option("--base <ref>", "target branch or ref used as the Change baseline").option("--managed-worktree", "record that RockSpec prepared this linked Worktree", false).option("--based-on-change <change-id>", "parent Change whose frozen delivery snapshot this Change extends").option("--reuse-workspace", "explicitly confirm sequential reuse of the current Worktree", false).option("--confirm-boundary", "confirm that this feedback is an independent Change", false).addOption(new Option("--kind <kind>", "change kind used for triage").choices([...CHANGE_KINDS]).default("feature")).addOption(new Option("--profile <profile>", "explicitly promote the selected profile").choices([...PROFILES])).option("--risk <risk>", "risk tag; repeat for multiple tags", collect, []).option("--ui-impact", "require a UI/UX prototype", false).addOption(new Option("--uat <policy>", "user acceptance policy").choices([...UAT_POLICIES])).action(async (changeId, options, command) => {
     await execute("new", command, async (engine) => {
       const triage = triageProfile({
         kind: options.kind,
@@ -32576,7 +35383,10 @@ function createProgram(dependencies = {}) {
         ...options.title ? { title: options.title } : {},
         ...options.base ? { baseRef: options.base } : {},
         profile: triage.profile,
+        kind: options.kind,
+        riskTags: options.risk,
         prototypeRequired: options.uiImpact,
+        ...options.uat ? { uatPolicy: options.uat } : {},
         workspaceManaged: options.managedWorktree,
         ...options.basedOnChange ? { basedOnChange: options.basedOnChange } : {},
         ...options.basedOnChange ? { reuseWorkspace: options.reuseWorkspace } : {},
@@ -32633,7 +35443,53 @@ function createProgram(dependencies = {}) {
       });
     });
   });
-  program2.command("approve").description("record a hash-bound user approval").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").option("--by <identity>", "approver identity", "user").action(async (artifactId, changeId, options, command) => {
+  const execution = program2.command("execution").description("register governed agent executions");
+  execution.command("start").argument("<action>").argument("[change-id]").requiredOption("--role <role>").addOption(new Option("--model-tier <tier>").choices(["fast", "balanced", "deep"])).option("--host-model <model>").option("--parent <execution-id>").option("--context-package <path>", "role-specific compact context package path").option("--context-hash <sha256>", "SHA-256 of the context package").action(async (actionId, changeId, options, command) => {
+    await execute("execution.start", command, (engine) => {
+      if (!EXECUTION_ROLES.includes(options.role)) {
+        throw Object.assign(new Error(`Unknown execution role: ${options.role}`), {
+          code: "INVALID_EXECUTION_ROLE",
+          details: { role: options.role, allowed: EXECUTION_ROLES }
+        });
+      }
+      return engine.startExecution({
+        action: actionId,
+        role: options.role,
+        ...changeId ? { changeId } : {},
+        ...options.modelTier ? { modelTier: options.modelTier } : {},
+        ...options.hostModel ? { hostModel: options.hostModel } : {},
+        ...options.parent ? { parentExecutionId: options.parent } : {},
+        ...options.contextPackage ? { contextPackagePath: options.contextPackage } : {},
+        ...options.contextHash ? { contextPackageHash: options.contextHash } : {}
+      });
+    });
+  });
+  execution.command("complete").argument("<execution-id>").argument("[change-id]").addOption(new Option("--outcome <outcome>").choices(["success", "error", "cancelled"]).default("success")).option("--input-tokens <number>", "fresh input token count", integer2).option("--cached-input-tokens <number>", "cached input token count", integer2).option("--output-tokens <number>", "output token count", integer2).option("--reasoning-tokens <number>", "reasoning token count", integer2).action(async (executionId, changeId, options, command) => {
+    await execute("execution.complete", command, (engine) => engine.completeExecution({
+      executionId,
+      outcome: options.outcome,
+      usage: {
+        ...options.inputTokens !== void 0 ? { input_tokens: options.inputTokens } : {},
+        ...options.cachedInputTokens !== void 0 ? { cached_input_tokens: options.cachedInputTokens } : {},
+        ...options.outputTokens !== void 0 ? { output_tokens: options.outputTokens } : {},
+        ...options.reasoningTokens !== void 0 ? { reasoning_tokens: options.reasoningTokens } : {}
+      },
+      ...changeId ? { changeId } : {}
+    }));
+  });
+  const approval = program2.command("approval").description("prepare hash-bound user approval inputs");
+  approval.command("package").argument("<gate>", "spec, design, or implementation").argument("[change-id]").action(async (gate, changeId, _options, command) => {
+    await execute("approval.package", command, (engine) => {
+      if (!isApprovalGate(gate)) {
+        throw Object.assign(new Error(`Unknown approval gate: ${gate}`), {
+          code: "INVALID_APPROVAL_GATE",
+          details: { gate, allowed: ["spec", "design", "implementation"] }
+        });
+      }
+      return engine.prepareApproval({ gate, ...changeId ? { changeId } : {} });
+    });
+  });
+  program2.command("approve").description("record a hash-bound user approval").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").option("--by <identity>", "approver identity", "user").requiredOption("--package <sha256>", "machine receipt returned by approval package; supplied by the Agent").action(async (artifactId, changeId, options, command) => {
     await execute("approve", command, (engine) => {
       if (!isApprovalGate(artifactId)) {
         throw Object.assign(new Error(`Unknown approval artifact: ${artifactId}`), {
@@ -32641,7 +35497,12 @@ function createProgram(dependencies = {}) {
           details: { artifact_id: artifactId, allowed: ["spec", "design", "implementation"] }
         });
       }
-      return engine.approve({ gate: artifactId, approvedBy: options.by, ...changeId ? { changeId } : {} });
+      return engine.approve({
+        gate: artifactId,
+        approvedBy: options.by,
+        packageHash: options.package,
+        ...changeId ? { changeId } : {}
+      });
     });
   });
   program2.command("promote").description("promote a change to a more rigorous workflow profile").argument("<profile>", "standard or strict").argument("[change-id]").action(async (profile, changeId, _options, command) => {
@@ -32675,6 +35536,15 @@ function createProgram(dependencies = {}) {
       return options.amend ? engine.amendRevision(input) : engine.revise(input);
     });
   });
+  const recover = program2.command("recover").description("consume the Engine's current Finding-bound recovery");
+  recover.command("apply").argument("[change-id]").option("--affected <id>", "affected R-/S-/D- ID; repeat as needed", collect, []).option("--reason <reason>", "optional audit reason; defaults to current Finding descriptions").option("--author-execution <execution-id>", "Revision Author execution ID required for automatic reconciliation").action(async (changeId, options, command) => {
+    await execute("recover.apply", command, (engine) => engine.applyRecovery({
+      ...changeId ? { changeId } : {},
+      affectedIds: options.affected,
+      ...options.reason ? { reason: options.reason } : {},
+      ...options.authorExecution ? { authorExecutionId: options.authorExecution } : {}
+    }));
+  });
   const reconcile = program2.command("reconcile").description("prepare or complete an independent automatic Reconciliation Review");
   reconcile.command("prepare").argument("<artifact-id>", "spec, design, or implementation").argument("[change-id]").action(async (artifactId, changeId, _options, command) => {
     await execute("reconcile.prepare", command, (engine) => {
@@ -32702,36 +35572,41 @@ function createProgram(dependencies = {}) {
       });
     });
   });
-  program2.command("validate").description("validate a change and its current gate").argument("[change-id]").option("--strict", "treat warnings as errors", false).action(async (changeId, options, command) => {
+  program2.command("validate").description("validate a change and its current gate").argument("[change-id]").option("--artifact <path>", "dry-run a Change-relative artifact against its schema").option("--strict", "treat warnings as errors", false).action(async (changeId, options, command) => {
     await execute("validate", command, async (engine) => requireValid(
-      await engine.validate({ ...changeId ? { changeId } : {}, strict: options.strict }),
+      await engine.validate({
+        ...changeId ? { changeId } : {},
+        ...options.artifact ? { artifactPath: options.artifact } : {},
+        strict: options.strict
+      }),
       "VALIDATION_FAILED"
     ));
   });
-  program2.command("preflight").description("validate Runtime installation and a stage before entering it").argument("<stage>", "currently: implementation").argument("[change-id]").option("--change <change-id>", "compatibility alias for the positional Change ID").action(async (stage, positionalId, options, command) => {
+  program2.command("preflight").description("validate Runtime installation and a stage before entering it").argument("<stage>", "implementation, acceptance, or environment").argument("[change-id]").option("--change <change-id>", "compatibility alias for the positional Change ID").action(async (stage, positionalId, options, command) => {
     await execute("preflight", command, async (engine) => {
       const changeId = resolveChangeId(positionalId, options.change);
-      if (stage !== "implementation") {
+      if (!["implementation", "acceptance", "environment"].includes(stage)) {
         throw Object.assign(new Error(`Unknown preflight stage: ${stage}`), {
           code: "INVALID_PREFLIGHT_STAGE",
-          details: { stage, allowed: ["implementation"] }
+          details: { stage, allowed: ["implementation", "acceptance", "environment"] }
         });
       }
       const cwd = command.optsWithGlobals().cwd ?? process.cwd();
       const installation = await doctorProject(cwd);
-      if (!installation.valid) {
+      if (stage === "implementation" && !installation.valid) {
         throw Object.assign(new Error("RockSpec installation is not consistent with install.lock.yaml"), {
           code: "PREFLIGHT_INSTALLATION_INVALID",
           details: installation
         });
       }
+      const result = stage === "implementation" ? await engine.preflightImplementation({ ...changeId ? { changeId } : {} }) : stage === "acceptance" ? await engine.preflightAcceptance({ ...changeId ? { changeId } : {} }) : await engine.preflightEnvironment({ ...changeId ? { changeId } : {} });
       return {
-        ...await engine.preflightImplementation({ ...changeId ? { changeId } : {} }),
-        installation: {
+        ...result,
+        ...stage === "implementation" ? { installation: {
           valid: installation.valid,
           rockspec_version: installation.rockspec_version,
           project_root: installation.project_root
-        }
+        } } : {}
       };
     });
   });
@@ -32754,8 +35629,13 @@ function createProgram(dependencies = {}) {
   task.command("brief").argument("<task-id>").argument("[change-id]").action(async (taskId, changeId, _options, command) => {
     await execute("task.brief", command, (engine) => engine.getTaskBrief({ taskId, ...changeId ? { changeId } : {} }));
   });
-  task.command("start").argument("<task-id>").argument("[change-id]").action(async (taskId, changeId, _options, command) => {
-    await execute("task.start", command, (engine) => engine.startTask({ taskId, ...changeId ? { changeId } : {} }));
+  task.command("start").argument("<task-id>").argument("[change-id]").addOption(new Option("--model-tier <tier>", "selected model tier").choices(["fast", "balanced", "deep"])).option("--host-model <model>").action(async (taskId, changeId, options, command) => {
+    await execute("task.start", command, (engine) => engine.startTask({
+      taskId,
+      ...changeId ? { changeId } : {},
+      ...options.modelTier ? { modelTier: options.modelTier } : {},
+      ...options.hostModel ? { hostModel: options.hostModel } : {}
+    }));
   });
   task.command("complete").argument("<task-id>").argument("[change-id]").option("--commit <sha>").action(async (taskId, changeId, options, command) => {
     await execute("task.complete", command, (engine) => engine.completeTask({
@@ -32788,7 +35668,7 @@ function createProgram(dependencies = {}) {
     }));
   });
   const check2 = program2.command("check").description("execute checks and record bound evidence");
-  check2.command("run").argument("<executable>").argument("[args...]").option("--change <change-id>").option("--kind <kind>", "evidence kind", "verification").option("--task <task-id>").option("--action <action-id>").action(async (executable, args, options, command) => {
+  check2.command("run").argument("<executable>").argument("[args...]").option("--change <change-id>").option("--kind <kind>", "evidence kind", "verification").option("--task <task-id>").option("--action <action-id>").option("--scenario <scenario-id>", "Scenario covered by this check; repeat as needed", collect, []).option("--finding <finding-id>", "Finding addressed by this check; repeat as needed", collect, []).option("--artifact <path>", "evidence artifact produced by this check; repeat as needed", collect, []).option("--no-cache", "force execution even when matching evidence exists").action(async (executable, args, options, command) => {
     await execute("check.run", command, async (engine) => {
       if (options.action && !ACTION_IDS.includes(options.action)) {
         throw Object.assign(new Error(`Unknown action: ${options.action}`), {
@@ -32802,19 +35682,27 @@ function createProgram(dependencies = {}) {
         kind: options.kind,
         ...options.change ? { changeId: options.change } : {},
         ...options.task ? { taskId: options.task } : {},
-        ...options.action ? { actionId: options.action } : {}
+        ...options.action ? { actionId: options.action } : {},
+        scenarioIds: options.scenario,
+        findingIds: options.finding,
+        artifactPaths: options.artifact,
+        reuseCachedEvidence: options.cache
       });
       if (result.check.exit_code !== 0) {
         throw Object.assign(new Error(`Check failed with exit code ${result.check.exit_code}`), {
           code: "CHECK_FAILED",
-          details: result.check
+          details: {
+            ...result.check,
+            change_id: result.change.id
+          },
+          state_changed: true
         });
       }
       return result;
     });
   });
   const evidence = program2.command("evidence").description("record fresh verification evidence");
-  evidence.command("add").argument("[change-id]").requiredOption("--command <command>").requiredOption("--exit-code <number>", "process exit code", integer2).option("--kind <kind>", "evidence kind", "verification").option("--workdir <path>").option("--started-at <iso-time>").option("--finished-at <iso-time>").option("--commit <sha>").option("--task <task-id>").option("--action <action-id>").option("--report <path>").action(async (changeId, options, command) => {
+  evidence.command("add").argument("[change-id]").requiredOption("--command <command>").requiredOption("--exit-code <number>", "process exit code", integer2).option("--kind <kind>", "evidence kind", "verification").option("--workdir <path>").option("--started-at <iso-time>").option("--finished-at <iso-time>").option("--commit <sha>").option("--task <task-id>").option("--action <action-id>").option("--report <path>").option("--scenario <scenario-id>", "Scenario covered by this evidence; repeat as needed", collect, []).option("--finding <finding-id>", "Finding addressed by this evidence; repeat as needed", collect, []).option("--artifact <path>", "evidence artifact; repeat as needed", collect, []).action(async (changeId, options, command) => {
     await execute("evidence.add", command, (engine) => {
       if (options.action && !ACTION_IDS.includes(options.action)) {
         throw Object.assign(new Error(`Unknown action: ${options.action}`), {
@@ -32833,15 +35721,31 @@ function createProgram(dependencies = {}) {
         ...options.commit ? { commit: options.commit } : {},
         ...options.task ? { taskId: options.task } : {},
         ...options.action ? { actionId: options.action } : {},
-        ...options.report ? { reportPath: options.report } : {}
+        ...options.report ? { reportPath: options.report } : {},
+        scenarioIds: options.scenario,
+        findingIds: options.finding,
+        artifactPaths: options.artifact
       });
     });
+  });
+  const uat = program2.command("uat").description("record conditional user acceptance confirmation");
+  uat.command("confirm").argument("[change-id]").option("--report <path>", "UAT report relative to the Change directory", "testing/uat-report.md").action(async (changeId, options, command) => {
+    await execute("uat.confirm", command, (engine) => engine.completeUat({
+      reportPath: options.report,
+      ...changeId ? { changeId } : {}
+    }));
   });
   program2.command("verify").argument("[change-id]").action(async (changeId, _options, command) => {
     await execute("verify", command, (engine) => engine.verify({ ...changeId ? { changeId } : {} }));
   });
-  program2.command("finish").argument("[change-id]").addOption(new Option("--disposition <choice>").choices(["local_merge", "push", "keep"]).default("keep")).action(async (changeId, options, command) => {
-    await execute("finish", command, (engine) => engine.finish({ disposition: options.disposition, ...changeId ? { changeId } : {} }));
+  program2.command("finish").argument("[change-id]").addOption(new Option("--disposition <choice>").choices(["local_merge", "push", "keep"]).default("keep")).option("--executed", "confirm that the recorded external disposition was executed", false).option("--result-ref <ref>", "remote or local target ref produced by the disposition").option("--result-commit <sha>", "commit observed at the disposition target").action(async (changeId, options, command) => {
+    await execute("finish", command, (engine) => engine.finish({
+      disposition: options.disposition,
+      executed: options.executed,
+      ...options.resultRef ? { resultRef: options.resultRef } : {},
+      ...options.resultCommit ? { resultCommit: options.resultCommit } : {},
+      ...changeId ? { changeId } : {}
+    }));
   });
   program2.command("archive").argument("[change-id]").action(async (changeId, _options, command) => {
     await execute("archive", command, (engine) => engine.archive({ ...changeId ? { changeId } : {} }));

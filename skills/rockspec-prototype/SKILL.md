@@ -5,6 +5,10 @@ description: 用于页面、布局、导航、交互、响应式、可访问性�
 
 # RockSpec 原型
 
+## 产物语言
+
+读取 `.rockspec/config.yaml` 的 `artifact_language`；缺省按 `zh-CN`。Prototype、Design System、说明和终端摘要使用配置语言，Schema Key、R/S/D ID、CLI/Action、Verdict 和规范关键字保持英文。
+
 只产出一个结果：完整原型包及其对技术设计的影响。保持 Provider 能力与 RockSpec 治理相互独立。
 
 ## CLI 入口
@@ -24,7 +28,7 @@ Attached 按 Open Revision 的 `interaction_mode` 执行：`reconcile` 只同步
 2. 读取 [prototype-protocol.md](references/prototype-protocol.md)。根据用户、页面、目标技术栈、现有 UI 约定、体验目标、约束、状态和非目标组装有边界的 Brief；在 Frontmatter 中绑定当前 Spec Approval Hash、Design Draft 文件 Hash 和适用的 R/S/D ID。
 3. 调用 Provider 产出设计系统、页面/状态模型、交互行为、响应式规则、可访问性约束和可检查原型。
 4. 将结果规范化为 `brief.md`、`design-system.md`、`prototype.md` 和 `assets/`，保留 Provider 归属和证据。
-5. 原型发现只影响既有视觉表达时直接修订原型；compact 把所有受影响页面、状态、交互、响应式和可访问性结果合并展示一次，用户已在当前 Revision 核对过完整视觉 Delta 时不得重复。影响技术边界时列出受影响 D/R/S 并交还 `$rockspec-design`。改变可观察业务行为、替换已批准决策或 Authority Impact 未知时不得继续自动对账；升级人工。Provider 不得自行改变 Requirements 或 Design。
+5. 原型发现只影响既有视觉表达时直接修订原型；compact 把所有受影响页面、状态、交互、响应式和可访问性结果合并为一次会话审阅投影，说明原行为、新行为、影响页面/状态、关键取舍、验证方式和待确认项，使用户通常无需逐个打开原型文件即可核对核心视觉 Delta；用户已在当前 Revision 核对过完整视觉 Delta 时不得重复。投影不完整时允许用户下钻正式原型，不得因摘要格式阻断流程。影响技术边界时列出受影响 D/R/S 并交还 `$rockspec-design`。改变可观察业务行为、替换已批准决策或 Authority Impact 未知时不得继续自动对账；升级人工。Provider 不得自行改变 Requirements 或 Design。
 6. Attached 模式提交 `design.prototype` 后必须回到 `$rockspec-design`，将原型技术影响写入 `design.md` 并再次完成 `design.technical`。只有 Engine 将 Prototype 标记为 `reconciled` 后才可请求 Design Approval。
 
 可从 [brief.md](assets/brief.md)、[design-system.md](assets/design-system.md) 和 [prototype.md](assets/prototype.md) 起草产物。完成 Attached 模式前读取 [action-design.prototype.yaml](references/action-design.prototype.yaml)。

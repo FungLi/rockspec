@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parse, stringify } from "yaml";
 import {
   type Config,
@@ -22,7 +22,12 @@ import {
   parseConfig as parseProtocolConfig,
 } from "@rockspec/protocol";
 import { RockSpecError } from "./error.js";
-import type { ChangeSnapshot, EventRecord } from "./types.js";
+import type {
+  ChangeSnapshot,
+  EventRecord,
+  RuntimeTelemetryRecord,
+  RuntimeTelemetrySummary,
+} from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,7 +44,10 @@ export interface GitWorkspaceContext {
 export const DEFAULT_CONFIG: RockSpecConfig = {
   schema_version: 1,
   default_profile: "standard",
+  artifact_language: "zh-CN",
+  max_review_rounds: 3,
   max_reconciliation_rounds: 2,
+  environment_preflight: [],
   workspace: {
     mode: "auto",
     directory: ".worktrees",
@@ -395,12 +403,87 @@ export async function readConfig(rocksRoot: string): Promise<RockSpecConfig> {
   return parseConfigText(await readFile(source, "utf8"), source);
 }
 
+function digest(content: string): string {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function snapshotText(change: ChangeSnapshot): string {
+  return stringify(parseProtocolChangeSnapshot(change), { lineWidth: 0 });
+}
+
+async function recoverStateTransaction(changeDir: string): Promise<void> {
+  const journalPath = path.join(changeDir, "runtime", "state-transaction.yaml");
+  if (!(await exists(journalPath))) return;
+  const raw = parse(await readFile(journalPath, "utf8")) as {
+    schema_version?: number;
+    before_hash?: string | null;
+    after_hash?: string;
+    after_snapshot?: unknown;
+    event?: EventRecord;
+  };
+  if (raw.schema_version !== 1 || !raw.after_hash || !raw.after_snapshot || !raw.event) {
+    throw new RockSpecError("STATE_TRANSACTION_INVALID", "Pending state transaction journal is invalid", { path: journalPath });
+  }
+  const after = parseProtocolChangeSnapshot(raw.after_snapshot);
+  const afterContent = stringify(after, { lineWidth: 0 });
+  if (digest(afterContent) !== raw.after_hash) {
+    throw new RockSpecError("STATE_TRANSACTION_INVALID", "Pending state transaction snapshot hash is invalid", { path: journalPath });
+  }
+  const statePath = path.join(changeDir, "change.yaml");
+  const currentContent = await exists(statePath) ? await readFile(statePath, "utf8") : null;
+  const currentHash = currentContent === null ? null : digest(currentContent);
+  if (currentHash !== raw.before_hash && currentHash !== raw.after_hash) {
+    throw new RockSpecError("STATE_TRANSACTION_DIVERGED", "Change state diverged while a transaction was pending", {
+      current_hash: currentHash,
+      before_hash: raw.before_hash ?? null,
+      after_hash: raw.after_hash,
+    });
+  }
+  if (currentHash !== raw.after_hash) await atomicWrite(statePath, afterContent);
+
+  const eventsPath = path.join(changeDir, "events.ndjson");
+  const events = await exists(eventsPath)
+    ? (await readFile(eventsPath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as EventRecord)
+    : [];
+  const sameSequence = events.find((event) => event.sequence === raw.event!.sequence);
+  if (sameSequence && JSON.stringify(sameSequence) !== JSON.stringify(raw.event)) {
+    throw new RockSpecError("STATE_TRANSACTION_DIVERGED", "Event sequence conflicts with a pending state transaction", {
+      sequence: raw.event.sequence,
+    });
+  }
+  if (!sameSequence) await appendEvent(changeDir, raw.event);
+  await rm(journalPath, { force: true });
+}
+
 export async function readChange(changeDir: string): Promise<ChangeSnapshot> {
+  await recoverStateTransaction(changeDir);
   const source = path.join(changeDir, "change.yaml");
   if (!(await exists(source))) {
     throw new RockSpecError("CHANGE_NOT_FOUND", "The change snapshot does not exist", { source });
   }
   return parseChangeText(await readFile(source, "utf8"), source);
+}
+
+export async function commitChangeMutation(
+  changeDir: string,
+  _before: ChangeSnapshot | null,
+  after: ChangeSnapshot,
+  event: EventRecord,
+): Promise<void> {
+  const statePath = path.join(changeDir, "change.yaml");
+  const beforeContent = await exists(statePath) ? await readFile(statePath, "utf8") : null;
+  const afterContent = snapshotText(after);
+  const journalPath = path.join(changeDir, "runtime", "state-transaction.yaml");
+  await atomicWrite(journalPath, stringify({
+    schema_version: 1,
+    before_hash: beforeContent === null ? null : digest(beforeContent),
+    after_hash: digest(afterContent),
+    after_snapshot: parseProtocolChangeSnapshot(after),
+    event,
+  }, { lineWidth: 0 }));
+  await atomicWrite(statePath, afterContent);
+  await appendEvent(changeDir, event);
+  await rm(journalPath, { force: true });
 }
 
 export async function writeChange(changeDir: string, change: ChangeSnapshot): Promise<void> {
@@ -429,6 +512,191 @@ export async function eventCount(changeDir: string): Promise<number> {
     if (code === "ENOENT") return 0;
     throw error;
   }
+}
+
+export async function appendRuntimeTelemetry(
+  cwd: string,
+  record: RuntimeTelemetryRecord,
+): Promise<void> {
+  const { rocksRoot } = await resolveRepository(cwd);
+  if (!(await exists(rocksRoot))) return;
+  const telemetryRoot = path.join(rocksRoot, "telemetry");
+  await mkdir(telemetryRoot, { recursive: true });
+  await appendFile(
+    path.join(telemetryRoot, "commands.ndjson"),
+    `${JSON.stringify(record)}\n`,
+    "utf8",
+  );
+}
+
+export async function summarizeRuntimeTelemetry(
+  cwd: string,
+  changeId?: string,
+): Promise<RuntimeTelemetrySummary> {
+  const { root, rocksRoot } = await resolveRepository(cwd);
+  const telemetryPath = path.join(rocksRoot, "telemetry", "commands.ndjson");
+  const sourcePath = path.relative(root, telemetryPath);
+  let records: RuntimeTelemetryRecord[] = [];
+  if (await exists(telemetryPath)) {
+    const lines = (await readFile(telemetryPath, "utf8")).split("\n").filter(Boolean);
+    records = lines.flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line) as Partial<RuntimeTelemetryRecord>;
+        return parsed.schema_version === 1 &&
+            typeof parsed.command === "string" &&
+            typeof parsed.duration_ms === "number" &&
+            (parsed.result === "success" || parsed.result === "error")
+          ? [parsed as RuntimeTelemetryRecord]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+  if (changeId) records = records.filter((record) => record.change_id === changeId);
+
+  const byCommand: RuntimeTelemetrySummary["by_command"] = {};
+  const byErrorCode: Record<string, number> = {};
+  for (const record of records) {
+    const aggregate = byCommand[record.command] ?? {
+      count: 0,
+      success_count: 0,
+      error_count: 0,
+      duration_ms: 0,
+      response_bytes: 0,
+    };
+    aggregate.count += 1;
+    aggregate.duration_ms += record.duration_ms;
+    aggregate.response_bytes += record.response_bytes;
+    if (record.result === "success") aggregate.success_count += 1;
+    else aggregate.error_count += 1;
+    byCommand[record.command] = aggregate;
+    if (record.error_code) byErrorCode[record.error_code] = (byErrorCode[record.error_code] ?? 0) + 1;
+  }
+
+  const agentExecutions: RuntimeTelemetrySummary["agent_executions"] = {
+    total_count: 0,
+    completed_count: 0,
+    incomplete_count: 0,
+    total_duration_ms: 0,
+    by_role: {},
+  };
+  const humanApprovalWait: RuntimeTelemetrySummary["human_approval_wait"] = {
+    count: 0,
+    total_duration_ms: 0,
+    by_gate: {},
+  };
+  const tokenUsage: RuntimeTelemetrySummary["token_usage"] = {
+    execution_count: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    by_role: {},
+  };
+  if (changeId) {
+    const activePath = path.join(rocksRoot, "changes", changeId);
+    const changeDir = await exists(activePath) ? activePath : await findArchivedChange(rocksRoot, changeId);
+    if (changeDir) {
+      const change = await readChange(changeDir);
+      for (const execution of change.execution.registry) {
+        const aggregate = agentExecutions.by_role[execution.role] ?? {
+          count: 0,
+          completed_count: 0,
+          success_count: 0,
+          error_count: 0,
+          cancelled_count: 0,
+          unknown_count: 0,
+          duration_ms: 0,
+        };
+        const usage = execution.usage ?? {};
+        const tokenAggregate = tokenUsage.by_role[execution.role] ?? {
+          execution_count: 0,
+          input_tokens: 0,
+          cached_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0,
+        };
+        tokenAggregate.execution_count += 1;
+        tokenAggregate.input_tokens += usage.input_tokens ?? 0;
+        tokenAggregate.cached_input_tokens += usage.cached_input_tokens ?? 0;
+        tokenAggregate.output_tokens += usage.output_tokens ?? 0;
+        tokenAggregate.reasoning_tokens += usage.reasoning_tokens ?? 0;
+        tokenUsage.execution_count += 1;
+        tokenUsage.input_tokens += usage.input_tokens ?? 0;
+        tokenUsage.cached_input_tokens += usage.cached_input_tokens ?? 0;
+        tokenUsage.output_tokens += usage.output_tokens ?? 0;
+        tokenUsage.reasoning_tokens += usage.reasoning_tokens ?? 0;
+        tokenUsage.by_role[execution.role] = tokenAggregate;
+        aggregate.count += 1;
+        agentExecutions.total_count += 1;
+        if (execution.completed_at) {
+          const duration = Math.max(0, Date.parse(execution.completed_at) - Date.parse(execution.started_at));
+          aggregate.completed_count += 1;
+          aggregate.duration_ms += duration;
+          if (execution.outcome === "success") aggregate.success_count += 1;
+          else if (execution.outcome === "error") aggregate.error_count += 1;
+          else if (execution.outcome === "cancelled") aggregate.cancelled_count += 1;
+          else aggregate.unknown_count += 1;
+          agentExecutions.completed_count += 1;
+          agentExecutions.total_duration_ms += duration;
+        }
+        agentExecutions.by_role[execution.role] = aggregate;
+      }
+      agentExecutions.incomplete_count = agentExecutions.total_count - agentExecutions.completed_count;
+      agentExecutions.by_role = Object.fromEntries(
+        Object.entries(agentExecutions.by_role).sort(([left], [right]) => left.localeCompare(right)),
+      );
+      tokenUsage.by_role = Object.fromEntries(
+        Object.entries(tokenUsage.by_role).sort(([left], [right]) => left.localeCompare(right)),
+      );
+
+      const eventsPath = path.join(changeDir, "events.ndjson");
+      if (await exists(eventsPath)) {
+        const pending = new Map<string, number>();
+        for (const line of (await readFile(eventsPath, "utf8")).split("\n").filter(Boolean)) {
+          let event: EventRecord;
+          try {
+            event = JSON.parse(line) as EventRecord;
+          } catch {
+            continue;
+          }
+          const prepared = /^approval\.(spec|design|implementation)\.package\.prepared$/.exec(event.event);
+          if (prepared?.[1]) pending.set(prepared[1], Date.parse(event.occurred_at));
+          const recorded = /^approval\.(spec|design|implementation)\.recorded$/.exec(event.event);
+          if (!recorded?.[1]) continue;
+          const startedAt = pending.get(recorded[1]);
+          if (startedAt === undefined) continue;
+          const duration = Math.max(0, Date.parse(event.occurred_at) - startedAt);
+          const aggregate = humanApprovalWait.by_gate[recorded[1]] ?? { count: 0, duration_ms: 0 };
+          aggregate.count += 1;
+          aggregate.duration_ms += duration;
+          humanApprovalWait.by_gate[recorded[1]] = aggregate;
+          humanApprovalWait.count += 1;
+          humanApprovalWait.total_duration_ms += duration;
+          pending.delete(recorded[1]);
+        }
+      }
+    }
+  }
+
+  return {
+    schema_version: 1,
+    source_path: sourcePath,
+    ...(changeId ? { change_id: changeId } : {}),
+    record_count: records.length,
+    success_count: records.filter((record) => record.result === "success").length,
+    error_count: records.filter((record) => record.result === "error").length,
+    internal_error_count: records.filter((record) => record.internal_error).length,
+    total_duration_ms: records.reduce((total, record) => total + record.duration_ms, 0),
+    first_started_at: records[0]?.started_at ?? null,
+    last_finished_at: records.at(-1)?.finished_at ?? null,
+    by_command: Object.fromEntries(Object.entries(byCommand).sort(([left], [right]) => left.localeCompare(right))),
+    by_error_code: Object.fromEntries(Object.entries(byErrorCode).sort(([left], [right]) => left.localeCompare(right))),
+    agent_executions: agentExecutions,
+    human_approval_wait: humanApprovalWait,
+    token_usage: tokenUsage,
+  };
 }
 
 export async function activeChangeIds(rocksRoot: string): Promise<string[]> {

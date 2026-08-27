@@ -23,7 +23,7 @@ executor:
       - "Plan 包含复杂 Task DAG、多个模块或大量跨 Task 接口。"
     record_selection: true
 reads:
-  artifacts: ["已批准的 specs/**/*.md", "design.md", "prototype/**", "plan.md", "tasks.md", "tasks/T-*.md"]
+  artifacts: ["Readiness Role Context Package", "已批准的 specs/**/*.md", "design.md", "prototype/**", "plan.md", "tasks.md", "tasks/T-*.md"]
   repository: ["仓库规则", "已声明接口", "环境和测试事实"]
 writes:
   artifacts: ["reviews/readiness-review*.md"]
@@ -35,7 +35,7 @@ completion:
     - "每个 Finding 声明 classification 和 authority_impact。"
     - "Review Hash 与当前 Design、Prototype、Plan 和 Tasks 一致。"
     - "Strict 聚合保留两份原始报告和全部 Finding。"
-    - "PASS 后运行 preflight implementation；安装一致性、审批新鲜度、Task DAG、Recovery 和两种 Task Review 路径全部通过后才请求或续期实施审批。"
+    - "PASS 后运行 preflight implementation；安装一致性、审批新鲜度、Task DAG、Recovery 和三种 Task Review 路径全部通过后才请求或续期实施审批。"
 outcomes:
   pass: []
   changes_required: ["design.technical", "plan.create"]
@@ -43,3 +43,4 @@ outcomes:
 requires_user_approval_on_pass: "首次 Implementation 或 gate_policies.implementation=human；auto 改由 reconcile.implementation 续期，preserve 不重复审批"
 invariants:
   - "Reviewer 不得编辑被评审产物；普通 Review 不得替代首次用户审批，Reconciliation Review 只能续期已有 Authority Baseline。"
+  - "Finding 严重度只决定阻塞和验证深度；保持批准后置条件的内部技术修复使用 derived_gap + unchanged，不得让用户选择锁、SQL 或测试机制。"

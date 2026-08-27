@@ -13,6 +13,7 @@ export const WORKFLOW_STATES = [
   "READY",
   "IMPLEMENTING",
   "ACCEPTANCE_VALIDATING",
+  "UAT_PENDING",
   "FINAL_REVIEW",
   "VERIFYING",
   "READY_TO_FINISH",
@@ -36,6 +37,7 @@ export const ACTION_IDS = [
   "task.execute",
   "task.review",
   "acceptance.validate",
+  "acceptance.uat",
   "delivery.review",
   "change.verify",
   "knowledge.evolve",
@@ -59,6 +61,28 @@ export type RevisionMode = (typeof REVISION_MODES)[number];
 export const FEEDBACK_INTERACTION_MODES = ["reconcile", "compact", "full"] as const;
 
 export type FeedbackInteractionMode = (typeof FEEDBACK_INTERACTION_MODES)[number];
+
+export const UAT_POLICIES = ["required", "optional", "not_applicable"] as const;
+
+export type UatPolicy = (typeof UAT_POLICIES)[number];
+
+export const EXECUTION_ROLES = [
+  "requirements_author",
+  "requirements_reviewer",
+  "design_author",
+  "planner",
+  "readiness_reviewer",
+  "task_implementer",
+  "task_reviewer",
+  "acceptance_engineer",
+  "delivery_reviewer",
+  "revision_author",
+  "reconciliation_reviewer",
+  "knowledge_author",
+  "knowledge_reviewer",
+] as const;
+
+export type ExecutionRole = (typeof EXECUTION_ROLES)[number];
 
 export const REVISION_KINDS = ["upstream", "remediation"] as const;
 

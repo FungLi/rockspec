@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SPEC_OPERATIONS, type SpecOperation } from "./constants.js";
+import { scanMarkdown } from "./markdown.js";
 import {
   ProtocolValidationError,
   type ValidationIssue,
@@ -68,8 +69,32 @@ interface DraftRequirement {
   line: number;
 }
 
+export interface SourceSpan {
+  startLine: number;
+  endLine: number;
+}
+
+export interface ScenarioSource {
+  id: string;
+  span: SourceSpan;
+}
+
+export interface RequirementSource {
+  id: string;
+  span: SourceSpan;
+  preambleSpan: SourceSpan;
+  scenarios: ScenarioSource[];
+}
+
+export interface ParsedSpecSource {
+  document: SpecDocument;
+  lines: string[];
+  requirements: RequirementSource[];
+}
+
 export function validateSpec(markdown: string): ValidationResult<SpecDocument> {
   const lines = markdown.split(/\r?\n/);
+  const scanned = scanMarkdown(markdown);
   const issues: ValidationIssue[] = [];
   const drafts: DraftRequirement[] = [];
   let operation: SpecOperation | undefined;
@@ -100,6 +125,7 @@ export function validateSpec(markdown: string): ValidationResult<SpecDocument> {
 
   lines.forEach((line, index) => {
     const lineNumber = index + 1;
+    if (scanned[index]?.inFence) return;
     const operationMatch = /^##\s+(ADDED|MODIFIED|REMOVED|RENAMED) Requirements\s*$/.exec(line);
     if (operationMatch !== null) {
       flushRequirement();
@@ -263,6 +289,37 @@ export function parseSpec(markdown: string): SpecDocument {
   const result = validateSpec(markdown);
   if (result.valid) return result.data;
   throw new ProtocolValidationError("Invalid RockSpec spec", result.issues);
+}
+
+export function parseSpecSource(markdown: string): ParsedSpecSource {
+  const document = parseSpec(markdown);
+  const lines = markdown.split(/\r?\n/);
+  const scanned = scanMarkdown(markdown);
+  const requirementStarts = scanned
+    .filter((line) => line.heading?.level === 3 && /^R-\d{3,}\s+Requirement:/.test(line.heading.title))
+    .map((line) => ({ id: /^((?:R)-\d{3,})/.exec(line.heading!.title)![1]!, startLine: line.index }));
+  const requirements = document.requirements.map((requirement) => {
+    const located = requirementStarts.find((candidate) => candidate.id === requirement.id);
+    if (!located) throw new ProtocolValidationError(`Missing source span for ${requirement.id}`, []);
+    const endLine = scanned.find((line) => line.index > located.startLine && line.heading && line.heading.level <= 3)?.index ?? lines.length;
+    const scenarioStarts = scanned
+      .filter((line) => line.index > located.startLine && line.index < endLine && line.heading?.level === 4)
+      .map((line) => ({ id: /^(S-\d{3,})\s+Scenario:/.exec(line.heading!.title)?.[1], startLine: line.index }))
+      .filter((item): item is { id: string; startLine: number } => Boolean(item.id));
+    const scenarios = requirement.scenarios.map((scenario) => {
+      const scenarioStart = scenarioStarts.find((candidate) => candidate.id === scenario.id);
+      if (!scenarioStart) throw new ProtocolValidationError(`Missing source span for ${scenario.id}`, []);
+      const next = scenarioStarts.find((candidate) => candidate.startLine > scenarioStart.startLine);
+      return { id: scenario.id, span: { startLine: scenarioStart.startLine, endLine: next?.startLine ?? endLine } };
+    });
+    return {
+      id: requirement.id,
+      span: { startLine: located.startLine, endLine },
+      preambleSpan: { startLine: located.startLine, endLine: scenarios[0]?.span.startLine ?? endLine },
+      scenarios,
+    };
+  });
+  return { document, lines, requirements };
 }
 
 export function assertValidSpec(markdown: string): void {

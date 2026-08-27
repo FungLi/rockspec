@@ -22,6 +22,7 @@ export const WORKFLOW_PRIMARY_ACTIONS_BY_PROFILE: Readonly<Record<WorkflowProfil
     "task.execute",
     "task.review",
     "acceptance.validate",
+    "acceptance.uat",
     "delivery.review",
     "change.verify",
     "knowledge.evolve",
@@ -38,6 +39,7 @@ export const WORKFLOW_PRIMARY_ACTIONS_BY_PROFILE: Readonly<Record<WorkflowProfil
     "task.execute",
     "task.review",
     "acceptance.validate",
+    "acceptance.uat",
     "delivery.review",
     "change.verify",
     "knowledge.evolve",
@@ -57,6 +59,7 @@ export const ACTION_PROFILES: Readonly<Record<ActionId, readonly WorkflowProfile
   "task.execute": ["lite", "standard", "strict"],
   "task.review": ["standard", "strict"],
   "acceptance.validate": ["standard", "strict"],
+  "acceptance.uat": ["standard", "strict"],
   "delivery.review": ["standard", "strict"],
   "change.verify": ["lite", "standard", "strict"],
   "knowledge.evolve": ["lite", "standard", "strict"],
@@ -96,6 +99,7 @@ const ENTRY_SKILL_BY_ACTION: Readonly<Record<string, EntrySkill>> = {
   "task.execute": "rockspec-implement",
   "task.review": "rockspec-review",
   "acceptance.validate": "rockspec-acceptance",
+  "acceptance.uat": "rockspec-acceptance",
   "delivery.review": "rockspec-review",
   "change.verify": "rockspec-finish",
   "knowledge.evolve": "rockspec-evolve",
@@ -235,7 +239,7 @@ export function recoveryDirective(change: ChangeSnapshot): RecoveryDirective | n
         : "unchanged";
     const autoClassifications = new Set(["consistency_fix", "derived_gap", "implementation_fix"]);
     const approvalPolicy = authorityDelta === "unchanged" &&
-        open.every((finding) => finding.severity !== "critical" && autoClassifications.has(finding.classification))
+        open.every((finding) => autoClassifications.has(finding.classification))
       ? "auto"
       : "human";
     return {
@@ -459,6 +463,12 @@ export function workflowAdvice(
         alternatives: [],
         allowed: ["acceptance.validate", "validate"],
       };
+    case "UAT_PENDING":
+      return {
+        recommended: recommendation("acceptance.uat", "Confirm the accepted Scenarios through the configured user acceptance policy"),
+        alternatives: [],
+        allowed: ["acceptance.uat", "validate"],
+      };
     case "FINAL_REVIEW":
       return {
         recommended: recommendation("delivery.review", "Review the final code and all TE assets"),
@@ -481,7 +491,12 @@ export function workflowAdvice(
       }
       if (!change.finished_at) {
         return {
-          recommended: recommendation("finish", "Choose a platform-independent branch disposition"),
+          recommended: recommendation(
+            "finish",
+            change.finish_disposition?.status === "pending_external_action"
+              ? "Execute the recorded external disposition and confirm its target Ref and Commit"
+              : "Choose a platform-independent branch disposition",
+          ),
           alternatives: [],
           allowed: ["finish", "validate"],
         };
@@ -516,6 +531,7 @@ export function assertActionAllowed(change: ChangeSnapshot, action: ActionId): v
     "task.execute": ["READY", "IMPLEMENTING"],
     "task.review": ["IMPLEMENTING"],
     "acceptance.validate": ["ACCEPTANCE_VALIDATING"],
+    "acceptance.uat": ["UAT_PENDING"],
     "delivery.review": ["FINAL_REVIEW"],
     "change.verify": ["IMPLEMENTING", "VERIFYING"],
     "knowledge.evolve": ["READY_TO_FINISH"],

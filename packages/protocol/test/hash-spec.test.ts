@@ -4,6 +4,7 @@ import {
   canonicalStringify,
   hashCanonical,
   parseSpec,
+  parseSpecSource,
   sha256,
   validateSpec,
 } from "../src/index.js";
@@ -96,5 +97,43 @@ describe("RockSpec markdown specs", () => {
         expect.arrayContaining(["duplicate_requirement_id", "duplicate_scenario_id"]),
       );
     }
+  });
+
+  it("ignores headings inside backtick and tilde fences while preserving source spans", () => {
+    const markdown = `## ADDED Requirements
+
+### R-001 Requirement: Fence-aware projection
+The system MUST preserve examples.
+
+#### S-001 Scenario: Backtick example
+- GIVEN a command example
+- WHEN it is projected
+
+\`\`\`bash
+# not a Markdown heading
+#### S-999 Scenario: not authority
+\`\`\`
+
+- THEN content after the fence remains
+
+#### S-002 Scenario: Tilde example
+- GIVEN another command example
+- WHEN it is projected
+
+~~~bash
+# still not a Markdown heading
+~~~
+
+- THEN the second scenario remains
+Trailing scenario guidance remains owned by S-002.
+`;
+    const parsed = parseSpecSource(markdown);
+    expect(parsed.document.requirements[0]?.scenarios.map((scenario) => scenario.id)).toEqual(["S-001", "S-002"]);
+    const first = parsed.requirements[0]?.scenarios[0];
+    const second = parsed.requirements[0]?.scenarios[1];
+    expect(parsed.lines.slice(first?.span.startLine, first?.span.endLine).join("\n"))
+      .toContain("content after the fence remains");
+    expect(parsed.lines.slice(second?.span.startLine, second?.span.endLine).join("\n"))
+      .toContain("Trailing scenario guidance remains owned by S-002.");
   });
 });

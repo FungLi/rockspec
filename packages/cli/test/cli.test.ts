@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -57,7 +58,7 @@ async function run(root: string, args: string[]): Promise<{
 async function runWithEngine(
   root: string,
   args: string[],
-  engine: Partial<Pick<RockSpecEngine, "revise" | "amendRevision" | "prepareReconciliation" | "completeReconciliation" | "submitFeedback">>,
+  engine: Partial<Pick<RockSpecEngine, "revise" | "amendRevision" | "applyRecovery" | "completeExecution" | "prepareReconciliation" | "completeReconciliation" | "submitFeedback">>,
 ): Promise<{ stdout: string; stderr: string; exitCode: number; json: Record<string, unknown> | undefined }> {
   let stdout = "";
   let stderr = "";
@@ -87,6 +88,13 @@ async function writeArtifact(
   await writeFile(path.join(root, ".rockspec", "changes", changeId, relativePath), content);
 }
 
+async function writeImplementedReport(root: string, changeId: string, relativePath: string, body: string): Promise<void> {
+  const current = await readFile(path.join(root, ".rockspec", "changes", changeId, relativePath), "utf8");
+  const frontmatterEnd = current.indexOf("\n---\n", 4);
+  if (!current.startsWith("---\n") || frontmatterEnd < 0) throw new Error(`Missing generated report metadata in ${relativePath}`);
+  await writeArtifact(root, changeId, relativePath, `${current.slice(0, frontmatterEnd + 5)}\n# Implementer Report\n\n${body}\n`);
+}
+
 async function approvedSpecHash(root: string, changeId: string): Promise<string> {
   const snapshot = parse(await readFile(
     path.join(root, ".rockspec", "changes", changeId, "change.yaml"),
@@ -102,14 +110,63 @@ async function writeCodeReview(
   changeId: string,
   relativePath: string,
   subject: { base_commit: string; head_commit: string; diff_hash: string },
-  reviewerExecutionId: string,
+  _reviewerExecutionId?: string,
 ): Promise<void> {
+  const action = relativePath.includes("delivery") ? "delivery.review" : "task.review";
+  const role = relativePath.includes("delivery") ? "delivery_reviewer" : "task_reviewer";
+  const taskId = /^reviews\/tasks\/(T-\d{3,})-review\.md$/.exec(relativePath)?.[1];
+  const packagePath = action === "delivery.review"
+    ? `runtime/reviews/delivery-${subject.base_commit.slice(0, 7)}..${subject.head_commit.slice(0, 7)}.diff`
+    : `runtime/reviews/task-${taskId}-${subject.base_commit.slice(0, 7)}..${subject.head_commit.slice(0, 7)}.diff`;
+  const packageContent = await readFile(path.join(root, ".rockspec", "changes", changeId, packagePath));
+  const reviewerExecutionId = await startExecutionCli(root, changeId, action, role, {
+    path: packagePath,
+    hash: `sha256:${createHash("sha256").update(packageContent).digest("hex")}`,
+  });
   await writeArtifact(
     root,
     changeId,
     relativePath,
-    `---\nschema_version: 1\nverdict: PASS\nreviewer_execution_id: ${reviewerExecutionId}\nsubject:\n  base_commit: ${subject.base_commit}\n  head_commit: ${subject.head_commit}\n  diff_hash: ${subject.diff_hash}\nround: 0\nfindings: []\n---\n\n# Review\n\nVerdict: PASS\n`,
+    `---\nschema_version: 1\nverdict: PASS\nreviewer_execution_id: ${reviewerExecutionId}\nsubject:\n  base_commit: ${subject.base_commit}\n  head_commit: ${subject.head_commit}\n  diff_hash: ${subject.diff_hash}\nround: 0\nscope_assessment: []\nfindings: []\n---\n\n# Review\n\nVerdict: PASS\n`,
   );
+}
+
+async function startExecutionCli(
+  root: string,
+  changeId: string,
+  action: string,
+  role: string,
+  context?: { path: string; hash: string },
+): Promise<string> {
+  const result = await run(root, [
+    "execution", "start", action, changeId, "--role", role,
+    ...(context ? ["--context-package", context.path, "--context-hash", context.hash] : []),
+  ]);
+  expect(result.exitCode, result.stderr).toBe(0);
+  return ((result.json?.data as { started_execution: { id: string } }).started_execution.id);
+}
+
+async function writeStageReview(
+  root: string,
+  changeId: string,
+  relativePath: string,
+  action: "requirements.review" | "readiness.review",
+): Promise<void> {
+  const role = action === "requirements.review" ? "requirements_reviewer" : "readiness_reviewer";
+  const executionId = await startExecutionCli(root, changeId, action, role);
+  await writeArtifact(
+    root,
+    changeId,
+    relativePath,
+    `---\nschema_version: 1\nverdict: PASS\nreviewer_execution_id: ${executionId}\nfindings: []\n---\n\n# Review\n\nVerdict: PASS\n`,
+  );
+}
+
+async function approveCli(root: string, changeId: string, gate: "spec" | "design" | "implementation") {
+  const prepared = await run(root, ["approval", "package", gate, changeId]);
+  expect(prepared.exitCode, prepared.stderr).toBe(0);
+  const hash = (prepared.json?.data as { hash: string }).hash;
+  return run(root, ["approve", gate, changeId, "--package", hash]);
 }
 
 describe("rockspec CLI", () => {
@@ -160,6 +217,18 @@ describe("rockspec CLI", () => {
       },
     });
     expect((summary.json?.data as Record<string, unknown>).evidence).toBeUndefined();
+
+    const resume = await run(root, ["status", "compact-status", "--view", "resume"]);
+    expect(resume.json).toMatchObject({
+      ok: true,
+      data: {
+        view: "resume",
+        change_id: "compact-status",
+        remaining_tasks: [],
+        open_executions: [],
+        resume_note: expect.stringContaining("Engine 已持久化状态"),
+      },
+    });
 
     const full = await run(root, ["status", "compact-status", "--full"]);
     expect(full.json).toMatchObject({
@@ -306,11 +375,17 @@ describe("rockspec CLI", () => {
         recommended_next: { action: "knowledge.evolve", entry_skill: "rockspec-evolve" },
       },
     });
+    const knowledgeAuthor = await startExecutionCli(
+      root,
+      "rename-submit-button",
+      "knowledge.evolve.author",
+      "knowledge_author",
+    );
     await writeArtifact(
       root,
       "rename-submit-button",
       "knowledge-delta.md",
-      "---\nschema_version: 1\nchange_id: rename-submit-button\nauthor_execution_id: cli-knowledge-author\noutcome: no_change\nupdates: []\n---\n\n# Knowledge Delta\n\nNo reusable knowledge.\n",
+      `---\nschema_version: 1\nchange_id: rename-submit-button\nauthor_execution_id: ${knowledgeAuthor}\noutcome: no_change\nupdates: []\n---\n\n# Knowledge Delta\n\nNo reusable knowledge.\n`,
     );
     expect((await run(root, ["knowledge", "package", "rename-submit-button"])).json).toMatchObject({
       data: { already_evolved: false, status: "pending", candidate_hashes: {} },
@@ -354,12 +429,12 @@ describe("rockspec CLI", () => {
     const id = "simplify-costly-behavior";
     await run(root, ["init"]);
     await run(root, ["new", id, "--profile", "standard"]);
-    await writeArtifact(root, id, "proposal.md", "# Proposal\n\n## Why\n\nUsers need the behavior.\n");
+    await writeArtifact(root, id, "proposal.md", "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# Proposal\n\n## Why\n\nUsers need the behavior.\n");
     await writeArtifact(root, id, "specs/change/spec.md", "## ADDED Requirements\n\n### R-001 Requirement: Costly behavior\n\nThe system MUST provide it.\n\n#### S-001 Scenario: Success\n\n- GIVEN a user\n- WHEN they request it\n- THEN it succeeds\n");
     await run(root, ["action", "complete", "requirements.clarify", id]);
-    await writeArtifact(root, id, "reviews/requirements-review.md", "# Review\n\nVerdict: PASS\n");
+    await writeStageReview(root, id, "reviews/requirements-review.md", "requirements.review");
     await run(root, ["action", "complete", "requirements.review", id, "--verdict", "PASS"]);
-    await run(root, ["approve", "spec", id]);
+    await approveCli(root, id, "spec");
 
     const revision = await run(root, [
       "revise", id,
@@ -463,6 +538,36 @@ describe("rockspec CLI", () => {
     });
   });
 
+  it("dispatches recover apply without caller-supplied Review bindings", async () => {
+    const root = await createRepository();
+    let received: Parameters<RockSpecEngine["applyRecovery"]>[0] | undefined;
+    const result = await runWithEngine(root, [
+      "recover", "apply", "recover-task-design",
+      "--affected", "D-003",
+      "--author-execution", "recovery-author",
+    ], {
+      applyRecovery: async (input) => {
+        received = input;
+        return {
+          current_state: "SPEC_APPROVED",
+          recovery: null,
+        } as Awaited<ReturnType<RockSpecEngine["applyRecovery"]>>;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json).toMatchObject({
+      ok: true,
+      command: "recover.apply",
+      data: { current_state: "SPEC_APPROVED" },
+    });
+    expect(received).toEqual({
+      changeId: "recover-task-design",
+      affectedIds: ["D-003"],
+      authorExecutionId: "recovery-author",
+    });
+  });
+
   it("dispatches Reconciliation prepare and complete commands", async () => {
     const root = await createRepository();
     const calls: string[] = [];
@@ -519,7 +624,7 @@ describe("rockspec CLI", () => {
       root,
       id,
       "proposal.md",
-      "# Proposal\n\n## Why\n\nUsers need portable profile data.\n\n## What\n\nAdd profile export behavior.\n",
+      "---\nschema_version: 1\nnon_goals: []\nassumptions: []\nopen_questions: []\n---\n\n# Proposal\n\n## Why\n\nUsers need portable profile data.\n\n## What\n\nAdd profile export behavior.\n",
     );
     await writeArtifact(
       root,
@@ -528,9 +633,9 @@ describe("rockspec CLI", () => {
       "## ADDED Requirements\n\n### R-001 Requirement: Export a profile\n\nThe system MUST export valid profile data.\n\n#### S-001 Scenario: Export succeeds\n\n- GIVEN a user has valid profile data\n- WHEN the user requests an export\n- THEN the system returns the profile data\n",
     );
     expect((await run(root, ["action", "complete", "requirements.clarify", id])).exitCode).toBe(0);
-    await writeArtifact(root, id, "reviews/requirements-review.md", "# Review\n\nVerdict: PASS\n");
+    await writeStageReview(root, id, "reviews/requirements-review.md", "requirements.review");
     expect((await run(root, ["action", "complete", "requirements.review", id, "--verdict", "PASS"])).exitCode).toBe(0);
-    expect((await run(root, ["approve", "spec", id])).json).toMatchObject({
+    expect((await approveCli(root, id, "spec")).json).toMatchObject({
       data: {
         current_state: "SPEC_APPROVED",
         recommended_next: { entry_skill: "rockspec-design", action: "design.technical" },
@@ -542,10 +647,10 @@ describe("rockspec CLI", () => {
       root,
       id,
       "design.md",
-      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nExport through the existing public service boundary.\n\n## Decisions\n\n### D-001\n\nUse a deterministic JSON response.\n`,
+      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nExport through the existing public service boundary.\n\n## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse the existing service instead of adding a parallel export stack.\n\n## Decisions\n\n### D-001 Deterministic export\n\n#### 目标与覆盖范围\n\nCover R-001 and S-001 only.\n\n#### 架构决策\n\nUse a deterministic JSON response.\n\n#### 模块与职责\n\nThe existing export service owns serialization.\n\n#### 接口与数据流\n\nThe request flows through the public export service to JSON serialization.\n\n#### 失败与边界行为\n\nInvalid profile data returns the existing validation error.\n\n#### 安全与隐私\n\nDo not log profile data.\n\n#### 兼容、迁移与回滚\n\nPreserve the public API; rollback reverts the implementation commit.\n\n#### 验证策略\n\nRun focused export and regression tests.\n\n#### 取舍与剩余风险\n\nPrefer compatibility; residual risk is None.\n\n## 未解决风险\n\nNone.\n`,
     );
     await run(root, ["action", "complete", "design.technical", id]);
-    expect((await run(root, ["approve", "design", id])).json).toMatchObject({
+    expect((await approveCli(root, id, "design")).json).toMatchObject({
       data: {
         current_state: "DESIGN_APPROVED",
         recommended_next: { entry_skill: "rockspec-plan", action: "plan.create" },
@@ -563,10 +668,10 @@ describe("rockspec CLI", () => {
       root,
       id,
       "tasks/T-001.md",
-      "---\nschema_version: 1\nid: T-001\ntitle: Implement profile export\ndependencies: []\nrequirement_ids: [R-001]\nscenario_ids: [S-001]\nacceptance_criteria: [Profile data is exported.]\nconsumes: []\nproduces: []\nallowed_paths: [profile-export.ts]\n---\n\n# T-001\n\n## Goal\n\nImplement profile export.\n\n## Traceability\n\n- R-001\n- S-001\n- D-001\n\n## Acceptance Criteria\n\nProfile data is exported.\n\n## Verification\n\nRun focused tests.\n",
+      "---\nschema_version: 1\nid: T-001\ntitle: Implement profile export\ndependencies: []\nrequirement_ids: [R-001]\nscenario_ids: [S-001]\ndecision_ids: [D-001]\nacceptance_criteria: [Profile data is exported.]\nconsumes: []\nproduces: []\nallowed_paths: [profile-export.ts]\n---\n\n# T-001\n\n## Goal\n\nImplement profile export.\n\n## Traceability\n\n- R-001\n- S-001\n- D-001\n\n## Acceptance Criteria\n\nProfile data is exported.\n\n## Verification\n\nRun focused tests.\n",
     );
     await run(root, ["action", "complete", "plan.create", id]);
-    await writeArtifact(root, id, "reviews/readiness-review.md", "# Review\n\nVerdict: PASS\n");
+    await writeStageReview(root, id, "reviews/readiness-review.md", "readiness.review");
     await run(root, ["action", "complete", "readiness.review", id, "--verdict", "PASS"]);
     expect((await run(root, ["preflight", "implementation", "--change", id])).json).toMatchObject({
       ok: true,
@@ -575,28 +680,28 @@ describe("rockspec CLI", () => {
         valid: true,
         change_id: id,
         task_count: 1,
-        review_modes: ["product", "scope_blocked"],
+        review_modes: ["product", "scope_blocked", "historical_attribution"],
         installation: { valid: true, project_root: root },
       },
     });
-    expect((await run(root, ["approve", "implementation", id])).json).toMatchObject({
+    expect((await approveCli(root, id, "implementation")).json).toMatchObject({
       data: {
         current_state: "READY",
         recommended_next: { entry_skill: "rockspec-implement", action: "task.execute" },
       },
     });
 
-    await run(root, ["task", "start", "T-001", id]);
+    expect((await run(root, ["task", "start", "T-001", id])).exitCode).toBe(0);
     await writeFile(path.join(root, "profile-export.ts"), "export const profileExport = true;\n");
     await writeArtifact(root, id, "reviews/tasks/T-001-review.md", "# Review\n\nVerdict: PASS\n");
     await execFileAsync("git", ["add", "."], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat(profile): [T-001] add profile export"], { cwd: root });
     const taskCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
-    await writeArtifact(
+    await writeImplementedReport(
       root,
       id,
       "runtime/tasks/T-001/implementer-report.md",
-      "# Implementer Report\n\nImplemented and verified profile export.\n",
+      "Implemented and verified profile export.",
     );
     await run(root, [
       "check", "run", "--change", id, "--task", "T-001", "--",
@@ -627,16 +732,19 @@ describe("rockspec CLI", () => {
     await execFileAsync("git", ["commit", "-m", "test(profile): add export acceptance coverage"], { cwd: root });
     const acceptanceCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
     await writeArtifact(root, id, "testing/test-plan.md", "# Acceptance Test Plan\n\nCover S-001 through E2E.\n");
+    const acceptanceEvidence = await run(root, [
+      "check", "run", "--change", id, "--action", "acceptance.validate", "--scenario", "S-001", "--",
+      process.execPath, "-e", "process.exit(0)",
+    ]);
+    expect(acceptanceEvidence.exitCode, acceptanceEvidence.stderr).toBe(0);
+    const acceptanceEvidenceId = (acceptanceEvidence.json?.data as { check: { evidence_id: string } }).check.evidence_id;
+    const acceptanceReviewer = await startExecutionCli(root, id, "acceptance.validate", "acceptance_engineer");
     await writeArtifact(
       root,
       id,
       "testing/test-report.md",
-      `---\nschema_version: 1\nverdict: PASS\nreviewer_execution_id: acceptance-reviewer\ncommit: ${acceptanceCommit}\nfindings: []\n---\n\n# Acceptance Test Report\n\nVerdict: PASS\n`,
+      `---\nschema_version: 1\nverdict: PASS\nreviewer_execution_id: ${acceptanceReviewer}\ncommit: ${acceptanceCommit}\nscenario_coverage:\n  - scenario_id: S-001\n    test_ids: [AT-001]\n    evidence_ids: [${acceptanceEvidenceId}]\nui_evidence: []\nfindings: []\n---\n\n# Acceptance Test Report\n\nVerdict: PASS\n`,
     );
-    await run(root, [
-      "check", "run", "--change", id, "--action", "acceptance.validate", "--",
-      process.execPath, "-e", "process.exit(0)",
-    ]);
     expect((await run(root, ["action", "complete", "acceptance.validate", id, "--verdict", "PASS"])).json)
       .toMatchObject({
         data: {
@@ -669,11 +777,12 @@ describe("rockspec CLI", () => {
         recommended_next: { entry_skill: "rockspec-evolve", action: "knowledge.evolve" },
       },
     });
+    const standardKnowledgeAuthor = await startExecutionCli(root, id, "knowledge.evolve.author", "knowledge_author");
     await writeArtifact(
       root,
       id,
       "knowledge-delta.md",
-      `---\nschema_version: 1\nchange_id: ${id}\nauthor_execution_id: standard-knowledge-author\noutcome: no_change\nupdates: []\n---\n\n# Knowledge Delta\n\nNo reusable knowledge.\n`,
+      `---\nschema_version: 1\nchange_id: ${id}\nauthor_execution_id: ${standardKnowledgeAuthor}\noutcome: no_change\nupdates: []\n---\n\n# Knowledge Delta\n\nNo reusable knowledge.\n`,
     );
     await run(root, ["action", "complete", "knowledge.evolve", id]);
     expect((await run(root, ["gate", "finish", id])).json).toMatchObject({

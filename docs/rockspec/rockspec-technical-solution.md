@@ -1,6 +1,6 @@
 # RockSpec Harness Engineering 技术方案
 
-> 文档状态：Draft v0.15
+> 文档状态：Draft v0.16
 > 目标读者：RockSpec 设计者、实现者和工作流维护者  
 > 本文用于整体方案评审，不代表所有细节已经冻结。
 
@@ -28,8 +28,14 @@
 20. Task 实施固定 Task Base、冻结 Brief、`allowed_paths`、单 Commit 和实际执行证据；Task/Delivery Review 只审 Engine 生成的固定 Review Package，并用结构化 Frontmatter 绑定 Reviewer execution、Review Subject、轮次和 Findings。
 21. Design 和 Plan 的 R/S 覆盖、Task DAG、跨 Task 接口依赖由 Engine 确定性校验；不为 Design 新增 Reviewer。
 22. 首版提供 npm 一键安装器：项目内安装 Canonical Skills、自包含 Runtime、双宿主适配和安装 Lock；外部 Skill 不进入 npm 包，只能从用户明确提供或本机发现的可信来源复制，未知 License 必须显式确认。
-23. Research、Requirements 和 Design 采用 Inline 作者 + Interactive 在线协作：主会话逐问、比较方案、逐章节确认后才写最终产物；Plan 继续 Inline 一次生成。会话确认不替代 Reviewer 或绑定 Hash 的正式审批。
-24. 跨阶段内容变化使用 Intent Envelope + Reconciliation Loop：首次 Spec、Design、Implementation Gate 始终由用户批准；只修复一致性、下游派生或既定实现且不改变 Authority Baseline 的 Revision 可由独立 Reviewer 自动续期既有 Gate；意图/决策/风险变化、Critical、边界未知、Reviewer 分歧或两轮未收敛必须返回用户。实施后 Revision 仍须绑定 non-PASS Review/Open Finding，并保留 Completed Task 和活动 Attempt。
+23. Research、Requirements 和 Design 采用 Inline 作者 + Interactive 在线协作。Requirements/Design 使用决策驱动交互：完整章节写入产物，但只有无法从既有 Authority 和仓库事实推导、且会改变产品结果或重大承诺的开放决策才暂停；相关决策合并成一个 Decision Package。Plan 继续 Inline 一次生成。Decision Package 不替代 Reviewer 或绑定 Hash 的正式审批。
+24. 跨阶段内容变化使用 Intent Envelope + Reconciliation Loop：首次 Spec、Design、Implementation Gate 始终由用户批准；只修复一致性、下游派生或既定实现且不改变 Authority Baseline 的 Revision 可由独立 Reviewer自动续期既有 Gate；意图/决策/风险变化、边界未知、Reviewer 分歧或两轮未收敛必须返回用户。Critical 始终阻塞到修复和 Deep 独立复审通过，但内部技术 Critical 不因严重度单独触发产品授权。实施后 Revision 仍须绑定 non-PASS Review/Open Finding，并保留 Completed Task 和活动 Attempt。
+25. 人工审批必须绑定 Engine 生成的 Approval Package Hash；Agent execution 必须登记 Action 与 Role，并按可用信息记录模型 Tier 与宿主模型。Engine 校验身份引用，Skill/Host Adapter 负责执行模型策略。
+26. Acceptance 必须建立当前每个 Scenario 到 executed Evidence 的精确映射；每个 Design Decision 必须映射到至少一个 Task。
+27. UI/交互 Change 默认要求终端用户 UAT；其他 Change 可配置为 required、optional 或 not_applicable。Required UAT 是 Acceptance 与 Delivery Review 之间的正式 Gate。
+28. `allowed_paths` 保持计划参考，Reviewer 必须对每条实际扩展路径留下结构化相关性结论。
+29. 状态快照与事件使用事务日志恢复部分写入；该机制保证崩溃一致性，不声称抵抗拥有仓库写权限者的恶意篡改。
+30. 同一 Worktree 顺序承载多个 Change 时，每个 Change 以自己的 `delivery_head` 冻结交付边界；后续提交可以是其后代，但 Finish/Archive 必须拒绝丢失冻结提交的历史重写。
 
 ## 当前实现状态
 
@@ -191,22 +197,22 @@ executor:
 ```
 
 - `inline` 表示 Research、Requirements 或 Design 由当前主会话作者完成，不为写作本身创建 Subagent。
-- `interactive` 表示问题、方案和章节必须在会话中逐步确认；每个确认点都是回复边界，用户确认前不得写最终阶段产物、完成 Action、启动 Reviewer 或进入下一能力。
+- `interactive` 表示作者可以在真正开放的 Authority 决策上暂停。章节是产物结构，不是回复边界；没有开放决策时作者直接完成阶段产物和 Review 准备，正式 Hash Approval 仍由用户执行。
 - `rockspec-plan` 保持 `inline` 且非 Interactive：它消费已经批准的 Requirements 和 Design，直接生成可确定性校验的 Task DAG，再由 Readiness Reviewer 评审。
 
-三项交互能力共用同一骨架，但确认对象不同：
+Requirements 和 Design 使用以下决策驱动骨架；Research 继续按证据探索协议处理方向和解释：
 
 ```text
 静默读取上下文
-→ 一次一个关键问题
-→ 提出 1-3 个真实方案和推荐
-→ 等待用户选择
-→ 逐章节展示、确认和纠偏
+→ 从用户意图、既有政策和仓库事实推导确定项
+→ 对剩余选择执行 Authority 测试
+→ 最多三个相关决策组成一个 Decision Package
+→ 仅在 Decision Package 上等待用户
 → 写入最终产物并自检
 → Reviewer / Hash Approval / 下一能力
 ```
 
-Research 确认研究方向、证据解释和结论；Requirements 确认业务范围、规则、可观察行为及 Scenario；Design 确认技术路径、架构边界、接口、风险和验证。简单内容可以将相邻章节合并成一个短确认，但不能省略确认。`rockspec-change` 调用这三项能力后必须把控制权交还用户，不能在同一回复中自动串联 Requirements、Design 和 Plan。
+开放决策必须同时具有多个合理方案、不同 Authority 结果、无法从既有输入推导且确需用户负责。普通 API、锁、事务、SQL、模块拆分、缓存和测试机制由 Design 选择并由 Reviewer 核验。`rockspec-change` 不得跨过 Decision Package 或 Hash Approval，但没有开放决策时可以继续完成当前能力和 Reviewer 准备。
 
 ### 4.5 Capability Providers
 
@@ -261,7 +267,10 @@ flowchart LR
     J --> K[Acceptance Validation]
     K -->|实现缺陷| J
     K -->|测试资产缺陷| K
-    K --> L[Delivery Review]
+    K --> U{需要 UAT?}
+    U -->|是| V[用户按 Scenario 走查]
+    U -->|否| L[Delivery Review]
+    V --> L
     L -->|代码缺陷| J
     L --> M[完整验证]
     M --> N[提交 / 推送 / 可选 PR 或 MR]
@@ -281,13 +290,14 @@ READINESS_REVIEW
 READY
 IMPLEMENTING
 ACCEPTANCE_VALIDATING
+UAT_PENDING
 FINAL_REVIEW
 VERIFYING
 READY_TO_FINISH
 ARCHIVED
 ```
 
-辅助状态：
+协议还保留以下状态值；当前 Engine 的阻塞与恢复主要通过结构化错误、`blocked_by` 和 `recovery` 表达，不将它们作为主线必经状态：
 
 - `BLOCKED`：存在无法由当前责任域解决的阻塞。
 - `PAUSED`：用户主动暂停，保留可恢复现场。
@@ -301,7 +311,9 @@ Standard 模式包含三个明确人工 Gate：
 2. 用户批准 Design：确认技术方向和关键取舍；需要 UI 原型时，同时批准原型及其与 Design 的一致性。
 3. 用户批准实施：确认 Plan、任务拆分和实施前置条件。
 
-AI Reviewer 的 `PASS` 只是进入人工批准的前置条件，不能代替用户批准。
+AI Reviewer 的 `PASS` 只是进入人工批准的前置条件，不能代替用户批准。每个批准点先由 `rockspec approval package <gate>` 生成 YAML 机器凭证，并直接在终端展示中文结构化摘要和正式产物路径；不生成重复的 `approval-preview.md`。正式材料使用 `artifact_root` 公共目录和逐项 `label / relative_path / description`，CLI 按编号纵向渲染，不重复长目录，也不允许 Agent 将多个路径拼接成一行。用户审批对象始终是 Proposal/Spec、Design/Prototype 或 Plan/Task/Review 正式产物，用户只需回复“批准需求 / 批准设计 / 批准实施”或等价明确表达。Agent 随后在内部把 Package Hash 传给 `rockspec approve <gate> --package <sha256>`，不得要求用户识别、复制或复述 Hash。任何输入变化都会使 Package 失效，避免会话中的泛化“同意”被复用为审批。
+
+所有需要用户批准、确认、选择或接受风险的等待点都采用“人工审阅投影”：会话区优先呈现当前决策、核心变化、推荐及理由、影响、边界风险、验证/回滚和待决定事项，使用户通常不打开正式产物也能完成核心审阅；详细论证和证据保留在正式文件。投影追求决策完整而非文档完整，允许 Agent 合并重复内容、按子系统归组和调整措辞。它是柔性展示契约，不是新的运行时 Gate：摘要字段缺失、顺序变化或表达漂移不得阻断审批与实施，正式产物始终是完整依据。Engine 为 Spec、Design 和 Implementation Approval 提供推荐结构，CLI 支持多行决策条目；Skills 将同一原则扩展到 Decision Package、Prototype 核对、UAT、Feedback/Recovery 升级、规范知识确认和最终处置选择。
 
 ### 5.4 下一步执行建议
 
@@ -446,7 +458,7 @@ Skill 的 `description` 必须同时描述独立结果、直接触发场景和 E
 `rockspec-change` 不拥有其他能力的实现，只做以下工作：
 
 1. 识别用户是否明确请求单一能力；是则直接路由。
-2. 对完整或恢复中的 Change 先通过 `rockspec-worktree` 定位绑定工作区，再在该 `cwd` 调用 `rockspec status --view summary --json`；仅按调度需要读取 `tasks`、`recovery` 或 `hashes` 投影。
+2. 对完整或恢复中的 Change 先通过 `rockspec-worktree` 定位绑定工作区，再在该 `cwd` 调用 `rockspec status --view summary --json`；仅按调度需要读取 `resume`、`tasks`、`recovery` 或 `hashes` 投影。上下文压缩或会话续接使用 `resume` 恢复 Engine 已持久化状态，Handoff 不再重述这些字段。
 3. 新 Change 在 Triage 确定 ID/Profile 后先选择 current 或 Worktree，再由编排器在目标目录调用底层 `rockspec new`；用户不手动执行。
 4. 按 `recommended_next.entry_skill` 调用真实 Skill，不根据记忆模拟它。
 5. 每个能力返回后重新读取状态，并遵守人工审批和阻塞边界。
@@ -500,6 +512,8 @@ Workflow Recipe 依赖 Capability ID，Capability Resolver 再选择具体 Skill
 绑定写入 `<repo-root>/.rockspec/config.yaml`；RockSpec 可以提供默认值，项目可以显式覆盖：
 
 ```yaml
+artifact_language: zh-CN
+
 capabilities:
   ui.prototype:
     provider: ui-ux-pro-max
@@ -514,6 +528,8 @@ capabilities:
   business.research:
     provider: rockspec-research
 ```
+
+`artifact_language` 默认是 `zh-CN`，可显式改为 `en-US`。它控制 Proposal、Design、Plan、Task、Review、Report、初始化模板和审批摘要的人类可读语言；Schema Key、R/S/D/T/F ID、CLI/Action、Verdict 以及 `Requirement`、`Scenario`、`MUST`、`GIVEN/WHEN/THEN` 等机器协议关键字始终保持英文。
 
 约束如下：
 
@@ -615,7 +631,7 @@ Role Prompt
 - Fast 条件必须全部满足，Deep 条件任一命中即升级；Reviewer 最低为 Balanced，Final CR 固定为 Deep。
 - 模型不可用时只允许向更强 Tier 回退；Deep 不可用时进入 `BLOCKED`，不得静默降级。
 - 每个阶段同一时间只能有一个状态 owner。
-- 单任务修复循环默认最多两轮。
+- 单任务 Review 尝试由 `max_review_rounds` 控制，默认 3 次（初审加最多两轮修复复审），允许按项目在 1 至 10 次间配置。
 - Subagent 报告成功不能直接触发状态迁移，父 Skill 必须调用 Gate 验证。
 
 ## 8. 内部责任配置
@@ -871,9 +887,18 @@ prototype:
 execution:
   active_task: null
   active_execution: null
+  registry: []
+
+uat:
+  policy: not_applicable
+  status: not_required
 ```
 
 `prototype.status` 只允许 `not_required`、`pending`、`completed` 或 `reconciled`。`completed` 只表示 Provider 产物已通过来源 Hash 和 R/S/D 引用校验；随后必须再次执行 `design.technical` 吸收技术影响，状态才变为 `reconciled`。当 `prototype.required=true` 时，Design Approval 只接受 `reconciled`，且内容 Hash 同时覆盖 `design.md` 和 `prototype/`；任一内容发生变化都会使该审批失效。
+
+Author/Reviewer Agent 启动前通过 `rockspec execution start` 写入 `execution.registry`；Task Implementer 由 `task start` 自动登记。记录包含 Action、Role、可用时的模型 Tier/宿主模型、父 execution 和启动时间。Engine 校验 Role/Action 对应关系及报告/Review 引用的 execution 确实已登记；模型 Tier 的选择和显式传递仍由 Skill/Host Adapter 按 `model_policy` 负责。不同 execution ID 证明的是治理身份隔离，不等同于文件系统 ACL 或异模型认知隔离。
+
+所有修改快照和事件的操作使用 `runtime/state-transaction.yaml` 记录 before/after Hash、目标快照和唯一事件。读取 Change 时若发现挂起事务，会补齐只写入一侧的 `change.yaml` 或 `events.ndjson`；现状既不匹配 before 也不匹配 after、或事件序号内容冲突时 fail closed。该机制解决进程崩溃和部分写入的一致性，不提供签名、外部可信根或对拥有仓库写权限者的恶意防篡改能力。
 
 ### 9.4 Intent Envelope 与 Revision Loop
 
@@ -893,7 +918,7 @@ Finding 必须同时声明原因分类和对权威边界的影响：
 | `intent_change` | 改变范围、外部行为、兼容性或验收标准 | `changed|unknown` | 人工 |
 | `risk_acceptance` | 接受剩余风险、债务、降级或例外 | `changed|unknown` | 人工 |
 
-Engine 保留 Revision 级汇总策略，同时为 Spec、Design、Implementation 分别记录 `gate_policies.<gate>=preserve|auto|human`。`preserve` 表示 Gate 未失效；只有全部 Open Finding 都属于前三类、全部 `authority_impact=unchanged`、不存在 Critical、存在原人工 Approval 且 Revision 记录真实 Author execution ID 时，失效 Gate 才选择 `auto`。用户已在 Requirements/Design Gate 确认新的权威边界后，派生的 Implementation Gate 可由独立 Reviewer 自动对账，不重复人工审批。旧报告缺少新字段时 Protocol 默认读取为 `decision_change + unknown`，确保向后兼容时保守进入人工流程。
+Engine 保留 Revision 级汇总策略，同时为 Spec、Design、Implementation 分别记录 `gate_policies.<gate>=preserve|auto|human`。`preserve` 表示 Gate 未失效；只有全部 Open Finding 都属于前三类、全部 `authority_impact=unchanged`、存在原人工 Approval 且 Revision 记录真实 Author execution ID 时，失效 Gate 才选择 `auto`。Critical 仍在修复前阻塞，并要求 Deep 独立 Reviewer 证明高风险后置条件；严重度本身不改变 Authority。用户已在 Requirements/Design Gate 确认新的权威边界后，派生的 Implementation Gate 可由独立 Reviewer 自动对账，不重复人工审批。旧报告缺少新字段时 Protocol 默认读取为 `decision_change + unknown`，确保向后兼容时保守进入人工流程。
 
 Design、Prototype、Plan、Implement、Acceptance 或 Review 发现跨阶段问题时，不得直接同时编辑多层产物。人工策略先在在线会话中展示原因、1 至 3 个方案、受影响 R/S/D ID 和将失效的审批/产物，用户确认后调用；自动策略则绑定 Engine 聚合的 Finding、最早责任域和 Author execution ID：
 
@@ -934,7 +959,7 @@ rockspec reconcile prepare <spec|design|implementation> <change-id>
 rockspec reconcile complete <spec|design|implementation> <change-id> --verdict PASS
 ```
 
-Reconciliation Package 固定 Revision、Gate、轮次、分类、全部触发 Finding、当前 Artifact Hash、原 Authority Baseline 和 Author execution。Reviewer 必须使用不同 execution，保持只读；`PASS` 必须同时声明 `authority_delta=unchanged` 且无 Open Finding。Engine 只续期本次 Revision 失效且有 Authority Baseline 的 Gate，绝不创建首次自动 Approval。非 PASS 返回责任 Skill；最多两轮。Reviewer 分歧、超时、Critical、`changed|unknown` 或两轮未收敛时升级人工。
+Reconciliation Package 固定 Revision、Gate、轮次、分类、全部触发 Finding、当前 Artifact Hash、原 Authority Baseline 和 Author execution。Reviewer 必须使用不同 execution，保持只读；`PASS` 必须同时声明 `authority_delta=unchanged` 且无 Open Finding。Engine 只续期本次 Revision 失效且有 Authority Baseline 的 Gate，绝不创建首次自动 Approval。非 PASS 返回责任 Skill；最多两轮。Reviewer 分歧、超时、`changed|unknown` 或两轮未收敛时升级人工；Critical unchanged 技术修复使用 Deep 对账并保持阻塞到 PASS。
 
 重新获得有效 Implementation Gate 后状态回到 `READY`，Suspended Task 使用原 Base、新 execution、新冻结 Brief 继续。只有所有失效下游 Action、Review 和 Gate 都绑定新 Content Hash，Engine 才记录 `after_hashes` 并将 Revision 标记为 `reconciled`。这保证修复不是“只改最上游文件”，而是完整的下游闭包。
 
@@ -1031,11 +1056,15 @@ schema_version: 1
 id: T-001
 title: "保存有效资料"
 dependencies: []
+supersedes: []
 requirement_ids: [R-001]
 scenario_ids: [S-001]
+decision_ids: [D-001]
 finding_ids: []
 acceptance_criteria:
   - "保存成功结果可以从公共接口观察"
+validation_commands:
+  - "pnpm test -- profile-save"
 consumes: []
 produces:
   - "profile-save-result.v1"
@@ -1045,7 +1074,9 @@ allowed_paths:
 ---
 ```
 
-`finding_ids` 和 `supersedes` 在普通任务中为空；实施后 Recovery 新增的 Replacement/Remediation Task 必须覆盖触发 Finding。`dependencies` 只表达执行顺序；`supersedes` 只指向不再恢复的 Suspended Task，Replacement 不得同时普通依赖旧 Task，下游依赖必须改指 Replacement。`acceptance_criteria`、`consumes` 和 `produces` 必须结构化；`supersedes` 可作为读取冻结接口的基线边。完整依赖图必须无环，所有依赖 ID、R/S 引用和 Scenario 父 Requirement 必须合法。Readiness 还必须结合当前 Task 状态模拟执行，拒绝无可启动 Task 或存在永久阻塞路径的计划。
+`finding_ids` 和 `supersedes` 在普通任务中为空；实施后 Recovery 新增的 Replacement/Remediation Task 必须覆盖触发 Finding。`dependencies` 只表达执行顺序；`supersedes` 只指向不再恢复的 Suspended Task，Replacement 不得同时普通依赖旧 Task，下游依赖必须改指 Replacement。`decision_ids` 必须引用当前 Design Decision，且全部当前 Decision 至少由一个 Task 覆盖。`acceptance_criteria`、`validation_commands`、`consumes` 和 `produces` 必须结构化；Engine 在 Task 完成时逐项核对 `validation_commands` 是否存在绑定该 Task、最终 Commit 且退出码为零的 executed Evidence。项目特有类型、构建和测试发现规则留在仓库命令中，不硬编码进 Engine。`supersedes` 可作为读取冻结接口的基线边。完整依赖图必须无环，所有依赖 ID、R/S/D 引用和 Scenario 父 Requirement 必须合法。Readiness 还必须结合当前 Task 状态模拟执行，拒绝无可启动 Task 或存在永久阻塞路径的计划。
+
+Recovery Plan 还可为既有未归属产品 Commit 新增 `adopted_commit`。这不是通用豁免：Task 必须是 Open `implementation_recovery` 中新增、绑定触发 Finding，目标 Commit 必须位于 `change.base_commit..HEAD`、仍为当前 HEAD 祖先且未归属其他 Task。Engine 将短 SHA 解析为完整 SHA 后持久化；普通计划和非 Finding Revision 禁止使用。
 
 `allowed_paths` 是计划阶段预计创建、修改或测试的项目相对路径，供 Implementer 定位，并由 Review Package 与实际 `changed_paths` 对比生成 `expanded_paths`；它不是 Engine 的产品 Diff 白名单。禁止绝对路径、`..`、反斜杠和 `.rockspec/**`。Readiness Reviewer 核对它是否覆盖计划时可合理预见的主要路径，但不要求穷举实施中才会发现的辅助文件。
 
@@ -1062,6 +1093,8 @@ allowed_paths:
 - Commit message 必须包含 Task ID，例如 `feat(profile): [T-001] save valid profile data`。
 - TE 或 Final CR 在已完成任务上发现实现缺陷时，Engine 打开 Finding-bound Remediation Planning；Planner 创建新的 Remediation Task，修复形成新的单独 Commit，不重写历史 Task。
 
+唯一例外是历史归属 Task：它不创建或重写产品 Commit，而是把一个已经存在、行为后来已获批准的未归属 Commit 纳入同样的 Task Brief、独立 Review 和 Evidence Gate。Task Base 固定为 `adopted_commit^`，Review Subject 固定为 `adopted_commit^..adopted_commit`；完成后 `task.commit_sha = adopted_commit`。当前 HEAD 上必须另有绑定该 Task、覆盖全部 Task Scenario 的新鲜 executed Evidence，声明的 `validation_commands` 也逐项在当前 HEAD 核对。Delivery Review 仍使用 Change base..最终 HEAD 的完整 Diff，不隐藏该历史提交。
+
 Engine 启动 Task 时先确认依赖完成、工作区没有未提交产品改动，再记录 Task Base Commit 和 Implementer execution ID，并生成冻结上下文：
 
 ```text
@@ -1069,7 +1102,11 @@ rockspec task start T-001
 rockspec task brief T-001
 ```
 
-冻结 Brief 位于 `runtime/tasks/T-001/brief.md`，包含 Task、相关 Specs/Design/Prototype 和已完成依赖接口；其路径与 Hash 写入 Change Snapshot。Implementer 同步填写 `runtime/tasks/T-001/implementer-report.md`。Review Package 生成和 Task 完成时都会校验 Brief Hash；Package 同时冻结报告 Hash，Task 完成时 Engine 会拒绝被篡改的 Brief、报告、Review 或 Evidence。
+冻结 Brief 位于 `runtime/tasks/T-001/brief.md`。它不是完整 Change 文档的拼接，而是固定投影：当前 Task Contract、按 Frontmatter ID 选出的 Requirement/Scenario/Design Decision、Design 与 Plan 的显式全局约束、`dependencies + supersedes` 传递闭包中的交付或冻结尝试事实，以及仅在 R/S/D 相交时加入的 Prototype。Proposal 和未投影的权威文档只进入索引。Design 必须存在 `Global Constraints` / `全局约束`、总体方案比较和未解决风险章节；每个 `D-xxx` 必须在自身标题下声明目标覆盖、架构决策、模块职责、接口数据流、失败边界、安全隐私、兼容迁移回滚、验证策略及取舍和剩余风险。Engine 将整个 `D-xxx`（包括这些子章节）投影给引用该 Decision 的 Task；跨 Task 不变量才放入全局约束。
+
+Spec 投影复用 Protocol 的 fence-aware 结构解析及 source span，backtick/tilde 代码围栏内的伪标题不参与边界判断。每个投影片段记录 projection hash；Authority Manifest 同时记录权威源文件 hash、实际覆盖 ID 和 projection hash，防止“ID 找到但正文被静默截断”。Brief 路径与整体 Hash 写入 Change Snapshot，Review Package 生成和 Task 完成时都会重新校验。
+
+Implementer 同步填写 `runtime/tasks/T-001/implementer-report.md`。报告 Frontmatter 与 Task、execution、Base Commit、Brief 路径和 Hash 绑定，`outcome` 为 `implemented | blocked`。阻塞时必须结构化声明 `contract_conflict | authority_conflict`、冲突来源、摘要和推荐路由；`scope_blocked` Review 只接受这种报告且要求 Base..HEAD 的产品 Diff 为零。Package 同时冻结报告 Hash，Task 完成时 Engine 会拒绝被篡改的 Brief、报告、Review 或 Evidence。
 
 ### 9.6 Review 格式
 
@@ -1098,6 +1135,8 @@ rockspec review package task <change-id> --task T-001
 rockspec review package delivery <change-id>
 ```
 
+Task Reviewer 获得冻结 Implementer Projection，并额外获得与该 Task R/S 相关但未声明的 Design Decision 差集，用于发现 Plan 漏映射；它不与 Implementer 共享同一可见边界。Delivery Reviewer 获得 Change 级 R/S/D/T 覆盖清单和 Evidence Index。Reviewer execution 必须同时提供 context package 路径和 SHA-256；Engine 校验文件位于当前 Change、内容 hash 正确，并要求 Task/Delivery Reviewer 精确绑定当前确定性 Review Package 路径，登记 `context_package_verified=true` 后报告身份才有效。
+
 Review Package 保存 Commit 列表、文件统计和完整 Diff，并返回不可变 Review Subject：
 
 ```yaml
@@ -1115,7 +1154,9 @@ rockspec review package task <change-id> --task T-001 --scope-blocked
 
 该模式只接受无未提交产品改动且产品 Diff 为空的活动 Task，放宽的是“单 `[T-xxx]` Commit/非空产品 Diff”门禁，不放宽 Task、Brief、报告、Reviewer 身份或 Subject 新鲜度门禁。范围阻塞包必须由 non-PASS Task Review 记录 Open Finding（通常 `owner_domain: planning`、`route_to: plan.create`）；Engine 随后生成 `recovery.kind=revision`，暂停旧 Task，待 Plan 修订、审批/对账后以新 Brief 恢复实施。范围阻塞 Review 不允许 `PASS`。普通的合理文件扩展不使用此模式：正常形成完整 Commit，Package 自动列出 `planned_paths`、`changed_paths`、`expanded_paths`，Reviewer 判断扩展是否服务于既有 Task 行为。
 
-Requirements/Readiness 与 Task/Delivery Reviewer 都必须输出结构化 Frontmatter。前两者不绑定 Git Diff Subject，但必须包含 `schema_version`、真实 `reviewer_execution_id`、`verdict` 和 `findings`；旧版纯文本 `PASS` 可兼容读取，旧版非 PASS 报告会被拒绝，避免正文 Finding 静默丢失。Strict 的两份源报告分别解析并保留，聚合报告的 Verdict 必须与最保守的源结论一致。
+历史归属包不由 CLI Flag 人工选择；Engine 根据 Task 的 `adopted_commit` 自动生成 `historical_attribution` 模式，固定单提交 Diff。该模式仍要求 `outcome: implemented` 的绑定报告和独立 `PASS` Review；Reviewer 检查历史 Diff 对批准 R/S/D 的符合性，同时将当前 HEAD 的场景 Evidence 作为行为仍然成立的证明。
+
+Requirements/Readiness 与 Task/Delivery Reviewer 都必须输出结构化 Frontmatter。前两者不绑定 Git Diff Subject，但必须包含 `schema_version`、已登记且 Role/Action 匹配的 `reviewer_execution_id`、`verdict` 和 `findings`；任何纯文本 Stage Review，包括旧版 `PASS`，都被拒绝，避免身份与 Finding 旁路。Strict 的两份源报告分别解析并保留，聚合报告的 Verdict 必须与最保守的源结论一致。
 
 Reviewer 只能使用 Package 中的 Diff，不得自行选择移动中的范围。每份 Task/Delivery Reviewer 源报告必须包含如下 Frontmatter：
 
@@ -1129,6 +1170,10 @@ subject:
   head_commit: "<40-char-sha>"
   diff_hash: "<sha256>"
 round: 0
+scope_assessment:
+  - path: src/profile/helper.ts
+    disposition: justified
+    rationale: "实现 D-001 需要复用公共序列化入口"
 findings:
   - id: F-001
     severity: important
@@ -1141,9 +1186,9 @@ findings:
 ---
 ```
 
-`route_to` 使用 Engine Action ID，不使用 `BA` 等角色型路由，避免角色或 Skill 名称调整影响协议。非 `PASS` 必须至少包含一个 Open Finding；`PASS` 不允许 Open Critical/Important Finding。Engine 解析并无损保存每位 Reviewer 的 Findings，拒绝 Reviewer/Implementer 同 execution、Strict Reviewer 重复身份、Subject 过期、报告篡改和聚合 Verdict 不一致。
+`route_to` 使用 Engine Action ID，不使用 `BA` 等角色型路由，避免角色或 Skill 名称调整影响协议。Task Review 必须对 Package 中每条 `expanded_paths` 恰好给出一个 `scope_assessment`；合理扩展标记 `justified`，无关改动标记 `unrelated` 并产生 Finding。Delivery Review 的该数组必须为空。非 `PASS` 必须至少包含一个 Open Finding；`PASS` 不允许 Open Critical/Important Finding。Engine 解析并无损保存每位 Reviewer 的 Findings，拒绝 Reviewer/Implementer 同 execution、Strict Reviewer 重复身份、Subject 过期、报告篡改和聚合 Verdict 不一致。
 
-初始 Review 的 `round` 为 `0`。每次修复 amend 原 Task Commit 后重新生成 Review Package，轮次依次为 `1`、`2`；Reviewer 以新 Package 保证完整边界，同时只复核上一轮 Open Findings、上一 Head 到新 Head 的 Fix Diff 和聚焦证据。新报告必须携带上一轮全部 Findings 并更新状态；Engine 校验轮次一致性，并在初审加两轮修复后拒绝继续。最多两轮仍未通过时停止并交回主流程。
+初始 Review 的 `round` 为 `0`。每次修复 amend 原 Task Commit 后重新生成 Review Package，轮次依次递增；Reviewer 以新 Package 保证完整边界，同时只复核上一轮 Open Findings、上一 Head 到新 Head 的 Fix Diff 和聚焦证据。新报告必须携带上一轮全部 Findings并更新状态；Engine 校验轮次一致性，并在 `max_review_rounds`（默认 3，包含初审）耗尽后拒绝继续，停止并交回主流程。
 
 ### 9.7 Evidence
 
@@ -1154,19 +1199,21 @@ findings:
 - 开始和结束时间。
 - 退出码。
 - 通过、失败和跳过数量。
-- 关联的 Task、Scenario 或 Finding。
+- 关联的 Task、Scenario 和 Finding。
 - 运行时 commit。
 - 必要的日志、截图或报告路径。
 
 Standard/Strict 的 Task、Acceptance 和 Final Verify Gate 要求 `source: executed`。命令必须由 Engine 实际启动：
 
 ```text
-rockspec check run --change <change-id> --task T-001 -- <executable> [args...]
-rockspec check run --change <change-id> --action acceptance.validate -- <executable> [args...]
+rockspec check run --change <change-id> --task T-001 --scenario S-001 -- <executable> [args...]
+rockspec check run --change <change-id> --action acceptance.validate --scenario S-001 --artifact testing/e2e-report.html -- <executable> [args...]
 rockspec check run --change <change-id> --action change.verify -- <executable> [args...]
 ```
 
-Engine 保存 stdout/stderr、cwd、起止时间、退出码、当前 Commit 和 `output_hash`，日志写入 `evidence/logs/`。`rockspec evidence add` 只用于人工检查或外部系统已执行的补充证据，不能替代 executed Evidence Gate。
+Engine 保存 stdout/stderr、cwd、起止时间、退出码、当前 Commit、Scenario/Finding ID、产物路径和 `output_hash`，日志写入 `evidence/logs/`。Acceptance 报告 Frontmatter 使用 `scenario_coverage` 将每个当前批准 Scenario 精确绑定到 Test ID 和 executed Evidence 引用；缺失、未知或多余 Scenario、证据非当前 Commit/Action、退出码非零或日志 Hash 漂移都会拒绝 Gate。`rockspec evidence add` 只用于人工检查或外部系统已执行的补充证据，不能替代 executed Evidence Gate。
+
+UI 原型证据还必须由 `acceptance.validate` 执行，绑定当前 Commit、报告路径/Hash和至少一个实际 artifact，并在 Acceptance 报告的 `ui_evidence` 中覆盖 responsive、accessibility 和 interaction 三类。仅提交 `kind: ui.prototype` 的手工标签不能通过。
 
 ## 10. 追踪协议
 
@@ -1195,11 +1242,13 @@ Validator 状态：
 |---|---|---|
 | R/S ID 跨 Spec 文件唯一，结构化引用存在 | 已实现 | Spec Parser、Design Coverage Gate、Task Plan Gate |
 | 每个 Requirement 至少包含一个 Scenario | 已实现 | Spec Schema |
-| 每个 Scenario 对应 Task 或 `verification_only_scenario_ids` | 已实现到 Plan 覆盖 | Task Plan Gate；UT/IT/E2E ID 到 executed Evidence 的完整映射后续扩展 |
+| 每个 Scenario 对应 Task 或 `verification_only_scenario_ids` | 已实现 | Task Plan Gate |
 | 每个 Design Decision 声明 R/S 覆盖，全部已批准 R/S 被覆盖 | 已实现 | `design.md` Frontmatter 与 `design.technical` completion Gate |
+| 每个 Design Decision 至少映射一个 Task | 已实现 | Task `decision_ids` 与 Task Plan Gate |
 | 每个 Task 有结构化独立验收标准 | 已实现 | Task Definition Schema |
 | 全部 Requirement 被 Task 或完全由非代码验证 Scenario 覆盖 | 已实现 | Task Plan Gate |
 | Task DAG 无环，依赖存在，接口 Producer 唯一且 Consumer 依赖 Producer | 已实现 | Task Plan Gate |
+| 每个当前 Scenario 精确映射 executed Evidence | 已实现 | Acceptance `scenario_coverage` 与 Evidence Gate |
 | Final Review 前无未关闭 Critical/Important Finding | 已实现 | Review/Finding Gate |
 
 ## 11. Gate 设计
@@ -1207,41 +1256,54 @@ Validator 状态：
 ### 11.1 Spec Gate
 
 - Proposal 和 Spec 结构合法。
+- Proposal Frontmatter 明确非目标、假设和已解决的开放问题，不含 `TODO/TBD/FIXME/{{...}}/<placeholder>`。
 - 没有阻塞性开放问题。
 - Requirements Review 为 PASS。
 - Review Hash 与当前 Spec Hash 一致。
+- Approval Package Hash 与当前 Proposal、Spec、Review 和追踪摘要一致。
 - 首次 Gate 必须记录人工审批；自动对账只接受绑定原 Authority Baseline、当前 Revision 和独立 Reviewer 的续期 Approval。
 
 ### 11.2 Readiness Gate
 
 - Design 已获用户批准。
 - `prototype.required=true` 时，`ui.prototype` 已由配置的 Provider 完成，原型产物存在，且 Design 审批绑定当前 Design 与 Prototype Hash。
-- Plan 和 Task Frontmatter 合法；R/S 覆盖完整。
+- Plan 和 Task Frontmatter 合法；R/S/D 覆盖完整。
 - Task DAG 无环且依赖存在；`produces` 全局唯一，`consumes` 可解析且消费者依赖 Producer。
 - Readiness Review 为 PASS。
 - Review Hash 与当前 Design、Plan、Tasks Hash 一致。
 - 实施前置条件已确认。
+- Approval Package Hash 与当前 Design、Prototype、Plan、Tasks 和 Review 摘要一致。
 - 首次实施必须由用户批准；自动对账只接受绑定原 Authority Baseline、当前 Revision 和独立 Reviewer 的续期 Approval。
 
 ### 11.3 Task Completion Gate
 
 - Task Definition Frontmatter 合法、依赖已完成；Review Package 已披露产品 Diff 相对 `allowed_paths` 的实际扩展。
+- Review 报告为每条 `expanded_paths` 提供且只提供一条结构化 `scope_assessment`。
 - 冻结 Brief、Implementer Report 及其 Hash 存在，且内容未被篡改。
+- `scope_blocked` 模式下 Implementer Report 为结构化 blocked outcome，冲突类型与路由合法，且产品 Diff 为零；该模式不能获得 PASS。
+- `historical_attribution` 模式下目标 Commit 仍在 Change base..HEAD、未重复归属，Review Subject 固定为其父提交到该提交，当前 HEAD 有覆盖全部 Task Scenario 的新鲜 executed Evidence。
 - Task 关联测试具有绑定当前 Commit 和日志 Hash 的新鲜 executed Evidence。
 - Review Package 固定 Task Base、当前 HEAD 和 Diff Hash。
 - Task Review 为独立结构化 `PASS`，Reviewer execution 不等于 Implementer，Strict 两个 Reviewer 也互不相同。
 - Important/Critical Finding 已关闭。
-- Task Base..HEAD 恰好包含一个最终 Commit，且该 Commit 只归属于当前 Task。
-- 最终 Commit message 包含 `[Task ID]`，Commit SHA 已写入任务状态和 Evidence。
+- 普通模式下 Task Base..HEAD 恰好包含一个最终 Commit，且该 Commit 只归属于当前 Task；历史归属模式不要求旧提交信息补写 `[Task ID]`，也不允许改写历史。
+- 普通模式最终 Commit message 包含 `[Task ID]`；两种模式的归属 Commit SHA 均写入任务状态，验证 Commit 与 Evidence 绑定。
 
 ### 11.4 Acceptance Gate
 
-- Test Plan 覆盖要求的 Scenario。
+- Test Plan 与结构化 `scenario_coverage` 精确覆盖全部当前批准 Scenario。
 - 集成/E2E 测试资产已经提交。
 - 测试报告基于当前 commit。
 - 实现缺陷和测试资产缺陷已经关闭。
 - Acceptance 结论为 PASS。
-- `prototype.required=true` 时，当前 Commit 已具有 `ui.prototype` Provider 生成的响应式、可访问性和关键交互 Evidence。
+- 每个 Scenario 至少绑定一条由 `acceptance.validate` 实际执行、当前 Commit、退出码为零且日志 Hash 新鲜的 Evidence。
+- `prototype.required=true` 时，当前 Commit 已具有绑定报告和产物的响应式、可访问性和关键交互 executed Evidence。
+
+Required UAT 在 Acceptance Gate 后单独执行：
+
+- Change 状态为 `UAT_PENDING`，UAT 报告绑定 Acceptance 的当前 Commit。
+- 用户确认至少一个选定的核心批准 Scenario，报告不存在未知或过期 Scenario；全部 Scenario 的机器覆盖已由前置 Acceptance Gate 保证。
+- 反馈或重跑 Acceptance 后原 UAT 自动失效；`optional`/`not_applicable` 不产生该停点。
 
 ### 11.5 Delivery Gate
 
@@ -1259,7 +1321,9 @@ Validator 状态：
 - Knowledge Evolution 已记录为 `no_change` 或 `approved`，且 Source、Delta、基线与候选 Hash 保持新鲜。
 - 当前分支和目标基线明确。
 - 用户选择本地合并、推送分支、可选创建 PR/MR，或保留分支。
+- `keep` 可立即完成；`push`/`local_merge` 先持久化为 `pending_external_action`，Git 操作成功并回填目标 Ref 与结果 Commit 后才标记 `completed`。记录选择不得被表述为已执行，pending 状态不能 Archive。
 - Archive 前 Spec Delta 已验证可合并。
+- `delivery_head` 仍是当前 HEAD 的祖先；共享 Worktree 中后续 Change 的后代提交不会被纳入当前 Change，历史重写丢失冻结 Commit 时拒绝 Finish/Archive。
 
 ## 12. 实施阶段多 Agent 协作
 
@@ -1277,7 +1341,7 @@ rockspec-implement / rockspec-change router / rockspec apply
   → task.review
       → Task Change Reviewer Subagent
       → 输出结构化 Reviewer execution、Subject 和 Findings
-  → 原 Implementer 最多两轮修复并 amend Task Commit
+  → 原 Implementer 在 max_review_rounds 预算内修复并 amend Task Commit
   → 每轮重跑 check、重建 Package、聚焦复审 Finding + Fix Diff
   → PASS 后 task.complete 复核全部 Gate
 ```
@@ -1286,7 +1350,7 @@ rockspec-implement / rockspec-change router / rockspec apply
 
 ### 12.2 修复上限
 
-默认最多两轮：
+默认 `max_review_rounds=3`，即一次初审后最多两轮修复复审：
 
 - 第 1 轮：原 Implementer 修复，Reviewer 增量复审。
 - 第 2 轮：原 Implementer再次修复，Reviewer 增量复审。
@@ -1381,7 +1445,7 @@ Action/Recipe YAML 必须声明 `authority: agent-guidance` 和 `engine_authorit
 
 - Lite 可由主 Agent 内联完成。
 - Standard/Strict 默认 BLOCKED，除非用户明确允许按相同职责约束内联串行执行。
-- 内联执行仍必须生成独立 Review 产物，不能因为缺少 Subagent 跳过 Gate。
+- 内联执行仍必须生成适用 Gate 的独立 Review 产物，不能因为缺少 Subagent 跳过 Gate；纯 `derived` 知识整理按既定策略不构成独立 Review Gate。
 
 如果某个 Capability Provider 在当前宿主不可用，Resolver 必须尝试已配置的兼容 Provider；没有可用实现时进入 `BLOCKED`，不能绕过该能力对应的必需步骤。
 
@@ -1393,15 +1457,17 @@ Action/Recipe YAML 必须声明 `authority: agent-guidance` 和 `engine_authorit
 
 ```text
 rockspec init
-rockspec new <change-id> [--base <ref>] [--managed-worktree]  # 编排器底层接口
-rockspec status [change-id] [--change <change-id>] [--view summary|tasks|recovery|hashes|full] [--json]
+rockspec new <change-id> [--base <ref>] [--managed-worktree] [--kind <kind>] [--risk <tag>] [--uat required|optional|not_applicable]  # 编排器底层接口
+rockspec status [change-id] [--change <change-id>] [--view summary|resume|tasks|recovery|hashes|full] [--json]
 rockspec continue [change-id]
+rockspec execution start <action> [change-id] --role <role> [--model-tier fast|balanced|deep] [--host-model <model>]
 rockspec preflight implementation [change-id]
 rockspec apply [change-id]
-rockspec finish [change-id]
-rockspec validate [change-id] [--strict]
+rockspec finish [change-id] [--disposition keep|push|local_merge] [--executed --result-ref <ref> --result-commit <sha>]
+rockspec validate [change-id] [--artifact <change-relative-path>] [--strict]
 rockspec gate <gate-id> [--json]
-rockspec approve <artifact-id>
+rockspec approval package <spec|design|implementation> [change-id]
+rockspec approve <spec|design|implementation> [change-id] --package <sha256>
 rockspec promote <profile>
 rockspec task list
 rockspec task next
@@ -1411,13 +1477,14 @@ rockspec task complete <task-id>
 rockspec review package task <change-id> --task <task-id>
 rockspec review package task <change-id> --task <task-id> --scope-blocked
 rockspec review package delivery <change-id>
-rockspec check run --change <change-id> [--task <task-id>] [--action <action-id>] -- <executable> [args...]
-rockspec evidence add  # 仅人工或外部执行证据
+rockspec check run --change <change-id> [--task <task-id>] [--action <action-id>] [--scenario <S-id>] [--finding <F-id>] [--artifact <path>] -- <executable> [args...]
+rockspec evidence add [change-id] --command <command> --exit-code <number> [--scenario <S-id>] [--finding <F-id>] [--artifact <path>]  # 仅人工或外部执行证据
+rockspec uat confirm [change-id] [--report testing/uat-report.md]
 rockspec verify
 rockspec archive
 ```
 
-`status` 默认返回紧凑 `summary`；按需使用 `--view tasks|recovery|hashes`，仅诊断 Runtime 时读取 `--view full`。其他返回完整 Status 的命令可使用全局 `--summary`，避免把 Change 历史、Review 和 Evidence 重复注入模型上下文。
+`status` 默认返回紧凑 `summary`；按需使用 `--view resume|tasks|recovery|hashes`，仅诊断 Runtime 时读取 `--view full`。`resume` 汇总当前 Gate、Worktree、批准状态、提交、剩余 Task、开放 Finding、未完成 Execution、正式产物和下一动作。其他返回完整 Status 的命令可使用全局 `--summary`，避免把 Change 历史、Review 和 Evidence 重复注入模型上下文。正式产物在 Action 前可用 `rockspec validate --artifact <change-relative-path>` dry-run，CLI 以中文结构化展示字段路径、期望类型和合法值，`--json` 保留机器结构。
 
 CLI 约束：
 
@@ -1429,8 +1496,12 @@ CLI 约束：
 - 所有 Gate 失败必须返回非零退出码和结构化原因。
 - `new` 在创建时记录 Workspace Binding；`--managed-worktree` 只接受符合项目分支前缀、具有明确 `--base` 的 linked Worktree。
 - 所有修改型命令验证当前模式和分支是否匹配 Change；旧 Change 没有绑定字段时按兼容模式处理。
+- `newChange` 在 Engine 层根据 kind/risk 计算最低 Profile，直接 API 调用同样不能创建低于最低要求的 Change。
+- `execution start` 验证 Role/Action 配对；后续产物只能引用已登记身份。模型 Tier 由 Skill/Host Adapter 按 Action policy 选择并记录。
+- `approval package` 固定 Gate 输入和面向用户的决策摘要；`approve` 只接受当前 Package Hash。
 - `check run` 必须直接执行参数化 executable/args，不通过 Shell 拼接，并保存日志与输出 Hash。
 - `review package` 必须由 Engine 根据已记录 Base 和当前 HEAD 生成，Reviewer 不能提交自选 Diff。
+- 修改型状态操作通过事务日志协调快照与追加事件；恢复只保证崩溃一致性，不替代签名或外部防篡改存储。
 
 ### 15.2 一键安装器
 
@@ -1515,6 +1586,8 @@ rockspec uninstall --project . --yes
 
 删除分支、丢弃提交或强制推送必须获得额外明确授权。
 
+`change.verify` 成功时记录不可漂移的 `delivery_head`。同一 Worktree 可以在用户确认后顺序创建后续 Change，因此 Finish/Archive 不要求当前 HEAD 与旧 Change 的 `delivery_head` 永远相等，而要求 `delivery_head` 仍为当前 HEAD 的祖先。这样后续 Change 的提交不会阻塞前一个 Change 收尾，也不会被吸收进前一个 Change 的 Review、Evidence 或 Knowledge 边界；rebase/reset 等历史重写一旦丢失冻结提交，Engine 以 `DELIVERY_HISTORY_DIVERGED` 拒绝继续。外部处置使用两阶段 receipt：第一次 `finish` 记录选择与待执行动作，宿主完成 Git 操作后以 `--executed --result-ref --result-commit` 回填；Engine 对 push 要求结果 Commit 等于冻结交付，对本地合并要求结果 Commit 包含冻结交付。
+
 清理 Worktree 还必须满足：目录干净、归属唯一、Finish 处置已成功，并且用户的选择明确授权清理。任何冲突、验证失败或归属不明都保留分支和 Worktree。语义冲突不得在 Git 合并过程中静默改变已批准行为。
 
 首版核心 CLI 不依赖 GitHub、GitLab 或其他代码托管平台 API，也不强制创建 PR。平台 Adapter 属于可选能力；没有 Adapter 时，RockSpec 只执行和报告平台无关的 Git 操作及下一步建议。
@@ -1529,7 +1602,7 @@ Archive 负责：
 - 在 Change 和 `.rockspec/knowledge/.evolution/<change-id>.yaml` 保留同源幂等凭证；`no_change` 同样记录。
 - 将 Change 移入 `<repo-root>/.rockspec/archive/`。
 - 保留审批、Review、测试和证据链。
-- 记录交付 Commit、最终状态，以及存在时的可选 PR/MR URL。
+- 记录冻结的 `delivery_head`、最终状态，以及存在时的可选 PR/MR URL；归档时再次确认该 Commit 仍在当前历史中。
 
 ## 17. 参考设计内化与清洗对照
 
@@ -1604,10 +1677,10 @@ Final CR 与 Finish      ← Superpowers Verification/Finish + OpenSpec Validate
 | Triage | Superpowers 不直接编码、先澄清；对其全量重流程做降级改造 | `change.triage` 按风险选择 Lite/Standard/Strict；Lite 只保留范围、验证和升级条件 |
 | Requirements | OpenSpec 的实质歧义分流、依赖重读和 Scenario/Delta；Superpowers 单问题澄清；Matt 的用户问题视角；张乐需求纯净度 | `requirements.clarify` 只为影响范围、外部行为、兼容性或验收标准的歧义阻塞，次要细节采用有依据的保守假设；生成带 R/S ID 的 Proposal/Spec Delta；`requirements.review` 检查假设未绕过用户决策 |
 | Design/Readiness | Superpowers 的范围拆分、2 至 3 个方案、分段确认、写后自检和实施计划；Matt 的 Seam/模块边界；张乐 RR | `design.technical` 生成映射 Requirement 的 `design.md` 并在 UI 变更时对账 Prototype；`plan.create` 生成带文件职责图和 `Consumes/Produces` 的 Task DAG；`readiness.review` 检查覆盖、边界、接口一致性、测试和前置条件 |
-| Task Execution | Superpowers Fresh Implementer、TDD、Review Loop 与 Verification；Matt 单上下文 Ticket、文件边界和双轴 Review；张乐 DEV/CR 分离与脚本门禁 | Engine 固定 Task Base 和冻结 Brief，以计划路径偏差披露、单 Commit、executed Evidence、Review Package、Reviewer execution 与结构化 Findings 约束 Implementer/Reviewer，最多两轮修复 |
+| Task Execution | Superpowers Fresh Implementer、TDD、Review Loop 与 Verification；Matt 单上下文 Ticket、文件边界和双轴 Review；张乐 DEV/CR 分离与脚本门禁 | Engine 固定 Task Base 和冻结 Brief，以计划路径偏差披露、单 Commit、executed Evidence、Review Package、Reviewer execution 与结构化 Findings 约束 Implementer/Reviewer；Review 总尝试数由配置控制，默认初审加两轮修复复审 |
 | Acceptance | 张乐独立 TE、Matt 只测公共行为、Superpowers 完成前验证 | `acceptance.validate` 根据 R/S 风险生成并执行集成/E2E 测试，保存命令、退出码和证据 |
 | Delivery Review | Superpowers Final Review、Matt Spec/Standards 双轴、张乐整体 CR | TE 后执行 `delivery.review`，按 Spec、Design、Standards、Tests 四轴审查最终代码和 TE 新增资产 |
-| Evolve/Finish/Archive | Superpowers 分支收尾、OpenSpec Validate/Merge/Archive | `knowledge.evolve` 从已验证产物生成统一 Delta，经条件式独立 Review 后由 Archive 原子安装；`rockspec finish` 提供平台无关收尾选项 |
+| Evolve/Finish/Archive | Superpowers 分支收尾、OpenSpec Validate/Merge/Archive | `knowledge.evolve` 从已验证产物生成统一 Delta；纯 `derived` 由 Author 自检和 Engine 确定性校验完成，包含 `normative` 时才经独立 Review 与人工确认，随后由 Archive 原子安装；`rockspec finish` 提供平台无关收尾选项 |
 
 ### 17.5 OpenSpec 内化矩阵
 
@@ -1644,7 +1717,7 @@ Final CR 与 Finish      ← Superpowers Verification/Finish + OpenSpec Validate
 
 | Superpowers 参考机制 | RockSpec 具体方案 | 与原方案的差异 | 实现与验证落点 |
 |---|---|---|---|
-| Brainstorming、逐步澄清、比较方案 | `rockspec-research`、`rockspec-requirements` 和 `rockspec-design` 使用 Interactive 硬门禁：静默读取上下文、一次一个关键问题、比较 1 至 3 个真实路径或 2 至 3 个技术方案、等待选择、逐章节确认，最后才写产物；Design 另执行占位/矛盾/范围/歧义自检 | 作者保持 Inline，不增加写作 Subagent；确认点成为强制回复边界而非软提示；Requirements 避免实现污染；会话确认不替代 Reviewer 或 Hash Approval；简单内容可合并章节但不跳过确认；客观单一路径不虚构选项 | Action `executor.collaboration.mode`；Skill 方法论契约测试；首次回复、未确认阻塞、纠偏和轻量内容 Evals |
+| Brainstorming、逐步澄清、比较方案 | `rockspec-research` 保持证据探索交互；`rockspec-requirements` 和 `rockspec-design` 静默读取上下文并执行 Authority 测试，只把最多三个相关开放决策组成一个 Decision Package，章节直接写入完整产物 | 作者保持 Inline，不增加写作 Subagent；没有新 Authority 选择就没有确认停点；Requirements 避免实现污染；普通工程选择由 Design + Reviewer 负责；Decision Package 不替代 Hash Approval | Action `executor.collaboration.mode`；Skill 方法论契约测试；明确输入零章节停点、真实歧义单 Decision Package、技术 Finding 自动对账 Evals |
 | 先探索仓库再设计 | Planning Recipe 在执行 `design.technical` 前读取仓库规则、相关模块、现有测试和相邻实现 | 探索工具由 Host Adapter 提供，结果写入 Design Context，不绑定单一宿主 | Codex/Claude 仓库探索 Contract Tests |
 | 用户批准后再实现 | Standard 固定 Spec、Design、实施就绪三个 Hash-bound Approval | 比原流程增加独立 Requirements/Readiness Review，产物变化后审批自动失效 | Approval Schema；失效和重新批准测试 |
 | Writing Plans | 拆 Task 前建立准确文件职责图；Task 给出目标、覆盖的 R/S、文件范围、公共 Seam、`Consumes/Produces`、测试命令、预期失败/成功结果、依赖和完成条件；写后检查占位与跨 Task 接口一致性 | Task 以可独立 Commit/Review 的交付价值划分，不要求每步 2-5 分钟，不在 Plan 中预写大段实现代码 | Task Schema；Skill 方法论契约测试；Readiness Reviewer 检查项 |
@@ -1863,7 +1936,12 @@ capability providers → host adapters
 - Review 和 Evidence Schema。
 - Task Frontmatter、Review Subject、Review Source 和结构化 Finding Schema。
 - Profile Triage 和自动升级规则。
+- Engine 直接创建 Change 时的最低 Profile 强制。
 - Strict 双 Reviewer 聚合规则。
+- execution registry 的 Role/Action、最低 Tier 和身份引用校验。
+- Approval Package Hash、Proposal 结构和占位词拒绝。
+- Acceptance Scenario 精确覆盖、UI 三类证据和 required/optional UAT。
+- 状态事务部分写入恢复与冲突拒绝。
 - 英文 Spec 关键字和单 Task 单 Commit 约束。
 - Capability 绑定、Provider 选择和不可用时的阻塞规则。
 
@@ -1878,8 +1956,13 @@ capability providers → host adapters
 - Task Base..HEAD 单 Commit、依赖未完成和脏工作区拒绝；`allowed_paths` 偏差写入 Review Package，不直接拒绝。
 - 冻结 Brief 路径/Hash 写入 Implementer Report，Brief 篡改后 Review Package 和完成 Gate 拒绝。
 - `check run` 的真实命令执行、日志 Hash、失败退出码和 executed Evidence Gate。
+- `scenario_coverage` 与 executed Evidence 的逐 Scenario 绑定，Finding/Artifact 引用和原型响应式、可访问性、交互证据。
 - Reviewer/Implementer 身份隔离、Strict 双 Reviewer、Subject 过期、非 PASS Finding 持久化和报告篡改拒绝。
+- 每条 `expanded_paths` 的结构化 `scope_assessment` 完整性。
 - TE 后 Final CR 顺序不可绕过。
+- Required UAT 的提交/Scenario 绑定、反馈后失效和 optional UAT 不增加停点。
+- 共享 Worktree 中 `delivery_head` 后代合法、丢失冻结提交的分叉历史拒绝。
+- snapshot/event 单边写入恢复和事件序号冲突拒绝。
 - Archive 后 Spec 和历史产物一致。
 - Monorepo 子目录统一解析到仓库根目录的单一 `.rockspec/`。
 - 平台 Adapter 缺失时仍可完成平台无关的 Git 收尾。
@@ -1913,11 +1996,14 @@ Codex 和 Claude Code 必须运行相同的场景集：
 10. Task 改动越出 `allowed_paths`，预期 Review Package 列出 `expanded_paths`；Engine 不拒绝，由 Reviewer 判断是否合理。
 11. Reviewer 使用 Implementer execution 或旧 Review Subject，预期 Gate 拒绝。
 12. 手工 `evidence add` 冒充自动检查，预期 Standard/Strict Gate 拒绝。
-13. Research、Requirements 或 Design 的首次回复只读取上下文并提出一个关键问题，不写最终阶段产物。
-14. 用户未选择研究/业务/技术方案时，不得展示后续章节、完成 Action 或启动 Reviewer。
-15. 用户未确认当前章节时不得进入下一章节；用户纠偏后先修订受影响章节，若推翻前置结论则重新确认。
-16. 全部章节确认前不得写最终产物或由 `rockspec-change` 自动串联下一能力；简单需求可以合并章节但至少保留一次明确确认。
-17. Requirements Reviewer 提出实质业务变化或 Prototype 导致实质技术变化时，重新打开并确认受影响章节。
+13. Requirements 或 Design 输入没有开放 Authority 决策时，首次执行可以直接写最终阶段产物并启动 Reviewer，不产生章节停点；Research 仍按证据探索协议暂停。
+14. 存在开放 Decision Package 时，用户未选择前不得写入依赖该选择的最终结论、完成 Action 或启动 Reviewer。
+15. 章节不得作为确认点；用户纠偏后只修订受影响决策和派生内容，不重新确认未改变章节。
+16. 明确输入至少通过一次无额外内容确认直接到 Hash Approval；真实歧义最多形成一个包含三个相关选择的 Decision Package。
+17. Requirements Reviewer 提出实质业务变化或 Prototype 导致实质技术变化时，只在出现新 Authority 选择时请求用户；内部技术修复保持在责任域自动对账。
+18. 每个 Acceptance PASS 覆盖全部当前 Scenario；缺少 Scenario Evidence、引用错误 Commit 或只用空泛成功命令时拒绝。
+19. UI/交互 Change 在 Acceptance 后进入 required UAT，用户确认冻结 Commit；其他 Change 按显式策略决定是否增加停点。
+20. 同一 Worktree 顺序承载 A、B Change 后，A 可在 B 的后代 HEAD 上收尾，但历史重写丢失 A 的 `delivery_head` 时拒绝。
 
 评测指标：
 
@@ -1942,8 +2028,8 @@ Codex 和 Claude Code 必须运行相同的场景集：
 
 ### Phase 2：CLI 与确定性 Gate
 
-- `init/status/validate/gate/approve/promote/archive`，以及编排器使用的底层 `new`。
-- 文件锁、事件日志和审批失效。
+- `init/status/validate/gate/approval package/approve/execution/uat/promote/archive`，以及编排器使用的底层 `new`。
+- 文件锁、状态事务恢复、事件日志和审批失效。
 - 单一 `.rockspec/` Root 解析和下一步执行建议。
 - Spec Delta 解析和合并。
 
@@ -2003,6 +2089,8 @@ Codex 和 Claude Code 必须运行相同的场景集：
 16. OpenSpec、Superpowers、Matt Skills 和张乐方案的首版内化矩阵完成评审。
 17. Standard UI Change 能在 Design Approval 前通过 `ui-ux-pro-max` 生成并记录 Prototype 产物。
 18. 宿主能够发现完整编排、交付阶段和知识演进 Skills，以及 Debug、Research、Worktree 场景 Skill；任一能力可直接启动，内部 Action 不再以 `rs-*` 或 Action 同名 Skill 形式出现。
+19. Approval、execution 身份、R/S/D/Task/Scenario Evidence 追踪和 expanded path 结论均由 Engine 确定性校验。
+20. Required UAT 能绑定当前 Commit 和全部批准 Scenario；共享 Worktree 的后续提交不污染前一 Change 的冻结交付边界。
 
 ## 22. 已确认评审决策
 

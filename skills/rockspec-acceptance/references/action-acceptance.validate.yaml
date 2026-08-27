@@ -20,7 +20,7 @@ executor:
       - "需要在多个环境或公共接缝上进行复杂失败与兼容性验证。"
     record_selection: true
 reads:
-  artifacts: ["已批准的 specs/**/*.md", "已批准的 design.md", "已批准的 prototype/**", "tasks.md"]
+  artifacts: ["Acceptance Role Context Package", "已批准的 specs/**/*.md", "已批准的 design.md", "已批准的 prototype/**", "tasks.md"]
   repository: ["已集成实现", "现有验收约定"]
 writes:
   artifacts: ["testing/test-plan.md", "testing/test-report.md", "验收证据"]
