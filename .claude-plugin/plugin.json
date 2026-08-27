@@ -14,13 +14,13 @@
     "agent-workflow"
   ],
   "skills": [
-    "./skills/rs2-pm",
-    "./skills/rs2-ba",
-    "./skills/rs2-sa",
-    "./skills/rs2-rr",
-    "./skills/rs2-dev",
-    "./skills/rs2-cr",
-    "./skills/rs2-te",
-    "./skills/rs2-glossary"
+    "./skills/rockspec-pm",
+    "./skills/rockspec-ba",
+    "./skills/rockspec-sa",
+    "./skills/rockspec-rr",
+    "./skills/rockspec-dev",
+    "./skills/rockspec-cr",
+    "./skills/rockspec-te",
+    "./skills/rockspec-glossary"
   ]
 }

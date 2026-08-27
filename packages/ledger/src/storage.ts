@@ -5,7 +5,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import type { ChangeMeta, LedgerEvent } from "./types.js";
 
-const ROCKS_DIR = ".rockspec2";
+const ROCKS_DIR = ".rockspec";
 const CHANGES_DIR = "changes";
 const EVENTS_FILE = "events.ndjson";
 const META_FILE = "change.yaml";

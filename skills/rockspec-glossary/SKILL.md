@@ -1,11 +1,11 @@
 ---
-name: rs2-glossary
-description: RockSpec2 PM 编排架构的共享词汇表；定义结论协议 schema、Hook mark 结构、Worklist 项字段、放漂三级与 Finish 不变式，供 rs2-pm/ba/sa/rr/dev/cr/te 引用。
+name: rockspec-glossary
+description: RockSpec PM 编排架构的共享词汇表；定义结论协议 schema、Hook mark 结构、Worklist 项字段、放漂三级与 Finish 不变式，供 rockspec-pm/ba/sa/rr/dev/cr/te 引用。
 ---
 
-# RockSpec2 共享词汇表
+# RockSpec 共享词汇表
 
-本文是单一事实源。其他 rs2-* skill 不重复定义以下结构，只按名引用本文。产物人类可读内容用中文；Schema Key、R/S/W ID、CLI/子命令、`verdict`、`SHALL`、`GIVEN/WHEN/THEN`、`PASS/REJECT/BLOCK/FAIL` 保持英文。
+本文是单一事实源。其他 rockspec-* skill 不重复定义以下结构，只按名引用本文。产物人类可读内容用中文；Schema Key、R/S/W ID、CLI/子命令、`verdict`、`SHALL`、`GIVEN/WHEN/THEN`、`PASS/REJECT/BLOCK/FAIL` 保持英文。
 
 ## 结论协议
 
@@ -17,7 +17,7 @@ description: RockSpec2 PM 编排架构的共享词汇表；定义结论协议 sc
 role: ba | sa | dev
 artifact_id: requirements | design | <task-id>
 output_path: .rockspec/changes/<id>/<artifact>
-output_hash: sha256:...        # 由 rockspec2 conclude 计算，绑定当前产物
+output_hash: sha256:...        # 由 rockspec conclude 计算，绑定当前产物
 self_report: "一句话自述完成范围与覆盖的 R/S/W"
 blockers: []                    # 无法自决的产品决策 → PM 升级给人，非空即阻塞
 ```
@@ -41,7 +41,7 @@ findings:                        # verdict != PASS 必须至少一条；PASS 不
 
 ## Hook mark 结构
 
-生产者产出后，其 hook 自动触发 `rockspec2 check <artifact>`，跑纯机器检测集，结果写为 mark：
+生产者产出后，其 hook 自动触发 `rockspec check <artifact>`，跑纯机器检测集，结果写为 mark：
 
 ```yaml
 artifact_id: design
@@ -89,7 +89,7 @@ verdict_ref: <conclusion-id>     # 制衡者结论登记后写入
 2. 该产物全部 hook mark 干净；
 3. 制衡裁决绑定的 `subject_hash` == 该产物当前 hash。
 
-引擎不再管顺序（先需求还是先设计全归 PM），只在 `rockspec2 finish` 时守这一条：没经过制衡、没过 hook 的东西不能被当成 done。
+引擎不再管顺序（先需求还是先设计全归 PM），只在 `rockspec finish` 时守这一条：没经过制衡、没过 hook 的东西不能被当成 done。
 
 ## 两阶段边界
 
@@ -97,15 +97,15 @@ verdict_ref: <conclusion-id>     # 制衡者结论登记后写入
 - **APPLY（实施期）**：Dev → CR → TE。阶段内按 `problem_owner` 路由。
 - **跨 PROPOSE↔APPLY 边界的问题只能升级给人**，不能自动回退。RR PASS + 人确认后才进入 APPLY。
 
-## CLI 子命令集（rockspec2）
+## CLI 子命令集（rockspec）
 
 | 命令 | 用途 | 主要调用者 |
 |---|---|---|
-| `rockspec2 status --view worklist` | 拉工作清单全景 | PM |
-| `rockspec2 status --view resume` | 跨压缩续接投影 | PM |
-| `rockspec2 brief <role> --artifact <id>` | Ledger 冻结投影生成 dispatch brief（PM 不手写 brief） | PM |
-| `rockspec2 check <artifact>` | 跑确定性检测集，写 hook mark | 生产者 hook 自动触发 |
-| `rockspec2 mark <artifact>` | 读产物当前 mark 状态（clean/dirty） | 制衡者 |
-| `rockspec2 conclude --role <r> --artifact <id> [--output <path>] [--subject-hash <h> --verdict <v> --problem-owner <o> --report <path>]` | 登记生产者/制衡者结论 | 全部 agent |
-| `rockspec2 gate confirm <change-id>` | 跨阶段闸门的人确认登记 | PM（人授权后） |
-| `rockspec2 finish <change-id>` | 校验 Finish 不变式，通过则允许交付 | PM |
+| `rockspec status --view worklist` | 拉工作清单全景 | PM |
+| `rockspec status --view resume` | 跨压缩续接投影 | PM |
+| `rockspec brief <role> --artifact <id>` | Ledger 冻结投影生成 dispatch brief（PM 不手写 brief） | PM |
+| `rockspec check <artifact>` | 跑确定性检测集，写 hook mark | 生产者 hook 自动触发 |
+| `rockspec mark <artifact>` | 读产物当前 mark 状态（clean/dirty） | 制衡者 |
+| `rockspec conclude --role <r> --artifact <id> [--output <path>] [--subject-hash <h> --verdict <v> --problem-owner <o> --report <path>]` | 登记生产者/制衡者结论 | 全部 agent |
+| `rockspec gate confirm <change-id>` | 跨阶段闸门的人确认登记 | PM（人授权后） |
+| `rockspec finish <change-id>` | 校验 Finish 不变式，通过则允许交付 | PM |

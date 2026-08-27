@@ -1,4 +1,4 @@
-// rockspec2 CLI：PM 编排新架构的命令入口。
+// rockspec CLI：PM 编排新架构的命令入口。
 import { readFile } from "node:fs/promises";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
@@ -42,7 +42,7 @@ async function readConclusion(file?: string): Promise<unknown> {
 export function createProgram(): Command {
   const program = new Command();
   program
-    .name("rockspec2")
+    .name("rockspec")
     .description("RockSpec PM 编排架构：Ledger + 对抗制衡 + 确定性 Hook")
     .option("--json", "输出 JSON", false)
     .option("--repo <path>", "仓库根目录（默认当前目录）");
@@ -159,7 +159,7 @@ export async function runCli(argv: string[]): Promise<void> {
     if (error instanceof LedgerError) {
       const opts = program.opts() as GlobalOpts;
       if (opts.json) process.stderr.write(`${JSON.stringify({ ok: false, code: error.code, message: error.message, details: error.details }, null, 2)}\n`);
-      else process.stderr.write(`RockSpec2 ${error.code}: ${error.message}\n`);
+      else process.stderr.write(`RockSpec ${error.code}: ${error.message}\n`);
       process.exitCode = 1;
       return;
     }

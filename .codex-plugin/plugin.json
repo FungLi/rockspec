@@ -26,9 +26,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Act as PM (rs2-pm) and orchestrate this repository change.",
-      "Clarify requirements with the BA role (rs2-ba) interactively.",
-      "Draft the technical design with the SA role (rs2-sa).",
+      "Act as PM (rockspec-pm) and orchestrate this repository change.",
+      "Clarify requirements with the BA role (rockspec-ba) interactively.",
+      "Draft the technical design with the SA role (rockspec-sa).",
       "Run the deterministic hook check on this artifact before review."
     ]
   }
