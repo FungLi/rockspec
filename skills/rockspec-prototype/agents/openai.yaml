@@ -1,4 +1,0 @@
-interface:
-  display_name: "RockSpec Prototype"
-  short_description: "创建受治理或独立的可检查 UI/UX 原型设计包"
-  default_prompt: "使用 $rockspec-prototype 为这个变更设计可检查的 UI/UX 原型。"

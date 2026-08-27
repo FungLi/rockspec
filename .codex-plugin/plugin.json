@@ -1,24 +1,23 @@
 {
   "name": "rockspec",
   "version": "0.1.0",
-  "description": "Risk-adaptive, evidence-backed change delivery workflows for coding agents.",
+  "description": "PM-orchestrated change delivery: adversarial maker/checker pairing plus deterministic hooks.",
   "author": {
     "name": "RockSpec Contributors"
   },
   "license": "UNLICENSED",
   "keywords": [
     "harness-engineering",
-    "requirements",
-    "software-design",
-    "code-review",
-    "testing",
+    "pm-orchestration",
+    "adversarial-review",
+    "deterministic-hooks",
     "agent-workflow"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "RockSpec",
-    "shortDescription": "Governed change delivery for coding agents",
-    "longDescription": "Compose focused RockSpec skills for isolated worktrees, triage, requirements, design, planning, implementation, review, acceptance, and delivery, or route an end-to-end governed change.",
+    "shortDescription": "PM-orchestrated change delivery for coding agents",
+    "longDescription": "The main session acts as PM: it dispatches specialist agents (BA, SA, RR, Dev, CR, TE) across a two-phase PROPOSE/APPLY flow, keeps quality through adversarial checkers and deterministic hooks, and enforces a single Finish invariant instead of a hard-coded state machine.",
     "developerName": "RockSpec Contributors",
     "category": "Developer Tools",
     "capabilities": [
@@ -27,10 +26,10 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use RockSpec to deliver this repository change.",
-      "Use the appropriate atomic RockSpec skill for this stage.",
-      "Create a governed UI/UX prototype for this change.",
-      "Prepare an isolated RockSpec worktree for this parallel change."
+      "Act as PM (rs2-pm) and orchestrate this repository change.",
+      "Clarify requirements with the BA role (rs2-ba) interactively.",
+      "Draft the technical design with the SA role (rs2-sa).",
+      "Run the deterministic hook check on this artifact before review."
     ]
   }
 }
