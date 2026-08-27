@@ -1,4 +1,0 @@
-interface:
-  display_name: "RockSpec Review"
-  short_description: "独立评审固定任务、分支或验收后的最终变更"
-  default_prompt: "使用 $rockspec-review 独立评审这个实现。"

@@ -1,4 +1,0 @@
-interface:
-  display_name: "RockSpec Triage"
-  short_description: "评估变更风险并选择最低安全的工作流 Profile"
-  default_prompt: "使用 $rockspec-triage 评估这个变更并选择合适的 RockSpec Profile。"

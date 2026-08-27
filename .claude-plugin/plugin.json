@@ -1,32 +1,26 @@
 {
   "name": "rockspec",
   "version": "0.1.0",
-  "description": "Risk-adaptive, evidence-backed change delivery workflows for coding agents.",
+  "description": "PM-orchestrated change delivery: adversarial maker/checker pairing plus deterministic hooks.",
   "author": {
     "name": "RockSpec Contributors"
   },
   "license": "UNLICENSED",
   "keywords": [
     "harness-engineering",
-    "requirements",
-    "software-design",
-    "code-review",
-    "testing",
+    "pm-orchestration",
+    "adversarial-review",
+    "deterministic-hooks",
     "agent-workflow"
   ],
   "skills": [
-    "./skills/rockspec-change",
-    "./skills/rockspec-triage",
-    "./skills/rockspec-requirements",
-    "./skills/rockspec-design",
-    "./skills/rockspec-prototype",
-    "./skills/rockspec-plan",
-    "./skills/rockspec-implement",
-    "./skills/rockspec-review",
-    "./skills/rockspec-acceptance",
-    "./skills/rockspec-finish",
-    "./skills/rockspec-debug",
-    "./skills/rockspec-research",
-    "./skills/rockspec-worktree"
+    "./skills/rs2-pm",
+    "./skills/rs2-ba",
+    "./skills/rs2-sa",
+    "./skills/rs2-rr",
+    "./skills/rs2-dev",
+    "./skills/rs2-cr",
+    "./skills/rs2-te",
+    "./skills/rs2-glossary"
   ]
 }
