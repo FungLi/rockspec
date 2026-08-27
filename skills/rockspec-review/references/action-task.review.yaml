@@ -23,12 +23,12 @@ executor:
       - "Diff 跨多个模块且需要复杂行为或回归判断。"
     record_selection: true
 reads:
-  artifacts: ["runtime/reviews/task-<task-id>-*.diff（含 planned/changed/expanded paths）", "Engine 冻结的 Task Brief", "相关已批准 Specs 和 Design", "Implementer Report", "executed Task 证据"]
+  artifacts: ["runtime/reviews/task-<task-id>-*.diff（单一 Reviewer Context Package，含冻结 Brief、交叉决策审计、Implementer Report、Evidence 索引和 planned/changed/expanded paths）"]
   repository: ["只通过 Review Package 读取固定 Task Diff", "仓库规则"]
 writes:
   artifacts: ["reviews/tasks/<task-id>-review*.md"]
 preconditions:
-  - "Engine 已生成唯一 Review Package，并返回 base_commit、head_commit 和 diff_hash。"
+  - "Engine 已生成唯一 Review Package，并返回 Package path/hash 以及 base_commit、head_commit 和 diff_hash。"
   - "Reviewer execution ID 已登记，且不同于 Task Implementer。"
 completion:
   required:
@@ -38,6 +38,7 @@ completion:
     - "非 PASS 至少有一个 Open Finding；PASS 不包含 Open Critical/Important Finding。"
     - "修复轮报告携带上一轮全部 Findings，保持 ID 并更新状态；round 与 Engine Review Attempt 一致。"
     - "Strict 聚合保留两份报告和全部 Finding。"
+    - "historical_attribution 模式只评审固定单提交 Diff，并核对当前 HEAD 有覆盖全部 Task Scenario 的新鲜 executed Evidence。"
 outcomes:
   pass: ["task.execute", "acceptance.validate"]
   changes_required: ["task.execute", "revise"]

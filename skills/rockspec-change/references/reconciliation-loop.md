@@ -28,11 +28,10 @@ Engine 按失效 Gate 设置 `gate_policies.<gate>: preserve|auto|human`。`pres
 
 - 全部 Open Finding 都属于 `consistency_fix`、`derived_gap` 或 `implementation_fix`。
 - 全部 Finding 的 `authority_impact` 都是 `unchanged`。
-- 不存在 Critical Finding。
 - Revision 绑定真实 Author execution ID。
 - 目标 Gate 在本次 Revision 前已有人工 Approval，并被本次 Revision 失效。
 
-以下任一条件立即使用或升级当前责任 Gate 为 `human`：首次 Spec、Design 或 Implementation Approval；`decision_change`、`intent_change`、`risk_acceptance`；`authority_impact` 为 `changed` 或 `unknown`；Critical Finding；Reviewer 分歧；独立 Reviewer 判定边界变化；两轮内未收敛。用户在 Requirements/Design Gate 已确认新的权威边界后，只有派生 Plan 需要续期时，Implementation Gate 使用独立 Reviewer 自动对账，不重复要求用户批准同一决策。
+以下任一条件立即使用或升级当前责任 Gate 为 `human`：首次 Spec、Design 或 Implementation Approval；`decision_change`、`intent_change`、`risk_acceptance`；`authority_impact` 为 `changed` 或 `unknown`；Reviewer 分歧；独立 Reviewer 判定边界变化；两轮内未收敛。Critical 表示问题在修复前持续阻塞，不等于产品 Authority 已变化；Critical 的内部技术 `consistency_fix|derived_gap|implementation_fix + unchanged` 可在已有人工 Authority Baseline 上自动对账，但 Author 后的独立 Reviewer 必须使用 Deep，并直接证明高风险后置条件和聚焦测试。用户在 Requirements/Design Gate 已确认新的权威边界后，只有派生 Plan 需要续期时，Implementation Gate 使用独立 Reviewer 自动对账，不重复要求用户批准同一决策。
 
 旧报告缺少分类字段时，Protocol 按 `decision_change + unknown` 读取，因此不会被静默自动化。
 
@@ -50,7 +49,7 @@ Finding
 
 1. 发现问题的 Reviewer 或 Acceptance Agent 在 Frontmatter 写入分类、Authority Impact、责任域和路由。
 2. Engine 聚合全部 Open Finding；最保守的 Finding 决定策略，并返回唯一 `recovery` 和下一 Action。
-3. 没有 Open Revision 时以 `rockspec revise` 创建 `RV-xxx`。已有 Open Revision 时，新 Requirements、Readiness、Task、Acceptance 或 Delivery Review 的 Open Finding 必须以 `rockspec revise --amend` 追加为 `AM-xxx`；Engine 绑定 Review Hash 和全部 Finding，必要时把 Revision 总 target 向更上游扩展，但本 Amendment 只失效其自身 target 对应的 Artifact、Action 和 Gate。不得创建第二个 Revision，也不得用总 target 重复失效已确认 Gate。
+3. 运行 `rockspec recover apply <change-id> --affected <R-/S-/D-id>`；自动对账附带已登记的 `--author-execution`。Engine 在当前状态下绑定 Review Hash、全部 Open Finding、分类、Authority Impact 和最早 target：没有 Open Revision 时创建 `RV-xxx`，已有 Open Revision 时追加 `AM-xxx`。必要时 Revision 总 target 向更上游扩展，但 Amendment 只失效自身 target 对应的 Artifact、Action 和 Gate。不得手工拼 Review/Finding 参数、创建第二个 Revision，或用总 target 重复失效已确认 Gate。
 4. 自动 Revision 由其责任 Skill 以 **reconciliation** 模式执行：从磁盘读取 Revision、Finding、旧权威基线和失效范围，只修复已声明影响，不重复逐章节征求用户确认。
 5. 若修复过程中发现需要新产品选择、决策替换或风险接受，停止修改，将 Authority Impact 标记为 `changed` 或 `unknown`，升级到人工流程。
 6. 每个失效 Gate 的产物和前置 Action 恢复后，调用 `rockspec reconcile prepare <gate> <change-id>` 固定 Revision、Gate、轮次、分类、Finding、当前产物 Hash 与旧 Authority Baseline。
@@ -60,7 +59,7 @@ Finding
 
 ## 用户负担边界
 
-- **authoring**：首次产出、用户主动改意图、需要新决策或接受风险。Requirements/Design 保持逐问题、逐方案、逐章节确认；每个首次 Gate 都暂停等待用户审批。
+- **authoring**：首次产出或用户主动改意图。Requirements/Design 只为通过四项 Authority 测试的新选择暂停；章节、普通技术方案和派生内容静默完成并由 Reviewer 核验。每个首次 Gate 仍暂停等待一次正式 Hash Approval。
 - **reconciliation**：只恢复已批准意图和决策的一致性。AI 自行修复、复核和续批，不用用户重复确认相同内容；完成后报告变更摘要、证据和续期的 Gate。
 
 自动化不是“AI 代替用户批准”，而是由原人工 Authority Baseline、受限修订范围和独立 Reviewer 共同证明批准内容没有改变。

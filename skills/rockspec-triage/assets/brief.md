@@ -1,4 +1,4 @@
-# Change Brief
+# 变更简报
 
 - Change ID：`{{change_id}}`
 - 标题：{{title}}

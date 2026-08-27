@@ -1,4 +1,20 @@
-# {{task_id}} Implementer Report
+---
+schema_version: 1
+task_id: {{task_id}}
+execution_id: {{implementer_execution_id}}
+base_commit: {{task_base_commit}}
+brief_path: {{brief_path}}
+brief_hash: {{brief_hash}}
+outcome: {{implemented_or_blocked}}
+# outcome=blocked 时必须填写 blocker；implemented 时删除 blocker
+blocker:
+  kind: {{contract_conflict_or_authority_conflict}}
+  source_refs: [{{conflicting_task_requirement_scenario_decision_or_path_refs}}]
+  summary: {{concrete_conflict_summary}}
+  recommended_route: {{plan.create_or_requirements.clarify_or_design.technical}}
+---
+
+# {{task_id}} 实施报告
 
 - Execution ID：`{{implementer_execution_id}}`
 - Base Commit：`{{task_base_commit}}`

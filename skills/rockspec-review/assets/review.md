@@ -7,6 +7,7 @@ subject:
   head_commit: "{{review_package_head_commit}}"
   diff_hash: "{{review_package_diff_hash}}"
 round: {{zero_for_initial_review_one_or_two_for_fix_review}}
+scope_assessment: []
 findings: []
 ---
 
@@ -26,7 +27,7 @@ findings: []
 | Code Standards | {{result}} | {{evidence}} |
 | Test Quality | {{result}} | {{evidence}} |
 
-## Findings
+## 评审发现
 
 `PASS` 可以使用 `findings: []`。`CHANGES_REQUIRED` 或 `BLOCKED` 必须把至少一个 Open Finding 写入 Frontmatter；以下是单项结构，不能只写在正文：
 

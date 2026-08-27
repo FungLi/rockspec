@@ -97,7 +97,7 @@ describe("recovery policy", () => {
     });
   });
 
-  it("allows only non-critical unchanged-authority repair classifications to reconcile automatically", () => {
+  it("allows unchanged-authority repair classifications to reconcile automatically", () => {
     expect(recoveryDirective(changeWithFinding(finding()))).toMatchObject({
       kind: "revision",
       target: "plan",
@@ -107,10 +107,22 @@ describe("recovery policy", () => {
     });
   });
 
-  it("escalates Critical Findings even when their declared authority impact is unchanged", () => {
+  it("keeps Critical technical gaps automatic when their declared authority is unchanged", () => {
     expect(recoveryDirective(changeWithFinding(finding({ severity: "critical" })))).toMatchObject({
       kind: "revision",
       authority_delta: "unchanged",
+      approval_policy: "auto",
+    });
+  });
+
+  it("escalates Critical Findings that change an approved decision", () => {
+    expect(recoveryDirective(changeWithFinding(finding({
+      severity: "critical",
+      classification: "decision_change",
+      authority_impact: "changed",
+    })))).toMatchObject({
+      kind: "revision",
+      authority_delta: "changed",
       approval_policy: "human",
     });
   });
