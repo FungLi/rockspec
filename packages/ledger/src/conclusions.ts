@@ -26,6 +26,11 @@ const FindingSchema = z.object({
   description: z.string().optional(),
 });
 
+const TaskSpecSchema = z.object({
+  artifact_id: z.string().min(1),
+  depends_on: z.array(z.string()).default([]),
+});
+
 export const MakerConclusionSchema = z.object({
   kind: z.literal("maker"),
   role: z.enum(MAKER_ROLES),
@@ -34,6 +39,7 @@ export const MakerConclusionSchema = z.object({
   output_hash: z.string().refine(isSha256, "output_hash 必须是 sha256:<64hex>"),
   self_report: z.string().min(1),
   blockers: z.array(BlockerSchema).default([]),
+  registers: z.array(TaskSpecSchema).optional(),
 });
 
 export const CheckerConclusionSchema = z

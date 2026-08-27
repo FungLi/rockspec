@@ -4,4 +4,6 @@ export * from "./storage.js";
 export * from "./projection.js";
 export * from "./hooks.js";
 export * from "./conclusions.js";
+export * from "./board.js";
+export * from "./board-render.js";
 export * from "./ledger.js";

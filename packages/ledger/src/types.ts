@@ -87,6 +87,12 @@ export interface Blocker {
   detail?: string;
 }
 
+/** 生产者拆出的新卡（SA 用：把 design 拆成多个 code Task 注册进看板）。 */
+export interface TaskSpec {
+  artifact_id: string;
+  depends_on: string[];
+}
+
 /** 生产者结论 */
 export interface MakerConclusion {
   kind: "maker";
@@ -96,6 +102,7 @@ export interface MakerConclusion {
   output_hash: string;
   self_report: string;
   blockers: Blocker[]; // 非空 → PM 升级人裁决
+  registers?: TaskSpec[]; // SA 拆出的 code Task，Ledger 据此追加 item.registered
 }
 
 export interface Finding {
@@ -186,6 +193,48 @@ export interface WorklistProjection {
   change_id: string;
   config: ChangeConfig;
   items: WorklistItem[];
+  finished: boolean;
+  archived: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 看板（Board）：Worklist 的列式投影。列=状态分组，owner 由列推导。
+// 看板是事件流的只读投影，不是第二份真相；卡的流转只由带证据的事件驱动。
+// ---------------------------------------------------------------------------
+
+export const BOARD_COLUMNS = ["backlog", "in_progress", "review", "done", "blocked"] as const;
+export type BoardColumn = (typeof BOARD_COLUMNS)[number];
+
+/** Blocked 列内的两个子区：等返工 vs 等人裁决。 */
+export const BLOCKED_LANES = ["rework", "escalated"] as const;
+export type BlockedLane = (typeof BLOCKED_LANES)[number];
+
+/** owner：卡当前的责任人。人裁决时为 "human"，无主时为 null。 */
+export type CardOwner = Role | "human" | null;
+
+export interface BoardCard {
+  artifact_id: string;
+  kind: ArtifactKind;
+  phase: Phase;
+  column: BoardColumn;
+  blocked_lane?: BlockedLane; // 仅 column==="blocked" 时有意义
+  owner: CardOwner;
+  maker_role: MakerRole;
+  checker_role: CheckerRole;
+  depends_on: string[];
+  blocked_by: string[]; // depends_on 中尚未 done 的卡（关键链可视）
+  pullable: boolean; // 是否可被 PM 拉取开工
+  attempts: number;
+  last_verdict?: Verdict;
+}
+
+export interface Board {
+  change_id: string;
+  config: ChangeConfig;
+  cards: BoardCard[];
+  columns: Record<BoardColumn, BoardCard[]>;
+  next_pullable: string[]; // 可拉取的卡 artifact_id（确定性规则）
+  critical_path: string[]; // 最长依赖链
   finished: boolean;
   archived: boolean;
 }

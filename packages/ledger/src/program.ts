@@ -5,6 +5,8 @@ import { parse as parseYaml } from "yaml";
 import { Ledger, LedgerError } from "./ledger.js";
 import type { RigorLevel } from "./types.js";
 import { renderFinishCheck, renderMark, renderResume, renderWorklist } from "./render.js";
+import { renderBoard } from "./board-render.js";
+import path from "node:path";
 
 interface GlobalOpts {
   json?: boolean;
@@ -61,11 +63,30 @@ export function createProgram(): Command {
     .command("status")
     .description("查看 Change 状态")
     .argument("<change-id>")
-    .option("--view <view>", "worklist|resume", "worklist")
+    .option("--view <view>", "worklist|resume|board", "worklist")
     .action(async (changeId: string, opts: { view: string }, cmd: Command) => {
-      const wl = await ledgerFor(cmd).worklist(changeId);
+      const ledger = ledgerFor(cmd);
+      if (opts.view === "board") {
+        const board = await ledger.board(changeId);
+        emit(cmd, renderBoard(board), board);
+        return;
+      }
+      const wl = await ledger.worklist(changeId);
       const human = opts.view === "resume" ? renderResume(wl) : renderWorklist(wl);
       emit(cmd, human, wl);
+    });
+
+  program
+    .command("board")
+    .description("打印看板（并提示 board.md 位置）")
+    .argument("<change-id>")
+    .action(async (changeId: string, _o: unknown, cmd: Command) => {
+      const opts = cmd.optsWithGlobals() as GlobalOpts;
+      const repo = opts.repo ?? process.cwd();
+      const board = await ledgerFor(cmd).board(changeId);
+      const mdPath = path.join(repo, ".rockspec", "changes", changeId, "board.md");
+      const human = `${renderBoard(board)}\n\n给人看的看板文件：${mdPath}`;
+      emit(cmd, human, { ...board, board_md: mdPath });
     });
 
   program
