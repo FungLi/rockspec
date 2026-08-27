@@ -35,7 +35,7 @@ completion:
     - "每个 Finding 声明 classification 和 authority_impact。"
     - "Review Hash 与当前 Design、Prototype、Plan 和 Tasks 一致。"
     - "Strict 聚合保留两份原始报告和全部 Finding。"
-    - "PASS 后运行 preflight implementation；安装一致性、审批新鲜度、Task DAG、Recovery 和两种 Task Review 路径全部通过后才请求或续期实施审批。"
+    - "PASS 后运行 preflight implementation；安装一致性、审批新鲜度、Task DAG、Recovery 和三种 Task Review 路径全部通过后才请求或续期实施审批。"
 outcomes:
   pass: []
   changes_required: ["design.technical", "plan.create"]

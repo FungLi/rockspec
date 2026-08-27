@@ -15,8 +15,8 @@
 
 遵守仓库约定和 Brief 投影的已批准 Design。UI 工作应用 Brief 中的 Design System 和 Prototype，包括响应式、状态和可访问性行为。缺少的仓库事实可读取必要代码，不得默认读取完整 proposal、Specs、Design 或 Plan 来重新设计 Task。接口、依赖或 Task 合同冲突时报告 `CONTRACT_CONFLICT`；权威来源冲突时报告 `AUTHORITY_CONFLICT`。不得发明新 Requirement；无法在既有合同内消解时停止并路由给父级。
 
-先在开发循环中运行聚焦测试和 Task 要求的检查；提交唯一一个包含 `[Task ID]` 的 Commit 后，由父级通过 `rockspec check run` 重新执行 Gate 检查。不要伪造或手写 executed Evidence。指定修复轮次中只修复已验证 Finding，并 amend 同一 Commit；不得修改 `.rockspec/**` 下的 Review 或状态文件。
+普通模式先在开发循环中运行聚焦测试和 Task 要求的检查；提交唯一一个包含 `[Task ID]` 的 Commit 后，由父级通过 `rockspec check run` 重新执行 Gate 检查。Brief 标记 `Historical Attribution Mode` 时不编辑产品文件、不创建或改写 Commit，只检查固定历史 Diff，并让父级在当前 HEAD 执行覆盖全部 Task Scenario 的检查。不要伪造或手写 executed Evidence。指定修复轮次中只修复已验证 Finding，并 amend 同一 Commit；历史归属 Review 发现实现问题时必须转入真正的 Remediation Task，不改写被接管的历史提交。不得修改 `.rockspec/**` 下的 Review 或状态文件。
 
 ## 报告
 
-填写 Engine 已创建的 Implementer Report，报告 Brief 路径与 Hash、Task Base、你的 execution ID、改动文件、已实施行为、Requirement/Scenario 覆盖、新增测试、Red/Green 观察、最终 Diff 摘要、Commit SHA、风险和阻塞项。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。绝不声称 Task Gate 已通过；只有 Engine 决定完成状态。
+填写 Engine 已创建的 Implementer Report，报告 Brief 路径与 Hash、Task Base、你的 execution ID、改动文件、已实施行为、Requirement/Scenario 覆盖、新增测试、Red/Green 观察、最终 Diff 摘要、Commit SHA、风险和阻塞项。正常完成保留 `outcome: implemented`；冲突停止时改为 `outcome: blocked` 并完整填写 `blocker`，不得仅在正文写 `CONTRACT_CONFLICT` 或 `AUTHORITY_CONFLICT`。原样记录 Execution Brief 提供的 Model Tier、宿主模型和选择原因；不得自行改变或猜测，缺失时记录 `UNKNOWN`。绝不声称 Task Gate 已通过；只有 Engine 决定完成状态。

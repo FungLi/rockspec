@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -31,6 +31,13 @@ async function repository(): Promise<string> {
 
 async function replace(root: string, changeId: string, relativePath: string, content: string): Promise<void> {
   await writeFile(path.join(root, ".rockspec", "changes", changeId, relativePath), content);
+}
+
+async function writeImplementedReport(root: string, changeId: string, relativePath: string, body: string): Promise<void> {
+  const current = await readFile(path.join(root, ".rockspec", "changes", changeId, relativePath), "utf8");
+  const frontmatterEnd = current.indexOf("\n---\n", 4);
+  if (!current.startsWith("---\n") || frontmatterEnd < 0) throw new Error(`Missing generated report metadata in ${relativePath}`);
+  await replace(root, changeId, relativePath, `${current.slice(0, frontmatterEnd + 5)}\n# Implementer Report\n\n${body}\n`);
 }
 
 async function writeNoChangeKnowledgeDelta(root: string, changeId: string): Promise<void> {
@@ -139,7 +146,19 @@ async function startExecution(
   action: string,
   role: Parameters<RockSpecEngine["startExecution"]>[0]["role"],
 ): Promise<string> {
-  const result = await new RockSpecEngine({ cwd: root }).startExecution({ changeId, action, role });
+  let contextPackage: { contextPackagePath: string; contextPackageHash: string } | undefined;
+  if (role === "task_reviewer" || role === "delivery_reviewer") {
+    const reviewsRoot = path.join(root, ".rockspec", "changes", changeId, "runtime", "reviews");
+    const prefix = role === "task_reviewer" ? "task-" : "delivery-";
+    const candidates = (await readdir(reviewsRoot)).filter((file) => file.startsWith(prefix) && file.endsWith(".diff"));
+    const ranked = await Promise.all(candidates.map(async (file) => ({ file, modified: (await stat(path.join(reviewsRoot, file))).mtimeMs })));
+    const latest = ranked.sort((left, right) => right.modified - left.modified)[0];
+    if (!latest) throw new Error(`Missing ${role} context package for ${changeId}`);
+    const contextPackagePath = `runtime/reviews/${latest.file}`;
+    const content = await readFile(path.join(reviewsRoot, latest.file));
+    contextPackage = { contextPackagePath, contextPackageHash: `sha256:${createHash("sha256").update(content).digest("hex")}` };
+  }
+  const result = await new RockSpecEngine({ cwd: root }).startExecution({ changeId, action, role, ...contextPackage });
   return result.started_execution.id;
 }
 
@@ -295,8 +314,12 @@ async function materializeDesign(root: string, changeId: string): Promise<void> 
     root,
     changeId,
     "design.md",
-    `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nImplement R-001 without changing unrelated contracts.\n\n## Decisions\n\n### D-001\n\nUse the existing module boundary and verification stack.\n`,
+    `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n## Context\n\nImplement R-001 without changing unrelated contracts.\n\n## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse the existing boundary instead of creating a parallel stack.\n\n## Decisions\n\n${completeDecisionBody("D-001", "Existing module boundary", "Use the existing module boundary and verification stack.")}\n\n## 未解决风险\n\nNone.\n`,
   );
+}
+
+function completeDecisionBody(id: string, title: string, architecture: string): string {
+  return `### ${id} ${title}\n\n#### 目标与覆盖范围\n\nCover the mapped Requirement and Scenario without broadening scope.\n\n#### 架构决策\n\n${architecture}\n\n#### 模块与职责\n\nKeep responsibility in the mapped module.\n\n#### 接口与数据流\n\nUse the existing public interface and preserve its data flow.\n\n#### 失败与边界行为\n\nReturn the existing deterministic failure behavior.\n\n#### 安全与隐私\n\nDo not log sensitive input.\n\n#### 兼容、迁移与回滚\n\nPreserve compatibility; rollback reverts the Task commit.\n\n#### 验证策略\n\nRun focused behavior and regression tests.\n\n#### 取舍与剩余风险\n\nPrefer the existing boundary; residual risk is None.`;
 }
 
 function taskDocument(input: {
@@ -308,11 +331,13 @@ function taskDocument(input: {
   requirementIds?: string[];
   decisionIds?: string[];
   findingIds?: string[];
+  adoptedCommit?: string;
+  validationCommands?: string[];
   consumes?: string[];
   produces?: string[];
 }): string {
   const list = (values: string[]): string => `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
-  return `---\nschema_version: 1\nid: ${input.id}\ntitle: ${input.id} implementation\ndependencies: ${list(input.dependencies ?? [])}\nsupersedes: ${list(input.supersedes ?? [])}\nrequirement_ids: ${list(input.requirementIds ?? ["R-001"])}\nscenario_ids: ${list(input.scenarioIds)}\ndecision_ids: ${list(input.decisionIds ?? ["D-001"])}\nfinding_ids: ${list(input.findingIds ?? [])}\nacceptance_criteria: [The mapped behavior is observable.]\nconsumes: ${list(input.consumes ?? [])}\nproduces: ${list(input.produces ?? [])}\nallowed_paths: [${input.allowedPath}]\n---\n\n# ${input.id}\n\n## Goal\n\nImplement the mapped behavior.\n`;
+  return `---\nschema_version: 1\nid: ${input.id}\ntitle: ${input.id} implementation\ndependencies: ${list(input.dependencies ?? [])}\nsupersedes: ${list(input.supersedes ?? [])}\nrequirement_ids: ${list(input.requirementIds ?? ["R-001"])}\nscenario_ids: ${list(input.scenarioIds)}\ndecision_ids: ${list(input.decisionIds ?? ["D-001"])}\nfinding_ids: ${list(input.findingIds ?? [])}\n${input.adoptedCommit ? `adopted_commit: ${input.adoptedCommit}\n` : ""}acceptance_criteria: [The mapped behavior is observable.]\nvalidation_commands: ${list(input.validationCommands ?? [])}\nconsumes: ${list(input.consumes ?? [])}\nproduces: ${list(input.produces ?? [])}\nallowed_paths: [${input.allowedPath}]\n---\n\n# ${input.id}\n\n## Goal\n\nImplement the mapped behavior.\n`;
 }
 
 async function materializePlan(root: string, changeId: string): Promise<void> {
@@ -337,6 +362,10 @@ async function approveRequirements(engine: RockSpecEngine, root: string, id: str
 async function makeReady(engine: RockSpecEngine, root: string, id: string): Promise<void> {
   await approveRequirements(engine, root, id);
   await materializeDesign(root, id);
+  await finishReadiness(engine, root, id);
+}
+
+async function finishReadiness(engine: RockSpecEngine, root: string, id: string): Promise<void> {
   await engine.completeAction({ changeId: id, action: "design.technical" });
   await approveGate(engine, id, "design");
   await materializePlan(root, id);
@@ -404,6 +433,90 @@ describe("RockSpecEngine", () => {
     });
   });
 
+  it("verifies execution context path/hash bindings and records their trust state", async () => {
+    const root = await repository();
+    const engine = new RockSpecEngine({ cwd: root });
+    await engine.init();
+    const id = "verify-context-package";
+    await engine.newChange({ id, profile: "standard" });
+    const contextPath = "runtime/requirements-context.md";
+    const contextBody = "# Requirements review context\n";
+    await replace(root, id, contextPath, contextBody);
+    const contextHash = `sha256:${createHash("sha256").update(contextBody).digest("hex")}`;
+
+    await expect(engine.startExecution({
+      changeId: id,
+      action: "requirements.review",
+      role: "requirements_reviewer",
+      contextPackagePath: contextPath,
+    })).rejects.toMatchObject({ code: "CONTEXT_PACKAGE_BINDING_INCOMPLETE" });
+    await expect(engine.startExecution({
+      changeId: id,
+      action: "requirements.review",
+      role: "requirements_reviewer",
+      contextPackagePath: contextPath,
+      contextPackageHash: `sha256:${"0".repeat(64)}`,
+    })).rejects.toMatchObject({ code: "CONTEXT_PACKAGE_HASH_MISMATCH" });
+    await expect(engine.startExecution({
+      changeId: id,
+      action: "requirements.review",
+      role: "requirements_reviewer",
+      contextPackagePath: "../outside.md",
+      contextPackageHash: contextHash,
+    })).rejects.toMatchObject({ code: "CONTEXT_PACKAGE_NOT_FOUND" });
+    await expect(engine.startExecution({
+      changeId: id,
+      action: "task.review",
+      role: "task_reviewer",
+    })).rejects.toMatchObject({ code: "REVIEW_CONTEXT_REQUIRED" });
+    await expect(engine.startExecution({
+      changeId: id,
+      action: "task.review",
+      role: "task_reviewer",
+      contextPackagePath: contextPath,
+      contextPackageHash: contextHash,
+    })).rejects.toMatchObject({ code: "CONTEXT_PACKAGE_ROLE_MISMATCH" });
+
+    const started = await engine.startExecution({
+      changeId: id,
+      action: "requirements.review",
+      role: "requirements_reviewer",
+      contextPackagePath: contextPath,
+      contextPackageHash: contextHash,
+    });
+    expect(started.change.execution.registry.at(-1)).toMatchObject({
+      id: started.started_execution.id,
+      context_package_path: contextPath,
+      context_package_hash: contextHash,
+      context_package_verified: true,
+    });
+  });
+
+  it("dry-runs one formal artifact and returns field-level schema guidance", async () => {
+    const root = await repository();
+    const engine = new RockSpecEngine({ cwd: root });
+    await engine.init();
+    const id = "validate-one-artifact";
+    await engine.newChange({ id, profile: "standard" });
+    await replace(
+      root,
+      id,
+      "proposal.md",
+      "---\nschema_version: 1\nnon_goals: []\nassumptions:\n  - unclear assumption\nopen_questions: []\n---\n\n# Proposal\n",
+    );
+
+    const result = await engine.validate({ changeId: id, artifactPath: "proposal.md" });
+    expect(result).toMatchObject({
+      valid: false,
+      artifact: "proposal.md",
+      errors: [expect.objectContaining({
+        code: "invalid_type",
+        paths: ["proposal.md", "assumptions", "0"],
+        expected: "object",
+      })],
+    });
+  });
+
   it("initializes at the Git root and runs the Lite lifecycle", async () => {
     const root = await repository();
     const visibleRoot = root.startsWith("/private/var/") ? root.slice("/private".length) : root;
@@ -450,7 +563,11 @@ describe("RockSpecEngine", () => {
     const created = await engine.newChange({ id: "add-profile-export", profile: "standard" });
     expect(created.current_state).toBe("SCOPING");
     await expect(readFile(path.join(root, ".rockspec", "changes", "add-profile-export", "design.md"), "utf8"))
-      .resolves.toContain("Technical Design");
+      .resolves.toContain("# 技术设计");
+    await expect(readFile(path.join(root, ".rockspec", "changes", "add-profile-export", "design.md"), "utf8"))
+      .resolves.toContain("## 全局约束");
+    await expect(readFile(path.join(root, ".rockspec", "changes", "add-profile-export", "plan.md"), "utf8"))
+      .resolves.toContain("## 全局约束");
 
     await approveRequirements(engine, root, "add-profile-export");
     await replace(
@@ -496,6 +613,90 @@ describe("RockSpecEngine", () => {
     );
     await expect(engine.completeAction({ changeId: id, action: "design.technical" }))
       .rejects.toMatchObject({ code: "DESIGN_INPUT_STALE" });
+  });
+
+  it("builds Chinese Gate summaries over formal artifacts without creating preview documents", async () => {
+    const root = await repository();
+    const engine = new RockSpecEngine({ cwd: root });
+    const id = "approval-review-summary";
+    await engine.init();
+    await engine.newChange({ id, profile: "standard" });
+
+    await materializeRequirements(root, id);
+    await engine.completeAction({ changeId: id, action: "requirements.clarify" });
+    await passReview(root, id, "reviews/requirements-review.md");
+    await engine.completeAction({ changeId: id, action: "requirements.review" });
+    const specPackage = await engine.prepareApproval({ changeId: id, gate: "spec" });
+    expect(specPackage.review_summary).toMatchObject({
+      language: "zh-CN",
+      title: "需求审批",
+      approval_prompt: expect.stringContaining("批准需求"),
+      artifact_root: `.rockspec/changes/${id}`,
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({
+          label: "需求提案",
+          path: `.rockspec/changes/${id}/proposal.md`,
+          relative_path: "proposal.md",
+          description: expect.stringContaining("需求背景"),
+        }),
+        expect.objectContaining({
+          label: "需求评审",
+          path: `.rockspec/changes/${id}/reviews/requirements-review.md`,
+          relative_path: "reviews/requirements-review.md",
+          description: expect.stringContaining("独立需求评审"),
+        }),
+      ]),
+    });
+    expect(specPackage.review_summary.sections.flatMap((section) => section.items).join("\n"))
+      .toContain("R-001 Observable behavior");
+    await engine.approve({ changeId: id, gate: "spec", packageHash: specPackage.hash });
+
+    await materializeDesign(root, id);
+    await engine.completeAction({ changeId: id, action: "design.technical" });
+    const designPackage = await engine.prepareApproval({ changeId: id, gate: "design" });
+    expect(designPackage.review_summary).toMatchObject({
+      title: "设计审批",
+      approval_prompt: expect.stringContaining("批准设计"),
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({
+          label: "技术设计",
+          path: `.rockspec/changes/${id}/design.md`,
+          relative_path: "design.md",
+          description: expect.stringContaining("架构决策"),
+        }),
+      ]),
+    });
+    expect(designPackage.review_summary.sections.flatMap((section) => section.items).join("\n"))
+      .toContain("D-001 Existing module boundary");
+    expect(designPackage.review_summary.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "审阅问题" }),
+      expect.objectContaining({ title: "变更范围与约束" }),
+      expect.objectContaining({ title: "核心设计决策" }),
+      expect.objectContaining({ title: "兼容、回滚与验证" }),
+      expect.objectContaining({ title: "待用户决定", items: ["无"] }),
+    ]));
+    expect(designPackage.review_summary.sections.flatMap((section) => section.items).join("\n"))
+      .toMatch(/决定：.*理由：.*影响：/s);
+    await engine.approve({ changeId: id, gate: "design", packageHash: designPackage.hash });
+
+    await materializePlan(root, id);
+    await engine.completeAction({ changeId: id, action: "plan.create" });
+    await passReview(root, id, "reviews/readiness-review.md");
+    await engine.completeAction({ changeId: id, action: "readiness.review" });
+    const implementationPackage = await engine.prepareApproval({ changeId: id, gate: "implementation" });
+    expect(implementationPackage.review_summary).toMatchObject({
+      title: "实施审批",
+      approval_prompt: expect.stringContaining("批准实施"),
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({ label: "实施计划", relative_path: "plan.md", description: expect.stringContaining("Task DAG") }),
+        expect.objectContaining({ label: "任务 T-001", relative_path: "tasks/T-001.md", description: expect.stringContaining("单个 Task") }),
+        expect.objectContaining({ label: "就绪评审", relative_path: "reviews/readiness-review.md", description: expect.stringContaining("实施就绪度") }),
+      ]),
+    });
+    expect(implementationPackage.review_summary.sections.flatMap((section) => section.items).join("\n"))
+      .toContain("T-001 <- 无前置任务");
+    expect(await readdir(path.join(root, ".rockspec", "changes", id, "runtime", "approvals")))
+      .toEqual(expect.not.arrayContaining([expect.stringMatching(/preview\.md$/)]));
   });
 
   it("never uses automatic reconciliation for a Gate without a human authority baseline", async () => {
@@ -677,11 +878,11 @@ describe("RockSpecEngine", () => {
     await writeFile(path.join(root, "feature.txt"), "implementation needing a design correction\n");
     await execFileAsync("git", ["add", "feature.txt"], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat: [T-001] implement behavior"], { cwd: root });
-    await replace(
+    await writeImplementedReport(
       root,
       id,
       "runtime/tasks/T-001/implementer-report.md",
-      "# Implementer Report\n\nImplemented the frozen Task and recorded focused evidence.\n",
+      "Implemented the frozen Task and recorded focused evidence.",
     );
     await engine.runCheck({
       changeId: id,
@@ -825,6 +1026,7 @@ describe("RockSpecEngine", () => {
         head_commit: status.change.base_commit!,
         brief_path: "revisions/RV-001/before/runtime/tasks/T-999/brief.md",
         brief_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        report_path: "revisions/RV-001/before/runtime/tasks/T-999/implementer-report.md",
         review_attempts: 0,
         suspended_at: suspendedAt,
       }],
@@ -848,6 +1050,12 @@ describe("RockSpecEngine", () => {
     expect((await engine.nextTask({ changeId: id }))?.id).toBe("T-001");
     const started = await engine.startTask({ changeId: id, taskId: "T-001" });
     expect(started.change.tasks["T-001"]?.status).toBe("in_progress");
+    const brief = await readFile(path.join(root, ".rockspec", "changes", id, started.change.tasks["T-001"]!.brief_path!), "utf8");
+    expect(brief).toContain("### T-999");
+    expect(brief).toContain("Relationship: Inherited Suspended Baseline");
+    expect(brief).toContain(`Attempt Base: ${status.change.base_commit}`);
+    expect(brief).toContain("Archived Brief: revisions/RV-001/before/runtime/tasks/T-999/brief.md");
+    expect(brief).toContain("Archived Report: revisions/RV-001/before/runtime/tasks/T-999/implementer-report.md");
   }, 30_000);
 
   it("preserves a completed historical replacement during a later implementation recovery", async () => {
@@ -1139,7 +1347,7 @@ describe("RockSpecEngine", () => {
     await execFileAsync("git", ["add", "feature.txt"], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat: [T-001] implement behavior"], { cwd: root });
     const completedCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
-    await replace(root, id, "runtime/tasks/T-001/implementer-report.md", "# Report\n\nImplemented and checked.\n");
+    await writeImplementedReport(root, id, "runtime/tasks/T-001/implementer-report.md", "Implemented and checked.");
     await engine.runCheck({ changeId: id, taskId: "T-001", executable: process.execPath, args: ["-e", "process.exit(0)"] });
     const taskPackage = await engine.prepareReviewPackage({ changeId: id, kind: "task", taskId: "T-001" });
     await writeCodeReview(root, id, "reviews/tasks/T-001-review.md", taskPackage.subject);
@@ -1203,6 +1411,170 @@ describe("RockSpecEngine", () => {
       status: "reconciled",
       trigger: { review_id: "acceptance", finding_ids: ["F-001"] },
     });
+  }, 30_000);
+
+  it("attributes a historical product Commit through a Finding-bound Recovery Task", async () => {
+    const root = await repository();
+    const engine = new RockSpecEngine({ cwd: root });
+    await engine.init();
+    const id = "attribute-historical-commit";
+    await engine.newChange({ id, profile: "standard", uatPolicy: "optional" });
+    await makeReady(engine, root, id);
+
+    await writeFile(path.join(root, "historical.txt"), "approved behavior introduced before Task attribution\n");
+    await execFileAsync("git", ["add", "historical.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "fix(worker): preserve historical routing context"], { cwd: root });
+    const historicalCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    const historicalParent = (await execFileAsync("git", ["rev-parse", `${historicalCommit}^`], { cwd: root })).stdout.trim();
+
+    await engine.startTask({ changeId: id, taskId: "T-001" });
+    await writeFile(path.join(root, "feature.txt"), "implemented\n");
+    await execFileAsync("git", ["add", "feature.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "feat: [T-001] implement behavior"], { cwd: root });
+    const implementationCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    await writeImplementedReport(root, id, "runtime/tasks/T-001/implementer-report.md", "Implemented the planned behavior.");
+    await engine.runCheck({ changeId: id, taskId: "T-001", executable: process.execPath, args: ["-e", "process.exit(0)"] });
+    const firstPackage = await engine.prepareReviewPackage({ changeId: id, kind: "task", taskId: "T-001" });
+    await writeCodeReview(root, id, "reviews/tasks/T-001-review.md", firstPackage.subject);
+    await engine.completeAction({ changeId: id, action: "task.review" });
+    await engine.completeTask({ changeId: id, taskId: "T-001", commitSha: implementationCommit });
+
+    await replace(root, id, "testing/test-plan.md", "# Acceptance Plan\n\nExercise S-001.\n");
+    await replace(
+      root,
+      id,
+      "testing/test-report.md",
+      `---\nschema_version: 1\nverdict: CHANGES_REQUIRED\nreviewer_execution_id: acceptance-reviewer\ncommit: ${implementationCommit}\nfindings:\n  - id: F-001\n    severity: important\n    category: commit-attribution\n    evidence: historical.txt:1\n    description: The approved historical product Commit has no Task attribution.\n    owner_domain: implementation\n    route_to: task.execute\n    status: open\n---\n\n# Acceptance\n\nVerdict: CHANGES_REQUIRED\n`,
+    );
+    await bindExecutionInArtifact(root, id, "testing/test-report.md", "acceptance-reviewer", "acceptance.validate", "acceptance_engineer");
+    await engine.completeAction({ changeId: id, action: "acceptance.validate", verdict: "CHANGES_REQUIRED" });
+    await engine.revise({
+      changeId: id,
+      reviewId: "acceptance",
+      findingIds: ["F-001"],
+      reason: "Trace the approved historical Commit through an independently reviewed attribution Task",
+      affectedIds: [],
+    });
+
+    await replace(root, id, "plan.md", "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Recovery Plan\n\nAttribute the historical Commit without rewriting Git history.\n");
+    await replace(root, id, "tasks.md", "# Tasks\n\n- [x] T-001\n- [ ] T-002 Attribute F-001\n");
+    await replace(root, id, "tasks/T-002.md", taskDocument({
+      id: "T-002",
+      scenarioIds: ["S-001"],
+      allowedPath: "historical.txt",
+      dependencies: ["T-001"],
+      findingIds: ["F-001"],
+      adoptedCommit: historicalParent,
+    }));
+    await expect(engine.completeAction({ changeId: id, action: "plan.create" }))
+      .rejects.toMatchObject({ code: "ADOPTED_COMMIT_OUT_OF_RANGE" });
+
+    const historicalTree = (await execFileAsync("git", ["rev-parse", `${historicalCommit}^{tree}`], { cwd: root })).stdout.trim();
+    const nonAncestorCommit = (await execFileAsync(
+      "git",
+      ["commit-tree", historicalTree, "-p", historicalParent, "-m", "fix: non-ancestor attribution candidate"],
+      { cwd: root },
+    )).stdout.trim();
+    await replace(root, id, "tasks/T-002.md", taskDocument({
+      id: "T-002",
+      scenarioIds: ["S-001"],
+      allowedPath: "historical.txt",
+      dependencies: ["T-001"],
+      findingIds: ["F-001"],
+      adoptedCommit: nonAncestorCommit,
+    }));
+    await expect(engine.completeAction({ changeId: id, action: "plan.create" }))
+      .rejects.toMatchObject({ code: "ADOPTED_COMMIT_OUT_OF_RANGE" });
+
+    await replace(root, id, "tasks/T-002.md", taskDocument({
+      id: "T-002",
+      scenarioIds: ["S-001"],
+      allowedPath: "historical.txt",
+      dependencies: ["T-001"],
+      findingIds: ["F-001"],
+      adoptedCommit: implementationCommit,
+    }));
+    await expect(engine.completeAction({ changeId: id, action: "plan.create" }))
+      .rejects.toMatchObject({ code: "DUPLICATE_TASK_COMMIT" });
+
+    await replace(root, id, "tasks/T-002.md", taskDocument({
+      id: "T-002",
+      scenarioIds: ["S-001"],
+      allowedPath: "historical.txt",
+      dependencies: ["T-001"],
+      findingIds: ["F-001"],
+      adoptedCommit: historicalCommit.slice(0, 12),
+    }));
+    const planned = await engine.completeAction({ changeId: id, action: "plan.create" });
+    expect(planned.change.tasks["T-002"]).toMatchObject({
+      status: "pending",
+      adopted_commit: historicalCommit,
+      finding_ids: ["F-001"],
+    });
+    await passReview(root, id, "reviews/readiness-review.md");
+    await engine.completeAction({ changeId: id, action: "readiness.review" });
+    await approveGate(engine, id, "implementation");
+
+    const started = await engine.startTask({ changeId: id, taskId: "T-002" });
+    const task = started.change.tasks["T-002"]!;
+    expect(task.base_commit).toBe(historicalParent);
+    expect(await readFile(path.join(root, ".rockspec", "changes", id, task.brief_path!), "utf8"))
+      .toContain("Historical Attribution Mode");
+    await writeImplementedReport(root, id, task.report_path!, "Reviewed the historical Diff and verified it against the approved behavior.");
+    await engine.runCheck({ changeId: id, taskId: "T-002", executable: process.execPath, args: ["-e", "process.exit(0)"] });
+    const historicalPackage = await engine.prepareReviewPackage({ changeId: id, kind: "task", taskId: "T-002" });
+    expect(historicalPackage).toMatchObject({
+      mode: "historical_attribution",
+      subject: { base_commit: historicalParent, head_commit: historicalCommit },
+    });
+    await expect(engine.completeTask({ changeId: id, taskId: "T-002", commitSha: historicalCommit }))
+      .rejects.toMatchObject({ code: "REVIEW_NOT_PASSED" });
+    await writeCodeReview(root, id, "reviews/tasks/T-002-review.md", historicalPackage.subject);
+    await engine.completeAction({ changeId: id, action: "task.review" });
+    const attributed = await engine.completeTask({ changeId: id, taskId: "T-002", commitSha: historicalCommit });
+    expect(attributed.change.tasks["T-002"]).toMatchObject({
+      status: "completed",
+      commit_sha: historicalCommit,
+      adopted_commit: historicalCommit,
+    });
+
+    await engine.runCheck({
+      changeId: id,
+      actionId: "acceptance.validate",
+      scenarioIds: ["S-001"],
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+    });
+    await passReview(root, id, "testing/test-report.md");
+    const accepted = await engine.completeAction({ changeId: id, action: "acceptance.validate" });
+    expect(accepted.current_state).toBe("FINAL_REVIEW");
+    const deliveryPackage = await engine.prepareReviewPackage({ changeId: id, kind: "delivery" });
+    await writeCodeReview(root, id, "reviews/delivery-review.md", deliveryPackage.subject);
+    const delivered = await engine.completeAction({ changeId: id, action: "delivery.review" });
+    expect(delivered.current_state).toBe("VERIFYING");
+  }, 30_000);
+
+  it("rejects historical Commit attribution outside implementation Recovery", async () => {
+    const root = await repository();
+    const engine = new RockSpecEngine({ cwd: root });
+    await engine.init();
+    const id = "reject-unbound-historical-attribution";
+    await engine.newChange({ id, profile: "standard" });
+    await preparePlanning(engine, root, id);
+    await writeFile(path.join(root, "feature.txt"), "historical product change\n");
+    await execFileAsync("git", ["add", "feature.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "fix: unbound historical change"], { cwd: root });
+    const commit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    await replace(root, id, "plan.md", "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Plan\n");
+    await replace(root, id, "tasks.md", "# Tasks\n\n- [ ] T-001\n");
+    await replace(root, id, "tasks/T-001.md", taskDocument({
+      id: "T-001",
+      scenarioIds: ["S-001"],
+      allowedPath: "feature.txt",
+      adoptedCommit: commit,
+    }));
+    await expect(engine.completeAction({ changeId: id, action: "plan.create" }))
+      .rejects.toMatchObject({ code: "ADOPTED_COMMIT_REQUIRES_RECOVERY" });
   }, 30_000);
 
   it("rejects cyclic Task dependencies and interface consumers outside the producer dependency chain", async () => {
@@ -1296,7 +1668,7 @@ describe("RockSpecEngine", () => {
       coverageRoot,
       coverageId,
       "design.md",
-      `---\nschema_version: 1\ninputs:\n  spec_hash: ${coverageSpecHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001, S-002]\n---\n\n# Technical Design\n\n## Decisions\n\n### D-001\n\nCover both outcomes.\n`,
+      `---\nschema_version: 1\ninputs:\n  spec_hash: ${coverageSpecHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001, S-002]\n---\n\n# Technical Design\n\n## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse one shared behavior boundary.\n\n## Decisions\n\n${completeDecisionBody("D-001", "Both outcomes", "Cover both approved outcomes through one stable boundary.")}\n\n## 未解决风险\n\nNone.\n`,
     );
     await coverageEngine.completeAction({ changeId: coverageId, action: "design.technical" });
     await approveGate(coverageEngine, coverageId, "design");
@@ -1352,7 +1724,7 @@ describe("RockSpecEngine", () => {
       root,
       id,
       "specs/change/spec.md",
-      "## ADDED Requirements\n\n### R-001 Requirement: Projected behavior\n\nThe system MUST provide both projected outcomes.\n\n#### S-001 Scenario: Primary projection\n\n- GIVEN a valid request\n- WHEN the primary behavior runs\n- THEN the primary result is returned\n\n#### S-002 Scenario: Secondary projection\n\n- GIVEN a primary result\n- WHEN the secondary behavior runs\n- THEN the secondary result is returned\n",
+      "## ADDED Requirements\n\n### R-001 Requirement: Projected behavior\n\nThe system MUST provide both projected outcomes.\n\n#### S-001 Scenario: Primary projection\n\n- GIVEN a valid request\n- WHEN the primary behavior runs\n\n```bash\n# This example heading must not truncate the Scenario.\n./run-primary\n```\n\n- THEN the primary result is returned after the fenced example\n\n#### S-002 Scenario: Secondary projection\n\n- GIVEN a primary result\n- WHEN the secondary behavior runs\n- THEN the secondary result is returned\nScenario-specific trailing guidance belongs to S-002.\n",
     );
     await engine.completeAction({ changeId: id, action: "requirements.clarify" });
     await passReview(root, id, "reviews/requirements-review.md");
@@ -1363,7 +1735,7 @@ describe("RockSpecEngine", () => {
       root,
       id,
       "design.md",
-      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n  - id: D-002\n    requirement_ids: [R-001]\n    scenario_ids: [S-002]\n---\n\n# Technical Design\n\n## Global Constraints\n\nKeep writes inside the approved transaction boundary.\n\n## Decisions\n\n### D-001 Primary boundary\n\nProduce the primary result through the existing service boundary.\n\n### D-002 Secondary boundary\n\nConsume the primary result without bypassing validation.\n`,
+      `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n  - id: D-002\n    requirement_ids: [R-001]\n    scenario_ids: [S-002]\n---\n\n# Technical Design\n\n## 全局约束\n\nKeep writes inside the approved transaction boundary.\n\n## 总体方案比较\n\nUse the existing service boundary for both outcomes.\n\n## Decisions\n\n${completeDecisionBody("D-001", "Primary boundary", "Produce the primary result through the existing service boundary.\n\n~~~ts\n# This fenced line is not a section boundary.\nconst boundary = \"primary\";\n~~~\n\nContinue applying D-001 after the tilde fence.")}\n\n${completeDecisionBody("D-002", "Secondary boundary", "Consume the primary result without bypassing validation.")}\n\n## 未解决风险\n\nNone.\n`,
     );
     await engine.completeAction({ changeId: id, action: "design.technical" });
     await approveGate(engine, id, "design");
@@ -1373,13 +1745,17 @@ describe("RockSpecEngine", () => {
       "plan.md",
       "---\nschema_version: 1\nverification_only_scenario_ids: []\n---\n\n# Implementation Plan\n\nPlan marker must remain index-only.\n\n## Global Constraints\n\nPreserve the public result contract.\n",
     );
-    await replace(root, id, "tasks.md", "# Tasks\n\n- [ ] T-001\n- [ ] T-002\n");
+    await replace(root, id, "tasks.md", "# Tasks\n\n- [ ] T-001\n- [ ] T-002\n- [ ] T-003\n");
     await replace(root, id, "tasks/T-001.md", taskDocument({
       id: "T-001",
       scenarioIds: ["S-001"],
       decisionIds: ["D-001"],
       allowedPath: "primary.ts",
       produces: ["primary-result.v1"],
+      validationCommands: [
+        `${process.execPath} -e 'process.exit(0)'`,
+        `${process.execPath} -e 'process.stdout.write("validated")'`,
+      ],
     }));
     await replace(root, id, "tasks/T-002.md", taskDocument({
       id: "T-002",
@@ -1388,6 +1764,15 @@ describe("RockSpecEngine", () => {
       allowedPath: "secondary.ts",
       dependencies: ["T-001"],
       consumes: ["primary-result.v1"],
+      produces: ["secondary-result.v1"],
+    }));
+    await replace(root, id, "tasks/T-003.md", taskDocument({
+      id: "T-003",
+      scenarioIds: ["S-002"],
+      decisionIds: ["D-002"],
+      allowedPath: "tertiary.ts",
+      dependencies: ["T-002"],
+      consumes: ["secondary-result.v1"],
     }));
     await engine.completeAction({ changeId: id, action: "plan.create" });
     await passReview(root, id, "reviews/readiness-review.md");
@@ -1398,7 +1783,12 @@ describe("RockSpecEngine", () => {
     const firstTask = started.change.tasks["T-001"]!;
     const firstBrief = await readFile(path.join(root, ".rockspec", "changes", id, firstTask.brief_path!), "utf8");
     expect(firstBrief).toContain("#### S-001 Scenario: Primary projection");
+    expect(firstBrief).toContain("the primary result is returned after the fenced example");
     expect(firstBrief).toContain("### D-001 Primary boundary");
+    expect(firstBrief).toContain("#### 模块与职责");
+    expect(firstBrief).toContain("#### 接口与数据流");
+    expect(firstBrief).toContain("#### 安全与隐私");
+    expect(firstBrief).toContain("Continue applying D-001 after the tilde fence.");
     expect(firstBrief).toContain("Keep writes inside the approved transaction boundary.");
     expect(firstBrief).toContain("Preserve the public result contract.");
     expect(firstBrief).not.toContain("#### S-002 Scenario: Secondary projection");
@@ -1410,7 +1800,7 @@ describe("RockSpecEngine", () => {
     await execFileAsync("git", ["add", "primary.ts"], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat: [T-001] produce primary result"], { cwd: root });
     const firstCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
-    await replace(root, id, firstTask.report_path!, "# Implementer Report\n\nImplemented the primary result.\n");
+    await writeImplementedReport(root, id, firstTask.report_path!, "Implemented the primary result.");
     await engine.runCheck({ changeId: id, taskId: "T-001", executable: process.execPath, args: ["-e", "process.exit(0)"] });
     const reviewPackage = await engine.prepareReviewPackage({ changeId: id, kind: "task", taskId: "T-001" });
     const reviewContent = await readFile(path.join(root, ".rockspec", "changes", id, reviewPackage.path), "utf8");
@@ -1421,16 +1811,101 @@ describe("RockSpecEngine", () => {
     expect(reviewContent).toContain("### Executed Evidence Index");
     await writeCodeReview(root, id, "reviews/tasks/T-001-review.md", reviewPackage.subject);
     await engine.completeAction({ changeId: id, action: "task.review" });
+    await expect(engine.completeTask({ changeId: id, taskId: "T-001", commitSha: firstCommit }))
+      .rejects.toMatchObject({
+        code: "TASK_VALIDATION_EVIDENCE_MISSING",
+        details: { missing_commands: [`${process.execPath} -e 'process.stdout.write("validated")'`] },
+      });
+    await engine.runCheck({
+      changeId: id,
+      taskId: "T-001",
+      executable: process.execPath,
+      args: ["-e", "process.stdout.write(\"validated\")"],
+    });
     await engine.completeTask({ changeId: id, taskId: "T-001", commitSha: firstCommit });
 
     const secondStarted = await engine.startTask({ changeId: id, taskId: "T-002" });
     const secondTask = secondStarted.change.tasks["T-002"]!;
     const secondBrief = await readFile(path.join(root, ".rockspec", "changes", id, secondTask.brief_path!), "utf8");
     expect(secondBrief).toContain("#### S-002 Scenario: Secondary projection");
+    expect(secondBrief).toContain("Scenario-specific trailing guidance belongs to S-002.");
     expect(secondBrief).toContain("### D-002 Secondary boundary");
     expect(secondBrief).not.toContain("#### S-001 Scenario: Primary projection");
     expect(secondBrief).toContain(`- Delivered Commit: ${firstCommit}`);
     expect(secondBrief).toContain("primary-result.v1");
+
+    await writeFile(path.join(root, "secondary.ts"), "export const secondary = 'ready';\n");
+    await execFileAsync("git", ["add", "secondary.ts"], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "feat: [T-002] produce secondary result"], { cwd: root });
+    const secondCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    await writeImplementedReport(root, id, secondTask.report_path!, "Implemented the secondary result.");
+    await engine.runCheck({ changeId: id, taskId: "T-002", executable: process.execPath, args: ["-e", "process.exit(0)"] });
+    const secondPackage = await engine.prepareReviewPackage({ changeId: id, kind: "task", taskId: "T-002" });
+    await writeCodeReview(root, id, "reviews/tasks/T-002-review.md", secondPackage.subject);
+    await engine.completeAction({ changeId: id, action: "task.review" });
+    await engine.completeTask({ changeId: id, taskId: "T-002", commitSha: secondCommit });
+
+    const thirdStarted = await engine.startTask({ changeId: id, taskId: "T-003" });
+    const thirdTask = thirdStarted.change.tasks["T-003"]!;
+    const thirdBrief = await readFile(path.join(root, ".rockspec", "changes", id, thirdTask.brief_path!), "utf8");
+    expect(thirdBrief).toContain(`- Delivered Commit: ${firstCommit}`);
+    expect(thirdBrief).toContain(`- Delivered Commit: ${secondCommit}`);
+    expect(thirdBrief).toContain("primary-result.v1");
+    expect(thirdBrief).toContain("secondary-result.v1");
+  }, 30_000);
+
+  it("fails closed when approved authority cannot be projected completely", async () => {
+    const withDesign = async (id: string, body: string): Promise<{ root: string; engine: RockSpecEngine }> => {
+      const root = await repository();
+      const engine = new RockSpecEngine({ cwd: root });
+      await engine.init();
+      await engine.newChange({ id, profile: "standard" });
+      await approveRequirements(engine, root, id);
+      const specHash = await approvedSpecHash(root, id);
+      await replace(
+        root,
+        id,
+        "design.md",
+        `---\nschema_version: 1\ninputs:\n  spec_hash: ${specHash}\ndecisions:\n  - id: D-001\n    requirement_ids: [R-001]\n    scenario_ids: [S-001]\n---\n\n# Technical Design\n\n${body}\n`,
+      );
+      return { root, engine };
+    };
+
+    const missingDecision = await withDesign(
+      "missing-decision-section",
+      "## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse one boundary.\n\n## Decisions\n\n### Architecture\n\nNo stable Decision heading is present.\n\n## 未解决风险\n\nNone.",
+    );
+    await expect(missingDecision.engine.completeAction({ changeId: "missing-decision-section", action: "design.technical" }))
+      .rejects.toMatchObject({ code: "AUTHORITY_SECTION_MISSING" });
+
+    const missingConstraints = await withDesign(
+      "missing-global-constraints",
+      `## 总体方案比较\n\nUse one boundary.\n\n## Decisions\n\n${completeDecisionBody("D-001", "Existing boundary", "Use the existing module boundary.")}\n\n## 未解决风险\n\nNone.`,
+    );
+    await expect(missingConstraints.engine.completeAction({ changeId: "missing-global-constraints", action: "design.technical" }))
+      .rejects.toMatchObject({ code: "DESIGN_GLOBAL_CONSTRAINTS_MISSING" });
+
+    const incompleteDecision = await withDesign(
+      "incomplete-design-decision",
+      "## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse one boundary.\n\n## Decisions\n\n### D-001 Existing boundary\n\n#### 架构决策\n\nUse the existing module boundary.\n\n## 未解决风险\n\nNone.",
+    );
+    await expect(incompleteDecision.engine.completeAction({ changeId: "incomplete-design-decision", action: "design.technical" }))
+      .rejects.toMatchObject({ code: "DESIGN_DECISION_INCOMPLETE", details: { decision_id: "D-001" } });
+
+    const projectionGap = await withDesign(
+      "missing-spec-projection",
+      `## 全局约束\n\nNone.\n\n## 总体方案比较\n\nUse one boundary.\n\n## Decisions\n\n${completeDecisionBody("D-001", "Existing boundary", "Use the existing module boundary.")}\n\n## 未解决风险\n\nNone.`,
+    );
+    await finishReadiness(projectionGap.engine, projectionGap.root, "missing-spec-projection");
+    const snapshotPath = path.join(projectionGap.root, ".rockspec", "changes", "missing-spec-projection", "change.yaml");
+    const snapshot = parse(await readFile(snapshotPath, "utf8")) as { tasks: Record<string, { requirement_ids: string[] }> };
+    snapshot.tasks["T-001"]!.requirement_ids = ["R-999"];
+    await writeFile(snapshotPath, stringify(snapshot, { lineWidth: 0 }));
+    await expect(projectionGap.engine.startTask({ changeId: "missing-spec-projection", taskId: "T-001" }))
+      .rejects.toMatchObject({
+        code: "TASK_AUTHORITY_PROJECTION_GAP",
+        details: { requirement_ids: ["R-999"] },
+      });
   }, 30_000);
 
   it("preflights implementation before approval and detects stale readiness inputs", async () => {
@@ -1454,7 +1929,7 @@ describe("RockSpecEngine", () => {
       current_state: "READINESS_REVIEW",
       task_count: 1,
       ready_task_ids: ["T-001"],
-      review_modes: ["product", "scope_blocked"],
+      review_modes: ["product", "scope_blocked", "historical_attribution"],
     });
 
     await replace(root, id, "tasks/T-001.md", `${taskDocument({
@@ -1565,11 +2040,11 @@ describe("RockSpecEngine", () => {
     })).rejects.toMatchObject({ code: "TASK_COMMIT_MESSAGE" });
     await execFileAsync("git", ["commit", "--amend", "-m", "feat(order): [T-001] support cancellation"], { cwd: root });
     const commit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
-    await replace(
+    await writeImplementedReport(
       root,
       "support-order-cancellation",
       "runtime/tasks/T-001/implementer-report.md",
-      "# T-001 Implementer Report\n\nImplemented feature.txt and verified observable behavior.\n",
+      "Implemented feature.txt and verified observable behavior.",
     );
     await engine.runCheck({
       changeId: "support-order-cancellation",
@@ -1752,6 +2227,34 @@ describe("RockSpecEngine", () => {
       "runtime/tasks/T-001/implementer-report.md",
       "# Implementer Report\n\nThe implementation is blocked because the frozen scope omits a required product boundary.\n",
     );
+    await expect(engine.prepareReviewPackage({
+      changeId: id,
+      kind: "task",
+      taskId: "T-001",
+      mode: "scope_blocked",
+    })).rejects.toMatchObject({ code: "MISSING_FRONTMATTER" });
+    const task = started.change.tasks["T-001"]!;
+    const blockedReport = stringify({
+      schema_version: 1,
+      task_id: task.id,
+      execution_id: task.execution_id,
+      base_commit: task.base_commit,
+      brief_path: task.brief_path,
+      brief_hash: task.brief_hash,
+      outcome: "blocked",
+      blocker: {
+        kind: "contract_conflict",
+        source_refs: ["tasks/T-001.md: acceptance_criteria", "D-001"],
+        summary: "The Task omits the Admin API contract required by its acceptance criteria.",
+        recommended_route: "plan.create",
+      },
+    }, { lineWidth: 0 }).trimEnd();
+    await replace(
+      root,
+      id,
+      "runtime/tasks/T-001/implementer-report.md",
+      `---\n${blockedReport}\n---\n\n# Implementer Report\n\nImplementation stopped before product changes.\n`,
+    );
     const prepared = await engine.prepareReviewPackage({
       changeId: id,
       kind: "task",
@@ -1827,11 +2330,11 @@ describe("RockSpecEngine", () => {
 
     await execFileAsync("git", ["reset", "--soft", task?.base_commit ?? ""], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat: [T-001] squash task"], { cwd: root });
-    await replace(
+    await writeImplementedReport(
       root,
       "harden-task-review",
       "runtime/tasks/T-001/implementer-report.md",
-      "# Implementer Report\n\nImplemented the approved behavior with a reviewed path expansion.\n",
+      "Implemented the approved behavior with a reviewed path expansion.",
     );
     const expandedPackage = await engine.prepareReviewPackage({
       changeId: "harden-task-review",
@@ -1864,11 +2367,11 @@ describe("RockSpecEngine", () => {
     await rm(path.join(root, "extra.txt"));
     await execFileAsync("git", ["add", "-A"], { cwd: root });
     await execFileAsync("git", ["commit", "--amend", "--no-edit"], { cwd: root });
-    await replace(
+    await writeImplementedReport(
       root,
       "harden-task-review",
       "runtime/tasks/T-001/implementer-report.md",
-      "# Implementer Report\n\nImplemented the approved behavior and ran focused verification.\n",
+      "Implemented the approved behavior and ran focused verification.",
     );
     await engine.runCheck({
       changeId: "harden-task-review",
@@ -1947,13 +2450,33 @@ describe("RockSpecEngine", () => {
       executable: process.execPath,
       args: ["-e", "process.exit(0)"],
     });
-    await engine.verify({ changeId: "fix-login-copy" });
+    const verified = await engine.verify({ changeId: "fix-login-copy" });
+    const deliveryHead = verified.change.delivery_head!;
     await writeFile(path.join(root, "downstream-change.txt"), "belongs to the next Change\n");
     await execFileAsync("git", ["add", "downstream-change.txt"], { cwd: root });
     await execFileAsync("git", ["commit", "-m", "feat: downstream Change commit"], { cwd: root });
     await writeNoChangeKnowledgeDelta(root, "fix-login-copy");
     await engine.completeAction({ changeId: "fix-login-copy", action: "knowledge.evolve" });
-    await engine.finish({ changeId: "fix-login-copy", disposition: "keep" });
+    const pending = await engine.finish({ changeId: "fix-login-copy", disposition: "push" });
+    expect(pending.change.finish_disposition).toMatchObject({
+      choice: "push",
+      status: "pending_external_action",
+    });
+    expect(pending.change.finished_at).toBeUndefined();
+    await expect(engine.archive({ changeId: "fix-login-copy" })).rejects.toMatchObject({ code: "ARCHIVE_GATE_FAILED" });
+    const finished = await engine.finish({
+      changeId: "fix-login-copy",
+      disposition: "push",
+      executed: true,
+      resultRef: "refs/heads/rockspec/fix-login-copy",
+      resultCommit: deliveryHead,
+    });
+    expect(finished.change.finish_disposition).toMatchObject({
+      choice: "push",
+      status: "completed",
+      result_ref: "refs/heads/rockspec/fix-login-copy",
+      result_commit: deliveryHead,
+    });
     const archived = await engine.archive({ changeId: "fix-login-copy" });
     expect(archived.current_state).toBe("ARCHIVED");
     expect(archived.archive_path).toBe(path.join(root, ".rockspec", "archive", "2026", "08", "fix-login-copy"));
@@ -1989,7 +2512,7 @@ describe("RockSpecEngine", () => {
     await expect(engine.finish({ changeId: id })).rejects.toMatchObject({ code: "DELIVERY_HISTORY_DIVERGED" });
   });
 
-  it("applies reviewed knowledge once and returns an idempotent receipt on repeat", async () => {
+  it("applies derived knowledge without an independent Review and returns an idempotent receipt", async () => {
     const root = await repository();
     const fixed = new Date("2026-08-21T09:30:00.000Z");
     const engine = new RockSpecEngine({ cwd: root, now: () => fixed });
@@ -2029,6 +2552,12 @@ describe("RockSpecEngine", () => {
       "knowledge.evolve.author",
       "knowledge_author",
     );
+    const deltaPath = path.join(root, ".rockspec", "changes", "standardize-form-feedback", "knowledge-delta.md");
+    const validDelta = await readFile(deltaPath, "utf8");
+    await writeFile(deltaPath, validDelta.replace("brief.md#Scope", "missing-source.md#Scope"));
+    await expect(engine.prepareKnowledgePackage({ changeId: "standardize-form-feedback" }))
+      .rejects.toMatchObject({ code: "KNOWLEDGE_SOURCE_MISSING" });
+    await writeFile(deltaPath, validDelta);
     const candidateDir = path.join(
       root,
       ".rockspec",
@@ -2041,26 +2570,33 @@ describe("RockSpecEngine", () => {
     await mkdir(candidateDir, { recursive: true });
     await writeFile(
       path.join(candidateDir, "form-feedback.md"),
-      "# Form Feedback\n\nAsync forms expose pending, success, and error feedback without shifting layout.\n",
+      "# Form Feedback\n\nAsync forms must expose pending, success, and error feedback without shifting layout.\n",
     );
     const prepared = await engine.prepareKnowledgePackage({ changeId: "standardize-form-feedback" });
     expect(prepared).toMatchObject({
       already_evolved: false,
       status: "pending",
+      review_required: false,
       requires_human_approval: false,
-      review_path: "reviews/knowledge-review.md",
+      semantic_warnings: [{
+        code: "POSSIBLE_NORMATIVE_MODAL_CHANGE",
+        target: "experience/form-feedback.md",
+        before_markers: [],
+        after_markers: ["must"],
+      }],
     });
-    await writeKnowledgeReview(root, "standardize-form-feedback", {
-      source_digest: prepared.source_digest,
-      delta_hash: prepared.delta_hash!,
-      baseline_hashes: prepared.baseline_hashes,
-      candidate_hashes: prepared.candidate_hashes,
-    });
+    expect(prepared.review_path).toBeUndefined();
+    await expect(engine.startExecution({
+      changeId: "standardize-form-feedback",
+      action: "knowledge.evolve.review",
+      role: "knowledge_reviewer",
+    })).rejects.toMatchObject({ code: "KNOWLEDGE_REVIEW_NOT_REQUIRED" });
     const evolved = await engine.completeAction({
       changeId: "standardize-form-feedback",
       action: "knowledge.evolve",
     });
     expect(evolved.change.knowledge_evolution.status).toBe("approved");
+    expect(evolved.change.knowledge_evolution.review).toBeUndefined();
     await expect(engine.prepareKnowledgePackage({ changeId: "standardize-form-feedback" }))
       .resolves.toMatchObject({ already_evolved: true, status: "approved" });
     await engine.finish({ changeId: "standardize-form-feedback", disposition: "keep" });
@@ -2077,6 +2613,50 @@ describe("RockSpecEngine", () => {
       "utf8",
     )) as { status?: string; applied_at?: string };
     expect(canonicalReceipt).toMatchObject({ status: "applied", applied_at: fixed.toISOString() });
+  });
+
+  it("keeps independent Review mandatory for normative knowledge", async () => {
+    const root = await repository();
+    const engine = new RockSpecEngine({ cwd: root });
+    const id = "establish-shared-form-rule";
+    await engine.init();
+    await engine.newChange({ id, profile: "lite", kind: "copy" });
+    await replace(root, id, "brief.md", "# Shared form rule\n\n## Scope\n\nEstablish one reusable rule.\n\n## Verification\n\nRun focused tests.\n");
+    await engine.apply({ changeId: id });
+    await engine.runCheck({ changeId: id, executable: process.execPath, args: ["-e", "process.exit(0)"] });
+    await engine.verify({ changeId: id });
+    await replace(
+      root,
+      id,
+      "knowledge-delta.md",
+      `---\nschema_version: 1\nchange_id: ${id}\nauthor_execution_id: knowledge-author\noutcome: proposed\nupdates:\n  - target: experience/shared-form-rule.md\n    operation: new\n    authority: normative\n    summary: Establish the shared form rule.\n    sources:\n      - brief.md#Scope\napproval:\n  approved_by: product-owner\n  approved_at: 2026-08-26T00:00:00.000Z\n---\n\n# Knowledge Delta\n\nEstablish a rule for future Changes.\n`,
+    );
+    await bindExecutionInArtifact(root, id, "knowledge-delta.md", "knowledge-author", "knowledge.evolve.author", "knowledge_author");
+    const candidateDir = path.join(root, ".rockspec", "changes", id, "knowledge", "updates", "experience");
+    await mkdir(candidateDir, { recursive: true });
+    await writeFile(path.join(candidateDir, "shared-form-rule.md"), "# Shared Form Rule\n\nFuture forms MUST preserve stable feedback layout.\n");
+
+    const prepared = await engine.prepareKnowledgePackage({ changeId: id });
+    expect(prepared).toMatchObject({
+      review_required: true,
+      review_path: "reviews/knowledge-review.md",
+      requires_human_approval: true,
+    });
+    await expect(engine.completeAction({ changeId: id, action: "knowledge.evolve" }))
+      .rejects.toMatchObject({ code: "MISSING_ARTIFACT" });
+
+    await writeKnowledgeReview(root, id, {
+      source_digest: prepared.source_digest,
+      delta_hash: prepared.delta_hash!,
+      baseline_hashes: prepared.baseline_hashes,
+      candidate_hashes: prepared.candidate_hashes,
+    });
+    const evolved = await engine.completeAction({ changeId: id, action: "knowledge.evolve" });
+    expect(evolved.change.knowledge_evolution).toMatchObject({
+      status: "approved",
+      review: { report_path: "reviews/knowledge-review.md" },
+      approval: { approved_by: "product-owner" },
+    });
   });
 
   it("rejects a second active Change in one workspace and detects nested roots", async () => {
@@ -2240,7 +2820,7 @@ describe("RockSpecEngine", () => {
     ).resolves.toBe(brief);
     await expect(
       readFile(path.join(root, ".rockspec", "changes", "rename-account-label", "proposal.md"), "utf8"),
-    ).resolves.toContain("# Proposal");
+    ).resolves.toContain("# 需求提案");
   });
 
   it("routes acceptance feedback back into the same Change and preserves a frozen parent boundary", async () => {

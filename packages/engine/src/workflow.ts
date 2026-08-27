@@ -491,7 +491,12 @@ export function workflowAdvice(
       }
       if (!change.finished_at) {
         return {
-          recommended: recommendation("finish", "Choose a platform-independent branch disposition"),
+          recommended: recommendation(
+            "finish",
+            change.finish_disposition?.status === "pending_external_action"
+              ? "Execute the recorded external disposition and confirm its target Ref and Commit"
+              : "Choose a platform-independent branch disposition",
+          ),
           alternatives: [],
           allowed: ["finish", "validate"],
         };

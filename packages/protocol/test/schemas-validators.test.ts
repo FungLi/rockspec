@@ -5,6 +5,7 @@ import {
   DesignDefinitionSchema,
   ExecutionRecordSchema,
   FindingSchema,
+  ImplementerReportDocumentSchema,
   InstallLockSchema,
   InstallManifestSchema,
   KnowledgeDeltaDocumentSchema,
@@ -70,6 +71,7 @@ describe("config and change snapshot schemas", () => {
     expect(parseConfig({ capabilities: {} })).toEqual({
       schema_version: 1,
       default_profile: "standard",
+      artifact_language: "zh-CN",
       max_reconciliation_rounds: 2,
       max_review_rounds: 3,
       environment_preflight: [],
@@ -81,6 +83,7 @@ describe("config and change snapshot schemas", () => {
         auto_create: false,
       },
     });
+    expect(parseConfig({ capabilities: {}, artifact_language: "en-US" }).artifact_language).toBe("en-US");
   });
 
   it("parses the host-independent change snapshot", () => {
@@ -253,6 +256,39 @@ describe("installation schemas", () => {
 });
 
 describe("review, evidence, and task commit validation", () => {
+  it("validates structured Implementer outcomes and conflict routing", () => {
+    const base = {
+      schema_version: 1 as const,
+      task_id: "T-001",
+      execution_id: "execution-1",
+      base_commit: commit,
+      brief_path: "runtime/tasks/T-001/brief.md",
+      brief_hash: hash,
+    };
+    expect(ImplementerReportDocumentSchema.safeParse({ ...base, outcome: "implemented" }).success).toBe(true);
+    expect(ImplementerReportDocumentSchema.safeParse({ ...base, outcome: "blocked" }).success).toBe(false);
+    expect(ImplementerReportDocumentSchema.safeParse({
+      ...base,
+      outcome: "blocked",
+      blocker: {
+        kind: "contract_conflict",
+        source_refs: ["T-001 consumes", "D-001"],
+        summary: "The Task contract requires an interface the dependency does not produce.",
+        recommended_route: "plan.create",
+      },
+    }).success).toBe(true);
+    expect(ImplementerReportDocumentSchema.safeParse({
+      ...base,
+      outcome: "blocked",
+      blocker: {
+        kind: "authority_conflict",
+        source_refs: ["R-001", "D-001"],
+        summary: "The approved requirement and design prescribe conflicting behavior.",
+        recommended_route: "plan.create",
+      },
+    }).success).toBe(false);
+  });
+
   it("validates structured Task scope and Review submissions", () => {
     expect(TaskDefinitionSchema.safeParse({
       schema_version: 1,
@@ -263,6 +299,7 @@ describe("review, evidence, and task commit validation", () => {
       scenario_ids: ["S-001"],
       decision_ids: ["D-001"],
       acceptance_criteria: ["The behavior is observable"],
+      validation_commands: ["pnpm test -- feature"],
       consumes: [],
       produces: ["feature.run(input: Input): Output"],
       allowed_paths: ["src/feature.ts", "test/feature.test.ts"],
@@ -277,8 +314,17 @@ describe("review, evidence, and task commit validation", () => {
       scenario_ids: ["S-001"],
       decision_ids: ["D-001"],
       finding_ids: ["F-001"],
+      adopted_commit: commit,
       acceptance_criteria: ["The replacement closes the recovery finding"],
       allowed_paths: ["src/feature.ts"],
+    }).success).toBe(true);
+    expect(TaskRecordSchema.safeParse({
+      id: "T-002",
+      status: "in_progress",
+      finding_ids: ["F-001"],
+      adopted_commit: commit,
+      base_commit: commit,
+      review_package_mode: "historical_attribution",
     }).success).toBe(true);
     expect(TaskRecordSchema.safeParse({
       id: "T-001",
@@ -620,6 +666,41 @@ describe("review, evidence, and task commit validation", () => {
       updates: [],
       recorded_at: now,
     }).success).toBe(true);
+    const derivedReceipt = {
+      schema_version: 1,
+      change_id: "standardize-form-feedback",
+      status: "approved",
+      protocol_version: 1,
+      source_digest: hash,
+      delta_path: "knowledge-delta.md",
+      delta_hash: hash,
+      updates: [{
+        target: "experience/form-feedback.md",
+        operation: "new",
+        authority: "derived",
+        summary: "Index the verified form feedback behavior.",
+        sources: ["design.md#D-001"],
+        before_digest: null,
+        after_digest: hash,
+      }],
+      recorded_at: now,
+    };
+    expect(KnowledgeEvolutionSchema.safeParse(derivedReceipt).success).toBe(true);
+    expect(KnowledgeEvolutionSchema.safeParse({
+      ...derivedReceipt,
+      updates: derivedReceipt.updates.map((update) => ({ ...update, authority: "normative" })),
+      approval: { approved_by: "product-owner", approved_at: now },
+    }).success).toBe(false);
+    expect(KnowledgeEvolutionSchema.safeParse({
+      ...derivedReceipt,
+      updates: derivedReceipt.updates.map((update) => ({ ...update, authority: "normative" })),
+      approval: { approved_by: "product-owner", approved_at: now },
+      review: {
+        reviewer_execution_id: "knowledge-reviewer",
+        report_path: "reviews/knowledge-review.md",
+        report_hash: hash,
+      },
+    }).success).toBe(true);
   });
 
   it("requires one final commit whose message names the task", () => {
@@ -645,6 +726,14 @@ describe("review, evidence, and task commit validation", () => {
     expect(ExecutionRecordSchema.safeParse({ ...base, completed_at: later }).success).toBe(true);
     expect(ExecutionRecordSchema.safeParse({ ...base, outcome: "success" }).success).toBe(false);
     expect(ExecutionRecordSchema.safeParse({ ...base, completed_at: later, outcome: "success" }).success).toBe(true);
+    expect(ExecutionRecordSchema.safeParse({ ...base, context_package_path: "runtime/context.md" }).success).toBe(false);
+    expect(ExecutionRecordSchema.safeParse({ ...base, context_package_hash: hash }).success).toBe(false);
+    expect(ExecutionRecordSchema.safeParse({
+      ...base,
+      context_package_path: "runtime/context.md",
+      context_package_hash: hash,
+      context_package_verified: true,
+    }).success).toBe(true);
   });
 
   it("prevents a commit from belonging to multiple tasks", () => {

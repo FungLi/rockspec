@@ -4,7 +4,7 @@ engine_authority: "packages/engine/src/workflow.ts"
 id: "task.execute"
 kind: "engine_action"
 profiles: ["lite", "standard", "strict"]
-summary: "通过测试实施选定范围，并产出 Task 级 Commit 和证据。"
+summary: "通过测试实施选定范围，或审阅接管 Recovery 声明的历史 Commit，并产出 Task 级证据。"
 executor:
   mode:
     lite: "inline"
@@ -40,9 +40,10 @@ preconditions:
 completion:
   required:
     - "实施报告绑定 Implementer execution ID、Task Base Commit、冻结 Brief 路径和 Hash。"
-    - "测试证明公共行为，且 rockspec check run 产生绑定当前 Commit 的 executed 证据。"
+    - "测试证明公共行为，且 rockspec check run 产生绑定验证 Commit 的 executed 证据；历史归属模式的验证 Commit 为当前 HEAD。"
     - "产品 Diff 不含无关改动；超出 allowed_paths 的路径已说明并能追溯到当前 Task 行为。"
-    - "Task Base..HEAD 恰好包含一个最终 Commit，且提交信息包含 [Task ID]。"
+    - "scope_blocked 路径使用结构化 blocked Implementer Report，并且产品 Diff 为零。"
+    - "普通模式 Task Base..HEAD 恰好包含一个最终 Commit且信息含 [Task ID]；历史归属模式不改写产品 Commit，并固定核查 adopted_commit^..adopted_commit。"
 outcomes:
   pass: ["task.review", "change.verify"]
   changes_required: ["task.execute"]

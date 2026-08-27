@@ -5,6 +5,10 @@ description: 用于启动 Change、判断 Lite 或风险升级；评估变更范
 
 # RockSpec 分级
 
+## 产物语言
+
+读取 `.rockspec/config.yaml` 的 `artifact_language`；缺省按 `zh-CN`。面向人的 Brief、说明和终端摘要使用配置语言，Schema Key、ID、Profile、Action、CLI 和规范关键字保持英文。
+
 只产出一个结果：有证据支撑的流程 Profile 和边界明确的 Change Brief。
 
 ## CLI 入口

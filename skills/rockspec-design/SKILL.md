@@ -5,6 +5,10 @@ description: 用于技术架构、实施设计或从既有 PRD/Spec 开始；基
 
 # RockSpec 设计
 
+## 产物语言
+
+读取 `.rockspec/config.yaml` 的 `artifact_language`；缺省按 `zh-CN`。Design、决策说明和终端摘要使用配置语言，Schema Key、R/S/D ID、CLI/Action、Verdict 和规范关键字保持英文。
+
 只产出一个结果：与明确需求输入绑定、可检查的技术设计。
 
 ## CLI 入口
@@ -21,7 +25,7 @@ Attached 分为 **reconciliation**、**decision-free authoring** 和 **decision 
 <INTERACTIVE-GATE>
 只有开放决策可以形成 authoring 等待点。一个技术问题必须同时满足以下条件才交给用户：存在至少两个合理方案；方案产生不同的外部行为、兼容承诺、重大不可逆架构/迁移承诺、运行成本边界或风险接受；答案无法从已批准 Requirements、仓库规范和相邻实现确定；最终选择需要产品或架构 Authority，而不是普通工程判断。锁、事务隔离、SQL 顺序、Repository 拆分、缓存键、错误映射、测试机制和同等行为下的 API 实现默认由设计者负责。
 
-存在开放决策时，把最多三个相互关联的选择合并为一个 Decision Package，给出推荐、外部影响和取舍，然后结束当前回复等待。关闭决策后不得把范围架构、模块、接口、错误并发、安全迁移、测试和原型拆成章节确认。没有开放决策时可直接写入最终 `design.md`、完成 `design.technical`、启动 Reviewer/Prototype 并进入 Plan。首次 Design 的 Hash Approval 仍是正式治理停点；它不要求预先逐节确认。reconciliation 跳过重复确认，只有真正越过 Authority Baseline 才升级。
+存在开放决策时，把最多三个相互关联的选择合并为一个 Decision Package，逐项展示决策问题、候选方案、推荐及理由、外部与系统影响、兼容/回滚、重要风险和取舍，使用户能在会话区完成核心判断，然后结束当前回复等待。可以按内容调整表达，缺少某个展示项不得形成新的格式 Gate。关闭决策后不得把范围架构、模块、接口、错误并发、安全迁移、测试和原型拆成章节确认。没有开放决策时可直接写入最终 `design.md`、完成 `design.technical`、启动 Reviewer/Prototype 并进入 Plan。首次 Design 的 Hash Approval 仍是正式治理停点；它不要求预先逐节确认。reconciliation 跳过重复确认，只有真正越过 Authority Baseline 才升级。
 </INTERACTIVE-GATE>
 
 ## Conversation presentation
@@ -36,16 +40,16 @@ Attached 分为 **reconciliation**、**decision-free authoring** 和 **decision 
 
 严格按以下顺序执行：
 
-1. 静默从磁盘重新读取已批准的 Requirements、已有 Design 和适用的 Prototype，再检查仓库规则、受影响模块、相邻实现、公共接口、测试、数据流和交付约束；不要依赖聊天记忆。
+1. 静默从磁盘重新读取已批准的 Requirements、已有 Design 和适用的 Prototype，再检查仓库规则、受影响模块、相邻实现、公共接口、测试、数据流和交付约束；不要依赖聊天记忆。当仓库事实核对需要通读多个模块、接口或相邻实现才能确定，且属于**只读、单次、无需用户 Authority** 的核对时，派只读 Subagent 完成核对，主上下文只保留结论和证据锚点（`file:line`），不保留通读过程；判据是「只读 + 单次 + 不产生开放决策」。方案取舍、Authority 测试和决策 Package 的形成属于设计者主线判断，保持 Inline，不外包。
 2. 判断需求是否包含可独立交付、测试或回滚的多个目标；只有边界会改变发布/回滚单位且仓库事实无法确定时，才把 Change 拆分作为开放决策。不要因模块、文件或 Task 数量增多重新询问。reconciliation 只核对既有范围。
 3. 对仍可能改变外部行为、兼容承诺、重大不可逆架构/迁移承诺、运行成本边界或风险接受的事项执行四项 Authority 测试。全部通过时合并进一个 Decision Package 并等待；普通技术选择采用有依据的推荐方案并记录。reconciliation 只有遇到真正 Authority 变化才升级人工。
 4. 若仓库事实表明已批准需求成本过高、不可实施或应简化，不得在 Design 中静默改变业务行为，也不得继续 reconciliation。先升级为人工策略，展示变更理由、候选方案、受影响的 R/S/D ID、将失效的 Requirements Review/审批及下游产物，等待用户确认；确认后调用 `rockspec revise --source design.technical --target requirements ...`，交还 `$rockspec-requirements` 从受影响章节开始修订。
 5. 对每个重大技术选择在 Design 中比较 2 至 3 个真正不同的方案并给出推荐；只有一个可行方案时记录排除依据。比较方案不等于要求用户选择，只有通过 Authority 测试的差异才进入 Decision Package。反馈已决定的行为和显然的仓库惯例不重新选择；reconciliation 不创造决策。
 6. 没有开放决策时，静默完成范围架构、模块边界、接口数据流、错误并发、安全迁移、测试和原型章节。当前 Revision 已确认过的 Authority 决策不得重复确认；reconciliation 以冻结 ID 替代确认。
-7. 将当前已批准 Spec Aggregate Hash 写入 `design.md` 的 `inputs.spec_hash`，将最终决策映射到 Requirement ID，并把每个 `D-xxx` 到 R/S ID 的映射写入 YAML Frontmatter；所有已批准 Requirement 和 Scenario 必须至少被一个决策覆盖。
+7. 将当前已批准 Spec Aggregate Hash 写入 `design.md` 的 `inputs.spec_hash`，将最终决策映射到 Requirement ID，并把每个 `D-xxx` 到 R/S ID 的映射写入 YAML Frontmatter；所有已批准 Requirement 和 Scenario 必须至少被一个决策覆盖。下游 Implementer 只看按 ID 投影的 Design：适用于所有 Task 的失败、安全、隐私、兼容或迁移不变量必须提升到「全局约束」，没有时明确写 `None`；每个 `D-xxx` 必须在自身范围内写全「目标与覆盖范围、架构决策、模块与职责、接口与数据流、失败与边界行为、安全与隐私、兼容迁移与回滚、验证策略、取舍与剩余风险」，不适用时明确写 `None`。实现必需内容不得只留在方案比较或决策外的横切叙事章节。
 8. 对账 UI 影响。交互、布局、导航、响应式、可访问性行为或视觉系统变化时，在技术设计写入后、Design 最终审批前调用 `$rockspec-prototype`。Prototype 完成后重新进入本 Skill，把原型的技术影响写回 Design，再次提交 `design.technical`；原型产生新的 Authority 选择时形成一个 Decision Package，越过已批准 Requirements 时启动 Revision，其余技术影响直接修订并交给 Reviewer。
-9. 重新读取写入磁盘的 Design，检查 `TODO/TBD`、空泛占位、内部矛盾、范围膨胀、多义解释、需求遗漏、Frontmatter/正文不一致和过期仓库证据；发现问题直接修订。只有修订产生新的 Authority 决策时才请求用户，不得重新确认整个章节。
-10. Attached 模式提交 `design.technical`；Engine 会校验 `inputs.spec_hash`、结构化决策映射和已批准 Spec 的覆盖。完成必要原型对账并使 Prototype 状态达到 `reconciled` 后，人工策略运行 `rockspec approval package design <change-id>`，展示决策与输入摘要并用返回 Hash 执行 `rockspec approve design <change-id> --package <sha256>`；自动策略交给 `$rockspec-review` 执行 `reconcile.design`，不得再次要求用户批准。
+9. 重新读取写入磁盘的 Design，检查 `TODO/TBD`、空泛占位、内部矛盾、范围膨胀、多义解释、需求遗漏、Frontmatter/正文不一致和过期仓库证据；发现问题直接修订。运行 `rockspec validate <change-id> --artifact design.md` dry-run，按结构化错误修正后再提交 Action。只有修订产生新的 Authority 决策时才请求用户，不得重新确认整个章节。
+10. Attached 模式提交 `design.technical`；Engine 会校验 `inputs.spec_hash`、结构化决策映射、决策细节结构和已批准 Spec 的覆盖。完成必要原型对账并使 Prototype 状态达到 `reconciled` 后，人工策略运行 `rockspec approval package design <change-id>`，以 CLI 按 `artifact_language` 返回的摘要（默认中文）为事实来源，在会话区展示审阅问题、方案推荐、核心决策的“决定/理由/影响”、模块与数据流、失败与安全边界、兼容回滚与验证、剩余风险和待决定事项；不得压缩成一句设计结论或只提示打开 `design.md`。允许合并重复决策、按子系统归组或调整表达，摘要不完整不得阻断流程。正式材料只展示一次 `artifact_root`，Design 和 Prototype 文件分别按编号列出名称、相对路径和用途，不得把路径重新拼成一行。用户需要细查时直接阅读正式产物，不创建二次 Preview 文档。用户回复“批准设计”或等价明确表达后，Agent 在内部使用返回 Hash 执行 `rockspec approve design <change-id> --package <sha256>`，不得要求用户理解、复制或复述 Hash。自动策略交给 `$rockspec-review` 执行 `reconcile.design`，不得再次要求用户批准。
 
 可从 [design.md](assets/design.md) 起草设计。编写或完成受治理 Design 前读取 [action-design.technical.yaml](references/action-design.technical.yaml)。
 

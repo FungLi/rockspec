@@ -8,7 +8,7 @@ scenario_ids: [{{scenario_ids}}]
 decision_ids: [{{decision_ids}}]
 ---
 
-# 原型 Brief
+# 原型说明
 
 - Change ID：`{{change_id}}`
 - Requirements Hash：`{{requirements_hash}}`

@@ -5,14 +5,14 @@ reviewer_execution_id: TODO
 findings: []
 ---
 
-# Readiness Review
+# 实施就绪评审
 
 Verdict: BLOCKED
 
-## Assessment
+## 评估
 
 TODO
 
-## Findings
+## 评审发现
 
 For every non-PASS verdict, add at least one Open Finding to Frontmatter and explain it here.

@@ -19,6 +19,10 @@ Engine 是唯一的工作流状态写入者。编排器可以编辑已声明的�
 
 正常编排只读取 `status --view summary --json`。Task 调度、Recovery 和 Hash 新鲜度核对使用对应定向视图；mutation 命令需要机器可读返回时附加全局 `--summary --json`。完整 Change、历史 Revision、Review 和 Evidence 留在磁盘，除非正在诊断 Runtime 状态，不得反复打印到模型上下文。Artifact Hash 未变化时复用已读取的结论，只对变化路径读取定向 Diff。
 
+发生上下文压缩或会话续接时先读取 `status --view resume`，把它作为 Change/Gate、批准状态、Task、Finding、Execution、Worktree 和下一动作的权威快照；不要手写重述 Engine 已持久化字段。Handoff 只补充 Engine 不知道的用户口头约束、决策意图和未落盘的外部依赖。
+
+正式产物写完、提交对应 Action 前，可用 `rockspec validate <change-id> --artifact <change-relative-path>` 做只读 dry-run。按结构化错误给出的文件、字段、期望类型和合法值直接修正；这只是提前复用现有 Schema，不增加新的人工 Gate。
+
 ## Agent 矩阵
 
 | Action | Agent | 写入范围 | 隔离要求 |
@@ -29,10 +33,10 @@ Engine 是唯一的工作流状态写入者。编排器可以编辑已声明的�
 | `task.review` | Task Change Reviewer | 仅自己的报告 | 必须不同于 Implementer |
 | `acceptance.validate` | Acceptance Test Engineer | 集成/E2E 资产和证据 | 独立于 Task/Delivery Review |
 | `delivery.review` | Delivery Reviewer | 仅自己的报告 | 验收后执行；固定最终 Diff |
-| `knowledge.evolve`（存在实质 Delta） | Knowledge Reviewer | 仅 `reviews/knowledge-review.md` | 不同于 Delta Author；固定 Source/Delta/基线/候选 Hash |
+| `knowledge.evolve`（包含 normative Delta） | Knowledge Reviewer | 仅 `reviews/knowledge-review.md` | 不同于 Delta Author；固定 Source/Delta/基线/候选 Hash |
 
 Strict Review Action 启动两个相互独立的 Reviewer，全部完成后再聚合。
-Knowledge Review 为收尾阶段的轻量语义对账，各 Profile 使用一个独立 Reviewer；`normative` 更新另需用户明确确认。
+纯 `derived` Knowledge Delta 由 Author 内联自检和 Engine 确定性校验完成，不启动 Reviewer。包含 `normative` 更新时，各 Profile 使用一个独立 Knowledge Reviewer，并另需用户明确确认。
 
 ## 在线作者与控制权
 
