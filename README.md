@@ -18,16 +18,31 @@ RockSpec 是面向编码 agent 的**受治理变更交付**框架。主会话扮
 
 ## 组成
 
+skill 分三层：**角色**（身份 + 边界，薄）引用**能力**（可复用动词，跨角色共享），共享结构沉在**引用层**。
+
 ```text
 packages/ledger/     # @rockspec/ledger —— 自包含的 Ledger + Hook + CLI
+
+# 角色层（身份 + 边界，引用能力）
 skills/rockspec-pm/       # PM 编排器
 skills/rockspec-ba/       # 业务分析师（需求）
 skills/rockspec-sa/       # 方案架构师（设计 + Task）
 skills/rockspec-rr/       # 就绪评审员（PROPOSE 出口硬校验）
-skills/rockspec-dev/      # 开发（TDD）
-skills/rockspec-cr/       # 代码审查
-skills/rockspec-te/       # 测试（4 类验收）
-skills/rockspec-glossary/ # 结论协议 / Hook mark / Finish 不变式 词汇表
+skills/rockspec-dev/      # 开发工程师
+skills/rockspec-cr/       # 代码审查员
+skills/rockspec-te/       # 测试工程师
+
+# 引用层（共享事实源）
+skills/rockspec-glossary/ # 结论协议 / Hook mark / Finish 不变式 / 看板 / CLI 词汇表
+skills/rockspec-team/     # PM 组织图：角色拓扑 / 制衡矩阵 / 两阶段 / 回退路由 / 调度模式
+
+# 能力层（可复用动词，跨角色共享）
+skills/rockspec-adversarial-review/  # 对抗式评审纪律（RR/CR/TE 共用）
+skills/rockspec-inline-cocreation/   # inline 共创（BA/SA 首次）
+skills/rockspec-isolated-rework/     # 隔离返工（BA/SA/Dev 被打回）
+skills/rockspec-tdd/                 # 强制 TDD（Dev）
+skills/rockspec-gwt-requirements/    # 可测试需求结构（BA）
+skills/rockspec-4class-testing/      # 四类测试（TE）
 ```
 
 `@rockspec/ledger` 只依赖 `yaml` / `zod` / `commander`，无其他内部包依赖。
@@ -80,5 +95,5 @@ Change 状态存于目标仓库的 `.rockspec/changes/<id>/`：`change.yaml`（�
 
 ## 状态
 
-- 已实现：Ledger（事件日志 + 投影）、Hook 层、结论协议、subject_hash 绑定、Finish 不变式、放漂三级、`rockspec`→`rockspec` CLI 全链路、7 角色 + 词汇表 skill。
+- 已实现：Ledger（事件日志 + 投影）、Hook 层、结论协议、subject_hash 绑定、Finish 不变式、放漂三级、`rockspec` CLI 全链路、三层 15 个 skill（7 角色 + 2 引用 + 6 能力）。
 - 已知边界（见执行计划文档）：model tier 强制门待接 host adapter；code 证据检测待接 git；Ledger 多进程锁；skill 的 host 分发集成。

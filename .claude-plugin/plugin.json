@@ -21,6 +21,13 @@
     "./skills/rockspec-dev",
     "./skills/rockspec-cr",
     "./skills/rockspec-te",
-    "./skills/rockspec-glossary"
+    "./skills/rockspec-glossary",
+    "./skills/rockspec-team",
+    "./skills/rockspec-adversarial-review",
+    "./skills/rockspec-inline-cocreation",
+    "./skills/rockspec-isolated-rework",
+    "./skills/rockspec-tdd",
+    "./skills/rockspec-gwt-requirements",
+    "./skills/rockspec-4class-testing"
   ]
 }
