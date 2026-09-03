@@ -27031,6 +27031,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 var execFileAsync = promisify(execFile);
+var GIT_MAX_BUFFER = 64 * 1024 * 1024;
 var DEFAULT_CONFIG = {
   schema_version: 1,
   default_profile: "standard",
@@ -27096,7 +27097,7 @@ async function resolveRepository(cwd) {
 }
 async function git(root, args) {
   try {
-    const result = await execFileAsync("git", args, { cwd: root });
+    const result = await execFileAsync("git", args, { cwd: root, maxBuffer: GIT_MAX_BUFFER });
     return result.stdout.trimEnd();
   } catch (error51) {
     throw new RockSpecError("GIT_COMMAND_FAILED", `git ${args.join(" ")} failed`, {
@@ -27107,7 +27108,7 @@ async function git(root, args) {
 }
 async function optionalGit(root, args) {
   try {
-    const result = await execFileAsync("git", args, { cwd: root });
+    const result = await execFileAsync("git", args, { cwd: root, maxBuffer: GIT_MAX_BUFFER });
     return result.stdout.trimEnd();
   } catch {
     return null;
@@ -30051,8 +30052,8 @@ var RockSpecEngine = class {
       } else {
         await this.assertFreshEvidence(context.root, change, { taskId: input.taskId, commit: evidenceCommit }, true);
       }
-      const coveredCommands = new Set(change.evidence.filter((item) => item.task_id === input.taskId && item.commit === evidenceCommit && item.source === "executed" && item.exit_code === 0).map((item) => item.command.trim()));
-      const missingValidationCommands = task.validation_commands.filter((command) => !coveredCommands.has(command.trim()));
+      const coveredCommands = change.evidence.filter((item) => item.task_id === input.taskId && item.commit === evidenceCommit && item.source === "executed" && item.exit_code === 0).map((item) => item.command);
+      const missingValidationCommands = task.validation_commands.filter((command) => !coveredCommands.some((coveredCommand) => commandsEquivalent(command, coveredCommand)));
       if (missingValidationCommands.length > 0) {
         throw new RockSpecError("TASK_VALIDATION_EVIDENCE_MISSING", `Task ${input.taskId} \u7F3A\u5C11\u58F0\u660E\u9A8C\u8BC1\u547D\u4EE4\u7684\u65B0\u9C9C\u6210\u529F\u8BC1\u636E`, {
           task_id: input.taskId,
@@ -33439,6 +33440,75 @@ function sameReviewSubject(left, right) {
 }
 function formatCommand(executable, args) {
   return [executable, ...args].map((part) => /^[a-zA-Z0-9_./:=+-]+$/.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`).join(" ");
+}
+function commandsEquivalent(left, right) {
+  const leftTrimmed = left.trim();
+  const rightTrimmed = right.trim();
+  if (leftTrimmed === rightTrimmed)
+    return true;
+  const leftWords = parseSimpleCommand(leftTrimmed);
+  const rightWords = parseSimpleCommand(rightTrimmed);
+  return leftWords !== void 0 && rightWords !== void 0 && leftWords.length === rightWords.length && leftWords.every((word, index) => word === rightWords[index]);
+}
+function parseSimpleCommand(command) {
+  const words = [];
+  let current = "";
+  let tokenStarted = false;
+  let quote;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      tokenStarted = true;
+      escaped = false;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'")
+        quote = void 0;
+      else
+        current += character;
+      tokenStarted = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"')
+        quote = void 0;
+      else if (character === "\\")
+        escaped = true;
+      else
+        current += character;
+      tokenStarted = true;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      tokenStarted = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      tokenStarted = true;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (tokenStarted) {
+        words.push(current);
+        current = "";
+        tokenStarted = false;
+      }
+      continue;
+    }
+    if (/[|&;<>()$`*?![\]]/.test(character))
+      return void 0;
+    current += character;
+    tokenStarted = true;
+  }
+  if (escaped || quote !== void 0)
+    return void 0;
+  if (tokenStarted)
+    words.push(current);
+  return words.length > 0 ? words : void 0;
 }
 function changedArtifactPaths(previous, current) {
   return [.../* @__PURE__ */ new Set([...Object.keys(previous), ...Object.keys(current)])].filter((key) => previous[key] !== current[key]).sort();

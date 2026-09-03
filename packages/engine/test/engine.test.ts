@@ -433,6 +433,39 @@ describe("RockSpecEngine", () => {
     });
   });
 
+  it("enforces execution slots, heartbeat expiry, and reap", async () => {
+    const root = await repository();
+    let current = new Date("2026-08-23T00:00:00.000Z");
+    const engine = new RockSpecEngine({ cwd: root, now: () => current });
+    await engine.init();
+    const id = "execution-lifecycle-guards";
+    await engine.newChange({ id, profile: "standard" });
+    const started = await engine.startExecution({
+      changeId: id,
+      action: "requirements.review",
+      role: "requirements_reviewer",
+      slotKey: "requirements-review",
+      timeoutMs: 1_000,
+    });
+    await expect(engine.startExecution({
+      changeId: id,
+      action: "requirements.review",
+      role: "requirements_reviewer",
+      slotKey: "requirements-review",
+    })).rejects.toMatchObject({ code: "EXECUTION_SLOT_ACTIVE" });
+    current = new Date("2026-08-23T00:00:02.000Z");
+    await expect(engine.completeExecution({
+      changeId: id,
+      executionId: started.started_execution.id,
+      outcome: "success",
+    })).rejects.toMatchObject({ code: "EXECUTION_EXPIRED" });
+    const reaped = await engine.reapExecutions({ changeId: id, now: "2026-08-23T00:00:02.000Z" });
+    expect(reaped.change.execution.registry[0]).toMatchObject({
+      outcome: "cancelled",
+      timeout_reason: "deadline_exceeded",
+    });
+  });
+
   it("verifies execution context path/hash bindings and records their trust state", async () => {
     const root = await repository();
     const engine = new RockSpecEngine({ cwd: root });
@@ -1753,7 +1786,7 @@ describe("RockSpecEngine", () => {
       allowedPath: "primary.ts",
       produces: ["primary-result.v1"],
       validationCommands: [
-        `${process.execPath} -e 'process.exit(0)'`,
+        `${process.execPath} -e "process.exit(0)"`,
         `${process.execPath} -e 'process.stdout.write("validated")'`,
       ],
     }));

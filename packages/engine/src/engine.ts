@@ -2304,11 +2304,11 @@ export class RockSpecEngine {
       } else {
         await this.assertFreshEvidence(context.root, change, { taskId: input.taskId, commit: evidenceCommit }, true);
       }
-      const coveredCommands = new Set(change.evidence
+      const coveredCommands = change.evidence
         .filter((item) => item.task_id === input.taskId && item.commit === evidenceCommit && item.source === "executed" && item.exit_code === 0)
-        .map((item) => item.command.trim()));
+        .map((item) => item.command);
       const missingValidationCommands = task.validation_commands
-        .filter((command) => !coveredCommands.has(command.trim()));
+        .filter((command) => !coveredCommands.some((coveredCommand) => commandsEquivalent(command, coveredCommand)));
       if (missingValidationCommands.length > 0) {
         throw new RockSpecError(
           "TASK_VALIDATION_EVIDENCE_MISSING",
@@ -6229,6 +6229,72 @@ function formatCommand(executable: string, args: string[]): string {
   return [executable, ...args].map((part) => /^[a-zA-Z0-9_./:=+-]+$/.test(part)
     ? part
     : `'${part.replaceAll("'", `'\\''`)}'`).join(" ");
+}
+
+function commandsEquivalent(left: string, right: string): boolean {
+  const leftTrimmed = left.trim();
+  const rightTrimmed = right.trim();
+  if (leftTrimmed === rightTrimmed) return true;
+  const leftWords = parseSimpleCommand(leftTrimmed);
+  const rightWords = parseSimpleCommand(rightTrimmed);
+  return leftWords !== undefined && rightWords !== undefined &&
+    leftWords.length === rightWords.length && leftWords.every((word, index) => word === rightWords[index]);
+}
+
+function parseSimpleCommand(command: string): string[] | undefined {
+  const words: string[] = [];
+  let current = "";
+  let tokenStarted = false;
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      tokenStarted = true;
+      escaped = false;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      else current += character;
+      tokenStarted = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') quote = undefined;
+      else if (character === "\\") escaped = true;
+      else current += character;
+      tokenStarted = true;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      tokenStarted = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      tokenStarted = true;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (tokenStarted) {
+        words.push(current);
+        current = "";
+        tokenStarted = false;
+      }
+      continue;
+    }
+    // Shell operators and expansions cannot be represented by runCheck's argv.
+    if (/[|&;<>()$`*?![\]]/.test(character)) return undefined;
+    current += character;
+    tokenStarted = true;
+  }
+
+  if (escaped || quote !== undefined) return undefined;
+  if (tokenStarted) words.push(current);
+  return words.length > 0 ? words : undefined;
 }
 
 function changedArtifactPaths(

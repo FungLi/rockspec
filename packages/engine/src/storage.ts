@@ -31,6 +31,11 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
+// Review packages may contain a complete binary-aware Git diff. Node's
+// execFile default stdout limit is 1 MiB, which is too small for otherwise
+// valid Changes and forces callers to patch an installed runtime ad hoc.
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+
 export type RockSpecConfig = Config;
 
 export interface GitWorkspaceContext {
@@ -114,7 +119,7 @@ export async function resolveRepository(cwd: string): Promise<{ root: string; ro
 
 export async function git(root: string, args: string[]): Promise<string> {
   try {
-    const result = await execFileAsync("git", args, { cwd: root });
+    const result = await execFileAsync("git", args, { cwd: root, maxBuffer: GIT_MAX_BUFFER });
     return result.stdout.trimEnd();
   } catch (error) {
     throw new RockSpecError("GIT_COMMAND_FAILED", `git ${args.join(" ")} failed`, {
@@ -126,7 +131,7 @@ export async function git(root: string, args: string[]): Promise<string> {
 
 async function optionalGit(root: string, args: string[]): Promise<string | null> {
   try {
-    const result = await execFileAsync("git", args, { cwd: root });
+    const result = await execFileAsync("git", args, { cwd: root, maxBuffer: GIT_MAX_BUFFER });
     return result.stdout.trimEnd();
   } catch {
     return null;
