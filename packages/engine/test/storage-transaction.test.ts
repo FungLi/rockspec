@@ -8,7 +8,7 @@ import { parseChangeSnapshot, type ChangeSnapshot } from "@rockspec/protocol";
 import { parse, stringify } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { RockSpecEngine } from "../src/index.js";
-import { readChange } from "../src/storage.js";
+import { git, readChange } from "../src/storage.js";
 
 const execFileAsync = promisify(execFile);
 const repositories: string[] = [];
@@ -94,5 +94,27 @@ describe("state transaction recovery", () => {
     await writeFile(path.join(changeDir, "runtime", "state-transaction.yaml"), journal);
 
     await expect(readChange(changeDir)).rejects.toMatchObject({ code: "STATE_TRANSACTION_DIVERGED" });
+  });
+});
+
+describe("Git output handling", () => {
+  it("supports review diffs larger than Node's default stdout buffer", async () => {
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "rockspec-large-diff-")));
+    repositories.push(root);
+    await execFileAsync("git", ["init", "-b", "main"], { cwd: root });
+    await execFileAsync("git", ["config", "user.email", "large-diff@rockspec.local"], { cwd: root });
+    await execFileAsync("git", ["config", "user.name", "RockSpec Large Diff Test"], { cwd: root });
+    await writeFile(path.join(root, "large.txt"), "before\n");
+    await execFileAsync("git", ["add", "large.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "test: initial large diff fixture"], { cwd: root });
+
+    const largeContent = `${"x".repeat(1_200_000)}\n`;
+    await writeFile(path.join(root, "large.txt"), largeContent);
+    await execFileAsync("git", ["add", "large.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "-m", "test: create large diff"], { cwd: root });
+
+    const output = await git(root, ["diff", "HEAD^", "HEAD"]);
+    expect(output.length).toBeGreaterThan(1_000_000);
+    expect(output).toContain(`+${largeContent.trimEnd()}`);
   });
 });
